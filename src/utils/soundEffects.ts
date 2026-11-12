@@ -1,6 +1,6 @@
 /**
- * Web Audio API Retro Sound Synthesizer
- * Generates authentic arcade & cash register sound effects without external assets.
+ * Web Audio API 80s Retro Sound Synthesizer (PALLADIUM HANAU ALPHA 0.1)
+ * Pure procedural synthesis — zero external MP3 dependencies.
  */
 
 class RetroSoundEffects {
@@ -11,7 +11,8 @@ class RetroSoundEffects {
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
       if (AudioCtx) {
         this.ctx = new AudioCtx();
       }
@@ -22,106 +23,187 @@ class RetroSoundEffects {
     return this.ctx;
   }
 
-  /**
-   * Classic mechanical + neon Cash Register "Ka-Ching!" sound for the Cashier Time-Jump.
-   */
-  public playKaChing(): void {
+  /** Warm 80s synth chord when opening the First-Visit Velvet Curtain */
+  public playCurtainReveal(): void {
     const ctx = this.getContext();
     if (!ctx) return;
-
     const now = ctx.currentTime;
-
-    // 1. "Ka-" (Short mechanical drawer latch click/thud)
-    const osc1 = ctx.createOscillator();
-    const gain1 = ctx.createGain();
-    osc1.type = 'triangle';
-    osc1.frequency.setValueAtTime(190, now);
-    osc1.frequency.exponentialRampToValueAtTime(520, now + 0.065);
-    gain1.gain.setValueAtTime(0.26, now);
-    gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.075);
-    osc1.connect(gain1);
-    gain1.connect(ctx.destination);
-    osc1.start(now);
-    osc1.stop(now + 0.08);
-
-    // 2. "-Ching!" (Bright metallic bell harmonic pair)
-    const bellFreqs = [1567.98, 2093.0, 2637.02, 3135.96]; // G6, C7, E7, G7
-    bellFreqs.forEach((freq, idx) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = idx % 2 === 0 ? 'sine' : 'triangle';
-      const startTime = now + 0.085 + idx * 0.02;
-      osc.frequency.setValueAtTime(freq, startTime);
-      gain.gain.setValueAtTime(0.16 / (idx * 0.5 + 1), startTime);
-      gain.gain.exponentialRampToValueAtTime(0.0008, startTime + 0.75);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(startTime);
-      osc.stop(startTime + 0.78);
-    });
-  }
-
-  /**
-   * Sparkling 80s synth arpeggio when redeeming a Slush-Puppie Speed Boost token.
-   */
-  public playSlushBoost(): void {
-    const ctx = this.getContext();
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5]; // C5 E5 G5 C6 E6
+    const notes = [261.63, 329.63, 392.0, 523.25, 659.25]; // C major 9th synth swell
     notes.forEach((freq, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sawtooth';
-      const t = now + i * 0.055;
+      const t = now + i * 0.06;
       osc.frequency.setValueAtTime(freq, t);
-      gain.gain.setValueAtTime(0.11, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.08, t + 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t + 1.1);
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start(t);
-      osc.stop(t + 0.3);
+      osc.stop(t + 1.15);
     });
   }
 
-  /**
-   * Playful whoosh sound when triggering a 360° spin.
-   */
+  /** Playful whoosh when triggering a 360° spin (`[Space]` / `[Q]` / Pad-B) */
   public playSpin360(): void {
     const ctx = this.getContext();
     if (!ctx) return;
-
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(280, now);
-    osc.frequency.exponentialRampToValueAtTime(720, now + 0.22);
-    osc.frequency.exponentialRampToValueAtTime(340, now + 0.42);
-    gain.gain.setValueAtTime(0.12, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.44);
+    osc.frequency.exponentialRampToValueAtTime(760, now + 0.2);
+    osc.frequency.exponentialRampToValueAtTime(360, now + 0.4);
+    gain.gain.setValueAtTime(0.11, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(now);
-    osc.stop(now + 0.45);
+    osc.stop(now + 0.43);
   }
 
-  /**
-   * Short chime when a lap is completed or Slush token recharges.
-   */
-  public playTokenRecharged(): void {
+  /** Crisp upward spring sound when jumping (`[J]` / `[Shift]` / Pad-A) */
+  public playJump(): void {
     const ctx = this.getContext();
     if (!ctx) return;
-
     const now = ctx.currentTime;
-    [880, 1174.66].forEach((freq, idx) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(210, now);
+    osc.frequency.exponentialRampToValueAtTime(590, now + 0.22);
+    gain.gain.setValueAtTime(0.14, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.26);
+  }
+
+  /** Skate Guard shrill whistle ("Trrriiiiieeeet!") with rapid pea-trill modulation */
+  public playSkateGuardWhistle(): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    for (let i = 0; i < 6; i++) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      const t = now + i * 0.055;
+      osc.frequency.setValueAtTime(2750 + (i % 2) * 280, t);
+      gain.gain.setValueAtTime(0.12, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.052);
+    }
+  }
+
+  /** Refreshing arpeggio for Slush-Puppie or fizzy Bloba Cola pickup */
+  public playDrinkRefresh(): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((freq, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
-      const t = now + idx * 0.08;
+      const t = now + i * 0.055;
       osc.frequency.setValueAtTime(freq, t);
-      gain.gain.setValueAtTime(0.13, t);
+      gain.gain.setValueAtTime(0.11, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.26);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.28);
+    });
+  }
+
+  /** Neon Softball throw or hit sound in Ballspiel mode */
+  public playBallThrowOrHit(isHit = false): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = isHit ? 'square' : 'sine';
+    osc.frequency.setValueAtTime(isHit ? 640 : 420, now);
+    osc.frequency.exponentialRampToValueAtTime(isHit ? 180 : 190, now + 0.14);
+    gain.gain.setValueAtTime(0.11, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.16);
+  }
+
+  /** Slalom Gate passed combo chime */
+  public playSlalomCombo(comboCount: number): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    const baseFreq = Math.min(1400, 440 + comboCount * 55);
+    osc.frequency.setValueAtTime(baseFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.25, now + 0.12);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.16);
+  }
+
+  /** Bump or seat-slide crash sound (plus DJ record scratch on heavy crash) */
+  public playCrash(heavyScratch = false): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    if (heavyScratch) {
+      osc.frequency.setValueAtTime(620, now);
+      osc.frequency.linearRampToValueAtTime(140, now + 0.16);
+      osc.frequency.linearRampToValueAtTime(510, now + 0.32);
+      osc.frequency.linearRampToValueAtTime(95, now + 0.55);
+      gain.gain.setValueAtTime(0.16, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.58);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.6);
+    } else {
+      osc.frequency.setValueAtTime(160, now);
+      osc.frequency.exponentialRampToValueAtTime(55, now + 0.18);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.21);
+    }
+  }
+
+  /** Victory jingle when unlocking a Challenge / Pro-Shop Upgrade */
+  public playChallengeUnlocked(): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = [587.33, 783.99, 987.77, 1174.66]; // D5 G5 B5 D6
+    notes.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'square';
+      const t = now + i * 0.08;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.09, t);
       gain.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
       osc.connect(gain);
       gain.connect(ctx.destination);
