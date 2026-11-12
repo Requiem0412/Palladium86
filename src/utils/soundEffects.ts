@@ -5,9 +5,18 @@
 
 class RetroSoundEffects {
   private ctx: AudioContext | null = null;
+  private muted = false;
+
+  public setMuted(muted: boolean): void {
+    this.muted = muted;
+  }
+
+  public isMuted(): boolean {
+    return this.muted;
+  }
 
   private getContext(): AudioContext | null {
-    if (typeof window === 'undefined') return null;
+    if (typeof window === 'undefined' || this.muted) return null;
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||

@@ -1,9 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import {
   ARENA_LAYOUT,
+  ArenaVisualStyle,
+  BandGenderMode,
+  BandSkinToneMode,
   CameraViewMode,
   CenterStageMode,
   ChallengeId,
+  ConcertLightingMode,
   HallGameMode,
   LightingMode,
   PlayerCharacterMode,
@@ -12,6 +16,7 @@ import {
   WORLD_WIDTH,
 } from '../config/arenaConfig';
 import { soundFX } from '../utils/soundEffects';
+import { SingleplayerDifficulty } from '../utils/storageAndStats';
 
 export interface ArenaLiveTelemetry {
   x: number;
@@ -27,8 +32,10 @@ export interface ArenaLiveTelemetry {
   freeSlushCount: number;
   freeBlobaCount: number;
   nearProShop: boolean;
+  nearSkateRental: boolean;
   nearBistroCounter: boolean;
   nearDjTower: boolean;
+  hasSkatesEquipped: boolean;
   djAudioProximity: number; // 0.15 .. 1.0
   gamepadConnected: boolean;
   gamepadName: string;
@@ -37,22 +44,66 @@ export interface ArenaLiveTelemetry {
   slalomCombo: number;
 }
 
+export interface MultiplayerPlayerState {
+  peerId: string;
+  name: string;
+  shirtColor: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  headingRad: number;
+  spinAngleOffset: number;
+  isSpinning: boolean;
+  jumpZ: number;
+  isJumping: boolean;
+  characterMode: PlayerCharacterMode;
+  kengolHat: boolean;
+  crashTimer: number;
+  speechBubble: string | null;
+}
+
+interface InterpolatedRemotePlayer extends MultiplayerPlayerState {
+  renderX: number;
+  renderY: number;
+  renderHeading: number;
+  renderJumpZ: number;
+}
+
 interface RollerArenaEngineProps {
   playerName: string;
+  playerShirtColor?: string;
   isAnonymousGuest: boolean;
   showNames: boolean;
   characterMode: PlayerCharacterMode;
+  difficulty: SingleplayerDifficulty;
+  hasOwnSkates: boolean;
+  hasRentedSkates: boolean;
+  drinkChipAvailable: boolean;
+  npcVoicesEnabled: boolean;
+  skateGuardWhistleEnabled: boolean;
+  concertLightingMode: ConcertLightingMode;
+  arenaStyle: ArenaVisualStyle;
+  activeDjName: string;
+  isMuted: boolean;
   cameraMode: CameraViewMode;
   lightingMode: LightingMode;
   centerStageMode: CenterStageMode;
   activeBandName: string;
+  bandSkinTone: BandSkinToneMode;
+  bandGender: BandGenderMode;
   hallGameMode: HallGameMode;
   djTickerText: string;
   specialSkaters: string[];
   ghostSkatersEnabled: boolean;
   kengolHatEnabled: boolean;
   upgrades: ProShopUpgradesState;
+  fogMachineEnabled: boolean;
+  fogBurstCount: number;
   isCurtainOpen: boolean;
+  isMultiplayerActive?: boolean;
+  remotePlayers?: MultiplayerPlayerState[];
+  onLocalPlayerState?: (state: Omit<MultiplayerPlayerState, 'peerId'>) => void;
   onToggleCamera: () => void;
   onToggleCharacterMode: () => void;
   onToggleShowNames: () => void;
@@ -62,6 +113,8 @@ interface RollerArenaEngineProps {
   onOpenChronicleModal: () => void;
   onEnterHallFromGamepad: () => void;
   onToggleTwitchStream?: () => void;
+  onRedeemDrinkChipAtRental: () => void;
+  onRedeemDrinkChipAtBistro: () => void;
   onChallengeProgress: (
     id: ChallengeId,
     amount: number,
@@ -220,22 +273,666 @@ function computeTrackOvalPoint(
   };
 }
 
+/**
+ * Computes starting position based on Singleplayer Experience Level (`beginner` | `intermediate` | `pro`)
+ * and whether the player enters directly on skates or on street shoes needing the Rollschuh-Verleih first.
+ */
+function getPlayerStartCoords(
+  diff: SingleplayerDifficulty,
+  hasSkatesEquipped: boolean
+): { x: number; y: number; headingRad: number } {
+  if (!hasSkatesEquipped) {
+    // Player entered without own skates -> start on outer carpet near Kasse/Rollschuh-Verleih!
+    return { x: 1580, y: 925, headingRad: Math.PI };
+  }
+  if (diff === 'beginner') {
+    // 🟢 Anfänger: Safe start on the inner lane near the center stage
+    return { x: 1185, y: 660, headingRad: -Math.PI / 2 };
+  }
+  if (diff === 'pro') {
+    // 🔴 Profi: Challenging start further out on the fast outer lane
+    return { x: 1465, y: 785, headingRad: -Math.PI / 2 };
+  }
+  // 🟡 Fortgeschrittener: Balanced start on the middle lane
+  return { x: 1320, y: 725, headingRad: -Math.PI / 2 };
+}
+
+/**
+ * Builds the AI NPC roster dynamically scaled for Singleplayer Experience Level:
+ * - `beginner` (🟢 Anfänger): ~9 AI skaters, calmer speed (0.76x), only 1 speed skater
+ * - `intermediate` (🟡 Fortgeschrittener): 14 AI skaters, normal disco speed (1.0x), 4 speed skaters
+ * - `pro` (🔴 Profi): 23 AI skaters ("Samstagabend Volles Haus"), faster speed (1.18x), 6 speed skaters in outer paceline
+ */
+function buildTrackNpcsForDifficulty(diff: SingleplayerDifficulty): TrackNpc[] {
+  const speedScale =
+    diff === 'beginner' ? 0.76 : diff === 'pro' ? 1.18 : 1.0;
+
+  const allSpeedSkaters: TrackNpc[] = [
+    {
+      id: 'speed-1',
+      name: 'Paceline-Leader Kai',
+      gender: 'male',
+      role: 'speed',
+      orbitAngle: 0.48,
+      laneRadiusX: 668,
+      laneRadiusY: 336,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.92 * speedScale,
+      shirtColor: '#dc2626',
+      accentColor: '#fde047',
+      wheelColor: '#38bdf8',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'speed-2',
+      name: 'Aero-Anja',
+      gender: 'female',
+      role: 'speed',
+      orbitAngle: 0.36,
+      laneRadiusX: 668,
+      laneRadiusY: 336,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.92 * speedScale,
+      shirtColor: '#dc2626',
+      accentColor: '#38bdf8',
+      wheelColor: '#fde047',
+      legwarmerColor: '#ff2a85',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'speed-3',
+      name: 'Turbo-Marek',
+      gender: 'male',
+      role: 'speed',
+      orbitAngle: 0.24,
+      laneRadiusX: 668,
+      laneRadiusY: 336,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.92 * speedScale,
+      shirtColor: '#dc2626',
+      accentColor: '#39ff14',
+      wheelColor: '#ec4899',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'speed-4',
+      name: 'Sprint-Sonja',
+      gender: 'female',
+      role: 'speed',
+      orbitAngle: 0.12,
+      laneRadiusX: 668,
+      laneRadiusY: 336,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.92 * speedScale,
+      shirtColor: '#dc2626',
+      accentColor: '#f472b6',
+      wheelColor: '#00f0ff',
+      legwarmerColor: '#00f0ff',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'speed-5',
+      name: 'Raketen-Ralf',
+      gender: 'male',
+      role: 'speed',
+      orbitAngle: 0.0,
+      laneRadiusX: 668,
+      laneRadiusY: 336,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.92 * speedScale,
+      shirtColor: '#b91c1c',
+      accentColor: '#00f0ff',
+      wheelColor: '#39ff14',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'speed-6',
+      name: 'Blitz-Bianca',
+      gender: 'female',
+      role: 'speed',
+      orbitAngle: -0.12,
+      laneRadiusX: 668,
+      laneRadiusY: 336,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.92 * speedScale,
+      shirtColor: '#b91c1c',
+      accentColor: '#fde047',
+      wheelColor: '#ff2a85',
+      legwarmerColor: '#39ff14',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+  ];
+
+  const guards: TrackNpc[] = [
+    {
+      id: 'guard-1',
+      name: 'SKATE GUARD Manni',
+      gender: 'male',
+      role: 'guard',
+      orbitAngle: 1.2,
+      laneRadiusX: 542,
+      laneRadiusY: 262,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.68 * speedScale,
+      shirtColor: '#070a10',
+      accentColor: '#39ff14',
+      wheelColor: '#39ff14',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'guard-2',
+      name: 'SKATE GUARD Biggi',
+      gender: 'female',
+      role: 'guard',
+      orbitAngle: 4.34,
+      laneRadiusX: 542,
+      laneRadiusY: 262,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.68 * speedScale,
+      shirtColor: '#070a10',
+      accentColor: '#39ff14',
+      wheelColor: '#39ff14',
+      legwarmerColor: '#39ff14',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+  ];
+
+  const allRegularSkaters: TrackNpc[] = [
+    {
+      id: 'reg-1',
+      name: 'Disco-Dieter',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 2.1,
+      laneRadiusX: 495,
+      laneRadiusY: 245,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.56 * speedScale,
+      shirtColor: '#1e3a8a',
+      accentColor: '#38bdf8',
+      wheelColor: '#f472b6',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-2',
+      name: 'Neon-Nadine',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 3.4,
+      laneRadiusX: 472,
+      laneRadiusY: 234,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.61 * speedScale,
+      shirtColor: '#701a75',
+      accentColor: '#f472b6',
+      wheelColor: '#00f0ff',
+      legwarmerColor: '#fde047',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-3',
+      name: 'WCMX-Marco',
+      gender: 'male',
+      role: 'wheelchair-npc',
+      orbitAngle: 5.1,
+      laneRadiusX: 518,
+      laneRadiusY: 254,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.63 * speedScale,
+      shirtColor: '#065f46',
+      accentColor: '#39ff14',
+      wheelColor: '#00f0ff',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-4',
+      name: 'Slalom-Steffi',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 0.9,
+      laneRadiusX: 462,
+      laneRadiusY: 228,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.58 * speedScale,
+      shirtColor: '#4c1d95',
+      accentColor: '#c084fc',
+      wheelColor: '#39ff14',
+      legwarmerColor: '#f472b6',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-5',
+      name: 'Boogie-Bernd',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 2.75,
+      laneRadiusX: 575,
+      laneRadiusY: 284,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.59 * speedScale,
+      shirtColor: '#0f766e',
+      accentColor: '#2dd4bf',
+      wheelColor: '#fde047',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-6',
+      name: 'Glitter-Gabi',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 4.05,
+      laneRadiusX: 602,
+      laneRadiusY: 298,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.57 * speedScale,
+      shirtColor: '#9d174d',
+      accentColor: '#f472b6',
+      wheelColor: '#38bdf8',
+      legwarmerColor: '#00f0ff',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-7',
+      name: 'Synth-Sven',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 1.55,
+      laneRadiusX: 615,
+      laneRadiusY: 304,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.62 * speedScale,
+      shirtColor: '#1d4ed8',
+      accentColor: '#fde047',
+      wheelColor: '#39ff14',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-8',
+      name: 'Lady-Lisa',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 5.65,
+      laneRadiusX: 560,
+      laneRadiusY: 276,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.60 * speedScale,
+      shirtColor: '#6b21a8',
+      accentColor: '#e879f9',
+      wheelColor: '#fde047',
+      legwarmerColor: '#39ff14',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-9',
+      name: 'Retro-Rico',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 0.45,
+      laneRadiusX: 525,
+      laneRadiusY: 258,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.58 * speedScale,
+      shirtColor: '#b45309',
+      accentColor: '#fde047',
+      wheelColor: '#00f0ff',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-10',
+      name: 'Disco-Dora',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 3.05,
+      laneRadiusX: 508,
+      laneRadiusY: 250,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.57 * speedScale,
+      shirtColor: '#be185d',
+      accentColor: '#00f0ff',
+      wheelColor: '#ff2a85',
+      legwarmerColor: '#fde047',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-11',
+      name: 'Funky-Frank',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 4.75,
+      laneRadiusX: 588,
+      laneRadiusY: 290,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.61 * speedScale,
+      shirtColor: '#0369a1',
+      accentColor: '#39ff14',
+      wheelColor: '#f472b6',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-12',
+      name: 'Wave-Wendy',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 1.85,
+      laneRadiusX: 452,
+      laneRadiusY: 222,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.56 * speedScale,
+      shirtColor: '#4338ca',
+      accentColor: '#38bdf8',
+      wheelColor: '#fde047',
+      legwarmerColor: '#ff2a85',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-13',
+      name: 'Kassetten-Karsten',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 3.72,
+      laneRadiusX: 632,
+      laneRadiusY: 312,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.63 * speedScale,
+      shirtColor: '#15803d',
+      accentColor: '#fde047',
+      wheelColor: '#00f0ff',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-14',
+      name: 'Pop-Petra',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 5.95,
+      laneRadiusX: 622,
+      laneRadiusY: 308,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.60 * speedScale,
+      shirtColor: '#a21caf',
+      accentColor: '#39ff14',
+      wheelColor: '#38bdf8',
+      legwarmerColor: '#fde047',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'reg-15',
+      name: 'Break-Boris',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 2.42,
+      laneRadiusX: 548,
+      laneRadiusY: 270,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.62 * speedScale,
+      shirtColor: '#3730a3',
+      accentColor: '#f472b6',
+      wheelColor: '#39ff14',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+  ];
+
+  if (diff === 'beginner') {
+    // 🟢 Anfänger: 9 skaters total (1 speed skater, 2 guards, 6 regulars)
+    return [
+      ...allSpeedSkaters.slice(0, 1),
+      ...guards,
+      ...allRegularSkaters.slice(0, 6),
+    ];
+  }
+  if (diff === 'pro') {
+    // 🔴 Profi: 23 skaters total ("Samstagabend Volles Haus": 6 speed skaters, 2 guards, 15 regulars)
+    return [...allSpeedSkaters, ...guards, ...allRegularSkaters];
+  }
+  // 🟡 Fortgeschrittener: 14 skaters total (4 speed skaters, 2 guards, 8 regulars)
+  return [
+    ...allSpeedSkaters.slice(0, 4),
+    ...guards,
+    ...allRegularSkaters.slice(0, 8),
+  ];
+}
+
 export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   playerName,
+  playerShirtColor = '#1e1b4b',
   isAnonymousGuest,
   showNames,
   characterMode,
+  difficulty,
+  hasOwnSkates,
+  hasRentedSkates,
+  drinkChipAvailable,
+  npcVoicesEnabled,
+  skateGuardWhistleEnabled,
+  concertLightingMode,
+  arenaStyle,
+  activeDjName,
+  isMuted,
   cameraMode,
   lightingMode,
   centerStageMode,
   activeBandName,
+  bandSkinTone,
+  bandGender,
   hallGameMode,
   djTickerText,
   specialSkaters,
   ghostSkatersEnabled,
   kengolHatEnabled,
   upgrades,
+  fogMachineEnabled,
+  fogBurstCount,
   isCurtainOpen,
+  isMultiplayerActive = false,
+  remotePlayers = [],
+  onLocalPlayerState,
   onToggleCamera,
   onToggleCharacterMode,
   onToggleShowNames,
@@ -245,27 +942,68 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   onOpenChronicleModal,
   onEnterHallFromGamepad,
   onToggleTwitchStream,
+  onRedeemDrinkChipAtRental,
+  onRedeemDrinkChipAtBistro,
   onChallengeProgress,
   onTelemetry,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fogEnabledRef = useRef<boolean>(fogMachineEnabled);
+  const arenaStyleRef = useRef<ArenaVisualStyle>(arenaStyle || 'classic-neon');
+  const fogBurstTimerRef = useRef<number>(0);
+
+  const triggerFogBurst = () => {
+    fogBurstTimerRef.current = 9.5;
+  };
+
+  useEffect(() => {
+    fogEnabledRef.current = fogMachineEnabled;
+  }, [fogMachineEnabled]);
+
+  useEffect(() => {
+    arenaStyleRef.current = arenaStyle || 'classic-neon';
+  }, [arenaStyle]);
+
+  useEffect(() => {
+    if (fogBurstCount > 0) {
+      triggerFogBurst();
+    }
+  }, [fogBurstCount]);
 
   const propsRef = useRef({
     playerName,
+    playerShirtColor,
     isAnonymousGuest,
     showNames,
     characterMode,
+    difficulty,
+    hasOwnSkates,
+    hasRentedSkates,
+    drinkChipAvailable,
+    npcVoicesEnabled,
+    skateGuardWhistleEnabled,
+    concertLightingMode,
+    arenaStyle,
+    activeDjName,
+    isMuted,
     cameraMode,
     lightingMode,
     centerStageMode,
     activeBandName,
+    bandSkinTone,
+    bandGender,
     hallGameMode,
     djTickerText,
     specialSkaters,
     ghostSkatersEnabled,
     kengolHatEnabled,
     upgrades,
+    fogMachineEnabled,
+    fogBurstCount,
     isCurtainOpen,
+    isMultiplayerActive,
+    remotePlayers,
+    onLocalPlayerState,
     onToggleCamera,
     onToggleCharacterMode,
     onToggleShowNames,
@@ -275,6 +1013,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     onOpenChronicleModal,
     onEnterHallFromGamepad,
     onToggleTwitchStream,
+    onRedeemDrinkChipAtRental,
+    onRedeemDrinkChipAtBistro,
     onChallengeProgress,
     onTelemetry,
   });
@@ -282,20 +1022,38 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   useEffect(() => {
     propsRef.current = {
       playerName,
+      playerShirtColor,
       isAnonymousGuest,
       showNames,
       characterMode,
+      difficulty,
+      hasOwnSkates,
+      hasRentedSkates,
+      drinkChipAvailable,
+      npcVoicesEnabled,
+      skateGuardWhistleEnabled,
+      concertLightingMode,
+      arenaStyle,
+      activeDjName,
+      isMuted,
       cameraMode,
       lightingMode,
       centerStageMode,
       activeBandName,
+      bandSkinTone,
+      bandGender,
       hallGameMode,
       djTickerText,
       specialSkaters,
       ghostSkatersEnabled,
       kengolHatEnabled,
       upgrades,
+      fogMachineEnabled,
+      fogBurstCount,
       isCurtainOpen,
+      isMultiplayerActive,
+      remotePlayers,
+      onLocalPlayerState,
       onToggleCamera,
       onToggleCharacterMode,
       onToggleShowNames,
@@ -305,25 +1063,45 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       onOpenChronicleModal,
       onEnterHallFromGamepad,
       onToggleTwitchStream,
+      onRedeemDrinkChipAtRental,
+      onRedeemDrinkChipAtBistro,
       onChallengeProgress,
       onTelemetry,
     };
   }, [
     playerName,
+    playerShirtColor,
     isAnonymousGuest,
     showNames,
     characterMode,
+    difficulty,
+    hasOwnSkates,
+    hasRentedSkates,
+    drinkChipAvailable,
+    npcVoicesEnabled,
+    skateGuardWhistleEnabled,
+    concertLightingMode,
+    arenaStyle,
+    activeDjName,
+    isMuted,
     cameraMode,
     lightingMode,
     centerStageMode,
     activeBandName,
+    bandSkinTone,
+    bandGender,
     hallGameMode,
     djTickerText,
     specialSkaters,
     ghostSkatersEnabled,
     kengolHatEnabled,
     upgrades,
+    fogMachineEnabled,
+    fogBurstCount,
     isCurtainOpen,
+    isMultiplayerActive,
+    remotePlayers,
+    onLocalPlayerState,
     onToggleCamera,
     onToggleCharacterMode,
     onToggleShowNames,
@@ -333,6 +1111,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     onOpenChronicleModal,
     onEnterHallFromGamepad,
     onToggleTwitchStream,
+    onRedeemDrinkChipAtRental,
+    onRedeemDrinkChipAtBistro,
     onChallengeProgress,
     onTelemetry,
   ]);
@@ -344,14 +1124,24 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     if (!ctx) return;
 
     // ========================================================================
-    // 1. PLAYER & WORLD RUNTIME STATE (STARTS NEAR BOTTOM-RIGHT ENTRANCE GATE 1)
+    // 1. PLAYER & WORLD RUNTIME STATE (SPAWN SCALED BY EXPERIENCE LEVEL & SKATES)
     // ========================================================================
+    const initP = propsRef.current;
+    const initialHasSkates =
+      initP.hasOwnSkates ||
+      initP.hasRentedSkates ||
+      initP.characterMode === 'wheelchair';
+    const initialStart = getPlayerStartCoords(
+      initP.difficulty,
+      initialHasSkates
+    );
+
     const player = {
-      x: 1445,
-      y: 785,
+      x: initialStart.x,
+      y: initialStart.y,
       vx: 0,
       vy: 0,
-      headingRad: -Math.PI / 2,
+      headingRad: initialStart.headingRad,
       radius: 26,
       spinAngleOffset: 0,
       isSpinning: false,
@@ -366,8 +1156,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       guardEscortActive: false,
       slushRemainingSec: 0,
       blobaColaRemainingSec: 0,
-      freeSlushCount: 1,
-      freeBlobaCount: 1,
+      freeSlushCount: initP.drinkChipAvailable ? 1 : 0,
+      freeBlobaCount: initP.drinkChipAvailable ? 1 : 0,
       hasShownWelcomeGift: false,
       slipstreamAccumSec: 0,
       isSlipstreamActive: false,
@@ -383,14 +1173,138 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       slalomCombo: 0,
     };
 
+    // Web Speech API (`window.speechSynthesis`, `de-DE`) with 5s cooldown & character-specific pitch/rate
+    let lastNpcSpeechTime = 0;
+
+    const speakNpcBubble = (
+      rawText: string,
+      speakerName: string,
+      gender: 'female' | 'male'
+    ) => {
+      const p = propsRef.current;
+      if (!p.npcVoicesEnabled || p.isMuted || !p.isCurtainOpen) return;
+      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+        return;
+      }
+      if (window.speechSynthesis.speaking) return;
+      const nowMs = performance.now();
+      if (nowMs - lastNpcSpeechTime < 5000) return;
+
+      // Strip leading emojis and quotation marks for natural German speech synthesis
+      const cleanText = rawText
+        .replace(
+          /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu,
+          ''
+        )
+        .replace(/["„“«»]/g, '')
+        .trim();
+      if (!cleanText) return;
+
+      try {
+        const utterance = new SpeechSynthesisUtterance(cleanText);
+        utterance.lang = 'de-DE';
+        const upperName = speakerName.toUpperCase();
+
+        if (gender === 'female') {
+          if (upperName.includes('SANDRA')) {
+            utterance.pitch = 1.36;
+            utterance.rate = 1.1;
+          } else if (upperName.includes('STEFFI')) {
+            utterance.pitch = 1.32;
+            utterance.rate = 1.08;
+          } else if (upperName.includes('BIGGI')) {
+            utterance.pitch = 1.18;
+            utterance.rate = 1.04;
+          } else {
+            utterance.pitch = 1.28;
+            utterance.rate = 1.06;
+          }
+        } else {
+          if (upperName.includes('DIETER')) {
+            utterance.pitch = 0.82;
+            utterance.rate = 0.95;
+          } else if (upperName.includes('MANNI')) {
+            utterance.pitch = 0.78;
+            utterance.rate = 0.98;
+          } else if (upperName.includes('DJ')) {
+            utterance.pitch = 0.86;
+            utterance.rate = 1.04;
+          } else {
+            utterance.pitch = 0.88;
+            utterance.rate = 0.98;
+          }
+        }
+        utterance.volume = 0.85;
+        lastNpcSpeechTime = nowMs;
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        // Ignore browser speechSynthesis errors
+      }
+    };
+
     // DJ Magic Force Neon Speech Bubble & "Put your hands up!" Crowd Cheer State
     let djSpeechBubble: string | null =
       '🎤 "Willkommen im Palladium Hanau! Let\'s roll!"';
     let djSpeechTimer = 6.5;
     let djNextAutoSpeechTimer = 22.0;
     let djHandsUpCheerTimer = 0;
+    let ambientChatterTimer = 7.5;
     let prevLightingMode: LightingMode = propsRef.current.lightingMode;
     let prevHallGameMode: HallGameMode = propsRef.current.hallGameMode;
+    let prevDifficulty: SingleplayerDifficulty = propsRef.current.difficulty;
+    let prevHasOwnSkates: boolean = propsRef.current.hasOwnSkates;
+    let prevIsCurtainOpen: boolean = propsRef.current.isCurtainOpen;
+
+    // 80s Stage Fog Machine & Manual Burst Timer State
+    let lastFogBurstCount = propsRef.current.fogBurstCount;
+    let fogBurstTimer = 0;
+
+    // Nurse / Paramedic ("SANI-SANDRA") Rescue Sequence State
+    // Runs in from rink edge (~3.0s) -> kneels for care (~3.5s) -> walks calmly back off field (~3.2s)
+    const saniNurse = {
+      active: false,
+      phase: 'idle' as 'idle' | 'running-in' | 'kneeling' | 'walking-out',
+      x: 1732,
+      y: 520,
+      startX: 1732,
+      startY: 520,
+      targetX: 1400,
+      targetY: 700,
+      headingRad: Math.PI,
+      phaseTimer: 0,
+      phaseDuration: 3.0,
+      speechText: null as string | null,
+    };
+
+    const triggerSaniNurseDispatch = (crashX: number, crashY: number) => {
+      if (saniNurse.active) return;
+      // Pick nearest rink edge gate/border so Sani-Sandra visibly runs across the parquet
+      let spawnX = 1732;
+      let spawnY = Math.max(220, Math.min(760, crashY));
+      if (crashX < 620) {
+        spawnX = 288;
+        spawnY = Math.max(300, Math.min(740, crashY));
+      } else if (crashY > 720) {
+        spawnX = 1410;
+        spawnY = 875;
+      }
+      saniNurse.active = true;
+      saniNurse.phase = 'running-in';
+      saniNurse.startX = spawnX;
+      saniNurse.startY = spawnY;
+      saniNurse.x = spawnX;
+      saniNurse.y = spawnY;
+      saniNurse.targetX = crashX + 26;
+      saniNurse.targetY = crashY + 10;
+      saniNurse.phaseTimer = 0;
+      saniNurse.phaseDuration = 3.0; // ~3.0s clearly trackable run-in across the rink
+      saniNurse.headingRad = Math.atan2(
+        saniNurse.targetY - spawnY,
+        saniNurse.targetX - spawnX
+      );
+      saniNurse.speechText = '🚑 Sani-Sandra eilt herbei!';
+      speakNpcBubble(saniNurse.speechText, 'SANI-SANDRA', 'female');
+    };
 
     // Unannounced Floor Wax Slip Zone (Bohnerwachs-Rutschzone)
     const waxPatch = {
@@ -540,260 +1454,9 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     ];
 
     // ========================================================================
-    // 2. INITIALIZE TRACK NPCS (MALE & FEMALE DISTINCT + SKATE GUARDS IN BLACK/GREEN)
+    // 2. INITIALIZE TRACK NPCS SCALED BY SINGLEPLAYER DIFFICULTY
     // ========================================================================
-    const trackNpcs: TrackNpc[] = [
-      // 4 Speed-Skaters in a tight Paceline right along the outer barrier/wall
-      {
-        id: 'speed-1',
-        name: 'Paceline-Leader Kai',
-        gender: 'male',
-        role: 'speed',
-        orbitAngle: 0.4,
-        laneRadiusX: 668,
-        laneRadiusY: 336,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.92,
-        shirtColor: '#dc2626',
-        accentColor: '#fde047',
-        wheelColor: '#38bdf8',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-      {
-        id: 'speed-2',
-        name: 'Aero-Anja',
-        gender: 'female',
-        role: 'speed',
-        orbitAngle: 0.3,
-        laneRadiusX: 668,
-        laneRadiusY: 336,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.92,
-        shirtColor: '#dc2626',
-        accentColor: '#38bdf8',
-        wheelColor: '#fde047',
-        legwarmerColor: '#ff2a85',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-      {
-        id: 'speed-3',
-        name: 'Turbo-Marek',
-        gender: 'male',
-        role: 'speed',
-        orbitAngle: 0.2,
-        laneRadiusX: 668,
-        laneRadiusY: 336,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.92,
-        shirtColor: '#dc2626',
-        accentColor: '#39ff14',
-        wheelColor: '#ec4899',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-      {
-        id: 'speed-4',
-        name: 'Sprint-Sonja',
-        gender: 'female',
-        role: 'speed',
-        orbitAngle: 0.1,
-        laneRadiusX: 668,
-        laneRadiusY: 336,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.92,
-        shirtColor: '#dc2626',
-        accentColor: '#f472b6',
-        wheelColor: '#00f0ff',
-        legwarmerColor: '#00f0ff',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-
-      // 2 Active Skate Guards (Black shirt with glowing neon-green "GUARD" / "CREW" lettering + whistle)
-      {
-        id: 'guard-1',
-        name: 'SKATE GUARD Manni',
-        gender: 'male',
-        role: 'guard',
-        orbitAngle: 1.2,
-        laneRadiusX: 542,
-        laneRadiusY: 262,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.68,
-        shirtColor: '#070a10',
-        accentColor: '#39ff14',
-        wheelColor: '#39ff14',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-      {
-        id: 'guard-2',
-        name: 'SKATE GUARD Biggi',
-        gender: 'female',
-        role: 'guard',
-        orbitAngle: 4.34,
-        laneRadiusX: 542,
-        laneRadiusY: 262,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.68,
-        shirtColor: '#070a10',
-        accentColor: '#39ff14',
-        wheelColor: '#39ff14',
-        legwarmerColor: '#39ff14',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-
-      // Regular Counter-Clockwise Skaters & 1 Wheelchair NPC (adjusted around the wider center U-islands!)
-      {
-        id: 'reg-1',
-        name: 'Disco-Dieter',
-        gender: 'male',
-        role: 'regular',
-        orbitAngle: 2.1,
-        laneRadiusX: 495,
-        laneRadiusY: 245,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.56,
-        shirtColor: '#1e3a8a',
-        accentColor: '#38bdf8',
-        wheelColor: '#f472b6',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-      {
-        id: 'reg-2',
-        name: 'Neon-Nadine',
-        gender: 'female',
-        role: 'regular',
-        orbitAngle: 3.4,
-        laneRadiusX: 472,
-        laneRadiusY: 234,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.61,
-        shirtColor: '#701a75',
-        accentColor: '#f472b6',
-        wheelColor: '#00f0ff',
-        legwarmerColor: '#fde047',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-      {
-        id: 'reg-3',
-        name: 'WCMX-Marco',
-        gender: 'male',
-        role: 'wheelchair-npc',
-        orbitAngle: 5.1,
-        laneRadiusX: 518,
-        laneRadiusY: 254,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.63,
-        shirtColor: '#065f46',
-        accentColor: '#39ff14',
-        wheelColor: '#00f0ff',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-      {
-        id: 'reg-4',
-        name: 'Slalom-Steffi',
-        gender: 'female',
-        role: 'regular',
-        orbitAngle: 0.9,
-        laneRadiusX: 462,
-        laneRadiusY: 228,
-        x: 0,
-        y: 0,
-        vx: 0,
-        vy: 0,
-        headingRad: 0,
-        baseSpeed: 0.58,
-        shirtColor: '#4c1d95',
-        accentColor: '#c084fc',
-        wheelColor: '#39ff14',
-        legwarmerColor: '#f472b6',
-        spinTimer: 0,
-        speechText: null,
-        speechTimer: 0,
-        crashTimer: 0,
-        hitOutTimer: 0,
-        sittingBarrierSpot: null,
-      },
-    ];
+    const trackNpcs: TrackNpc[] = buildTrackNpcsForDifficulty(initP.difficulty);
 
     // Random Barrier-Sitting Event State (Skate Guard whistle enforcement: "📣 TRILLER! Nicht auf der Bande sitzen!")
     let barrierSitTimer = 9.5;
@@ -810,6 +1473,15 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     const keysDown: Record<string, boolean> = {};
 
     const triggerPlayer360Spin = () => {
+      const p = propsRef.current;
+      const hasSkatesEquipped =
+        p.hasOwnSkates || p.hasRentedSkates || p.characterMode === 'wheelchair';
+      if (!hasSkatesEquipped) {
+        player.speechBubble =
+          '👟 Erst am Rollschuh-Verleih Skates holen! [E] am Schalter!';
+        player.speechTimer = 2.8;
+        return;
+      }
       if (player.isSpinning || player.crashTimer > 0) return;
       player.isSpinning = true;
       player.spinAngleOffset = 0;
@@ -866,19 +1538,66 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     const triggerInteractOrThrowBall = () => {
       const p = propsRef.current;
 
+      // 0. Check Rollschuh-Verleih Counter proximity (Redeem Freigetränk-Chip for 80s Rental Skates!)
+      const rentalCenterX =
+        ARENA_LAYOUT.proShopAndRental.rentalBounds.x +
+        ARENA_LAYOUT.proShopAndRental.rentalBounds.width / 2;
+      const rentalInteractY = 895;
+      const distRental = Math.hypot(
+        player.x - rentalCenterX,
+        player.y - rentalInteractY
+      );
+      if (distRental <= 135) {
+        if (!p.hasOwnSkates && !p.hasRentedSkates) {
+          p.onRedeemDrinkChipAtRental();
+          player.freeSlushCount = 0;
+          player.freeBlobaCount = 0;
+          player.speechBubble =
+            '🛼 Freigetränk-Chip gegen Leih-Rollschuhe eingelöst! Aufs Parkett!';
+          player.speechTimer = 4.2;
+          soundFX.playChallengeUnlocked();
+          speakNpcBubble(
+            'Hier sind deine 80er Leih-Rollschuhe! Viel Spaß auf der Bahn!',
+            'VERLEIH-BIGGI',
+            'female'
+          );
+          return;
+        } else if (p.hasOwnSkates) {
+          player.speechBubble =
+            '🛼 Du trägst bereits deine eigenen Profi-Rollschuhe!';
+          player.speechTimer = 2.6;
+          return;
+        } else {
+          player.speechBubble =
+            '🛼 Deine 80er-Leih-Rollschuhe sitzen schon perfekt!';
+          player.speechTimer = 2.6;
+          return;
+        }
+      }
+
       // 1. Check Bistro Counter proximity (Slush-Puppie & Bloba Cola at bottom-left Bistro)
       const distBistro = Math.hypot(
         player.x - ARENA_LAYOUT.bistro.interactX,
         player.y - ARENA_LAYOUT.bistro.interactY
       );
       if (distBistro <= ARENA_LAYOUT.bistro.interactRadius) {
+        if (!p.hasOwnSkates && !p.hasRentedSkates) {
+          player.speechBubble =
+            '🎟️ Du brauchst deinen Chip zuerst am Rollschuh-Verleih für Leih-Skates!';
+          player.speechTimer = 3.5;
+          return;
+        }
         player.slushRemainingSec = 75;
         player.blobaColaRemainingSec = 45;
-        if (player.freeSlushCount > 0 || player.freeBlobaCount > 0) {
-          player.freeSlushCount = Math.max(0, player.freeSlushCount - 1);
-          player.freeBlobaCount = Math.max(0, player.freeBlobaCount - 1);
+        if (
+          p.drinkChipAvailable &&
+          (player.freeSlushCount > 0 || player.freeBlobaCount > 0)
+        ) {
+          player.freeSlushCount = 0;
+          player.freeBlobaCount = 0;
+          p.onRedeemDrinkChipAtBistro();
           player.speechBubble =
-            '🎁 Willkommens-Gutschein eingelöst: Slush Puppy & Bloba Cola gratis!';
+            '🎁 Freigetränk-Chip eingelöst: Slush Puppy & Bloba Cola gratis!';
         } else {
           player.speechBubble =
             '🥤 Slush-Puppie & Bloba Cola! Mega Frische-Kick!';
@@ -896,6 +1615,21 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       );
       if (distShop <= ARENA_LAYOUT.proShopAndRental.proShopInteractRadius) {
         p.onOpenProShopModal();
+        return;
+      }
+
+      // 2b. Check DJ-Tower proximity for live DJ shoutout with activeDjName!
+      const distDj = Math.hypot(
+        player.x - ARENA_LAYOUT.djTower.centerX,
+        player.y - ARENA_LAYOUT.djTower.centerY
+      );
+      if (distDj <= 210) {
+        const djName = p.activeDjName || 'DJ Magic Force';
+        djSpeechBubble = `🎤 "${djName}: Grüße von den Klecknix Twin-Decks ans Palladium Hanau!"`;
+        djSpeechTimer = 5.5;
+        speakNpcBubble(djSpeechBubble, djName, 'male');
+        player.speechBubble = `🎧 Shoutout an ${djName} am Pult!`;
+        player.speechTimer = 2.8;
         return;
       }
 
@@ -986,15 +1720,31 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           ? '🦘 Kengol-Bucket-Hat & weiß-pinke Kengo-Skates AN!'
           : '🛼 Klassischer 80er-Look aktiv!';
         player.speechTimer = 2.4;
-      } else if (k === '1' && player.freeSlushCount > 0) {
-        player.freeSlushCount -= 1;
+      } else if (
+        k === '1' &&
+        player.freeSlushCount > 0 &&
+        propsRef.current.drinkChipAvailable &&
+        (propsRef.current.hasOwnSkates || propsRef.current.hasRentedSkates)
+      ) {
+        player.freeSlushCount = 0;
+        if (player.freeBlobaCount === 0) {
+          propsRef.current.onRedeemDrinkChipAtBistro();
+        }
         player.slushRemainingSec = 75;
         player.speechBubble = '🍧 Gratis Slush Puppy eingelöst! Mega Cool-Kick!';
         player.speechTimer = 2.8;
         soundFX.playDrinkRefresh();
         propsRef.current.onChallengeProgress('bistro_drink', 1);
-      } else if (k === '2' && player.freeBlobaCount > 0) {
-        player.freeBlobaCount -= 1;
+      } else if (
+        k === '2' &&
+        player.freeBlobaCount > 0 &&
+        propsRef.current.drinkChipAvailable &&
+        (propsRef.current.hasOwnSkates || propsRef.current.hasRentedSkates)
+      ) {
+        player.freeBlobaCount = 0;
+        if (player.freeSlushCount === 0) {
+          propsRef.current.onRedeemDrinkChipAtBistro();
+        }
         player.blobaColaRemainingSec = 45;
         player.speechBubble = '🥤 Gratis Bloba Cola eingelöst! Turbo-Prickeln!';
         player.speechTimer = 2.8;
@@ -1023,6 +1773,31 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       ) {
         propsRef.current.onToggleTwitchStream?.();
         return;
+      }
+
+      // Check click on Rollschuh-Verleih counter to redeem Freigetränk-Chip for rental skates!
+      const rb = proShopAndRental.rentalBounds;
+      if (
+        worldX >= rb.x &&
+        worldX <= rb.x + rb.width &&
+        worldY >= rb.y - 45 &&
+        worldY <= rb.y + rb.height
+      ) {
+        if (!propsRef.current.hasOwnSkates && !propsRef.current.hasRentedSkates) {
+          propsRef.current.onRedeemDrinkChipAtRental();
+          player.freeSlushCount = 0;
+          player.freeBlobaCount = 0;
+          player.speechBubble =
+            '🛼 Freigetränk-Chip gegen Leih-Rollschuhe eingelöst! Aufs Parkett!';
+          player.speechTimer = 4.2;
+          soundFX.playChallengeUnlocked();
+          speakNpcBubble(
+            'Hier sind deine 80er Leih-Rollschuhe! Viel Spaß auf der Bahn!',
+            'VERLEIH-BIGGI',
+            'female'
+          );
+          return;
+        }
       }
 
       // Check click on Pro-Shop showcase
@@ -1070,22 +1845,62 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     let animFrameId = 0;
     let lastTime = performance.now();
     let lastTelemetryTime = 0;
+    let lastMultiplayerEmitTime = 0;
     let aiGuardBallThrowTimer = 0;
+    const remotePlayersMap = new Map<string, InterpolatedRemotePlayer>();
 
     const stepFrame = (now: number) => {
       const dt = Math.min(0.05, (now - lastTime) / 1000);
       lastTime = now;
 
       const p = propsRef.current;
+      const hasSkatesEquipped =
+        p.hasOwnSkates ||
+        p.hasRentedSkates ||
+        p.characterMode === 'wheelchair';
 
-      // Welcome Gift Notification on First Hall Entry (1x Slush Puppy & 1x Bloba Cola credited automatically!)
+      // Sync difficulty roster or starting position when entering the hall or changing pre-entry settings
+      if (
+        p.difficulty !== prevDifficulty ||
+        p.hasOwnSkates !== prevHasOwnSkates ||
+        (!prevIsCurtainOpen && p.isCurtainOpen)
+      ) {
+        if (p.difficulty !== prevDifficulty) {
+          prevDifficulty = p.difficulty;
+          const nextNpcs = buildTrackNpcsForDifficulty(p.difficulty);
+          trackNpcs.splice(0, trackNpcs.length, ...nextNpcs);
+        }
+        prevHasOwnSkates = p.hasOwnSkates;
+        prevIsCurtainOpen = p.isCurtainOpen;
+
+        const spawn = getPlayerStartCoords(p.difficulty, hasSkatesEquipped);
+        player.x = spawn.x;
+        player.y = spawn.y;
+        player.vx = 0;
+        player.vy = 0;
+        player.headingRad = spawn.headingRad;
+      }
+
+      // Keep free drink chip counts synchronized with persisted entryPass state
+      if (!p.drinkChipAvailable) {
+        player.freeSlushCount = 0;
+        player.freeBlobaCount = 0;
+      }
+
+      // Welcome Gift / Skate Rental Notification on Hall Entry
       if (p.isCurtainOpen && !player.hasShownWelcomeGift) {
         player.hasShownWelcomeGift = true;
-        player.freeSlushCount = Math.max(1, player.freeSlushCount);
-        player.freeBlobaCount = Math.max(1, player.freeBlobaCount);
-        player.speechBubble =
-          '🎁 Willkommensgeschenk: 1x Slush Puppy & 1x Bloba Cola gratis im Inventar!';
-        player.speechTimer = 4.5;
+        if (p.hasOwnSkates || p.characterMode === 'wheelchair') {
+          player.freeSlushCount = p.drinkChipAvailable ? 1 : 0;
+          player.freeBlobaCount = p.drinkChipAvailable ? 1 : 0;
+          player.speechBubble =
+            '🛼 Eigene Rollschuhe aktiv! 🎁 1x Freigetränk-Chip fürs Bistro im Inventar!';
+          player.speechTimer = 4.8;
+        } else if (!p.hasRentedSkates) {
+          player.speechBubble =
+            '👟 Straßenschuhe an: Tausche deinen Freigetränk-Chip am Rollschuh-Verleih [E] gegen Leih-Skates!';
+          player.speechTimer = 5.5;
+        }
       }
 
       // DJ Magic Force Neon Speech Bubbles (Mode Changes & Every 20–30 Seconds)
@@ -1122,16 +1937,30 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             '🎤 "Blacklight UV Time! Lasst die Neon-Rollen glühen!"';
         } else if (p.lightingMode === 'slow-skating') {
           djSpeechBubble =
-            '🎤 "Slow Skating Kuschelrunde – schnappt euch euren Partner!"';
+            '🪩 "JETZT BEGINNT DAS SLOW-SKATING! Schnappt euch euren Partner!"';
         } else if (p.lightingMode === 'putzlicht') {
           djSpeechBubble =
             '🎤 "Volles Putzlicht an – freie Sicht auf dem Parkett!"';
         } else {
           djSpeechBubble =
-            '🎤 "Disco-Spots an! Let\'s roll, Palladium Hanau!"';
+            '🎤 "Disco-Spots & Strobo an! Let\'s roll, Palladium Hanau!"';
         }
-        djSpeechTimer = 5.5;
+        djSpeechTimer = 6.0;
         djNextAutoSpeechTimer = 22.0;
+        speakNpcBubble(djSpeechBubble, p.activeDjName || 'DJ MAGIC FORCE', 'male');
+      }
+
+      if (p.fogBurstCount !== lastFogBurstCount) {
+        lastFogBurstCount = p.fogBurstCount;
+        triggerFogBurst();
+        fogBurstTimer = 9.5;
+      }
+      if (fogBurstTimerRef.current > fogBurstTimer) {
+        fogBurstTimer = fogBurstTimerRef.current;
+      }
+      if (fogBurstTimer > 0) {
+        fogBurstTimer = Math.max(0, fogBurstTimer - dt);
+        fogBurstTimerRef.current = fogBurstTimer;
       }
 
       if (p.hallGameMode !== prevHallGameMode) {
@@ -1140,14 +1969,17 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           djSpeechBubble =
             '🎤 "Jägerball / Ballspiel startet! Achtung vor den Neon-Softbällen!"';
           djSpeechTimer = 5.5;
+          speakNpcBubble(djSpeechBubble, p.activeDjName || 'DJ MAGIC FORCE', 'male');
         } else if (p.hallGameMode === 'stuhlsprung') {
           djSpeechBubble =
             '🎤 "Rundum-Stuhlsprung frei! Alle Zuschauer an die Bande!"';
           djSpeechTimer = 5.5;
+          speakNpcBubble(djSpeechBubble, p.activeDjName || 'DJ MAGIC FORCE', 'male');
         } else if (p.hallGameMode === 'slalom') {
           djSpeechBubble =
             '🎤 "Slalom-Parcours eröffnet! Zeigt eure saubersten Kurven!"';
           djSpeechTimer = 5.5;
+          speakNpcBubble(djSpeechBubble, p.activeDjName || 'DJ MAGIC FORCE', 'male');
         }
         djNextAutoSpeechTimer = 22.0;
       }
@@ -1155,19 +1987,66 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       djNextAutoSpeechTimer -= dt;
       if (djNextAutoSpeechTimer <= 0 && p.isCurtainOpen) {
         djNextAutoSpeechTimer = 21 + Math.random() * 7;
+        const djLabel = p.activeDjName || 'DJ Magic Force';
         const djPhrases = [
           '🎤 "Put your hands up in the air!"',
+          `🎤 "${djLabel} live an den Klecknix Twin-Decks!"`,
           '🎤 "Palladium Hanau – seid ihr gut drauf?!"',
           '🎤 "Let\'s roll! Danger Rytm Crew in the mix!"',
           '🎤 "Put your hands up in the air!"',
-          '🎤 "Klecknix Twin-Decks live aus der Eck-Kanzel!"',
         ];
         const chosen =
           djPhrases[Math.floor(Math.random() * djPhrases.length)];
         djSpeechBubble = chosen;
         djSpeechTimer = 5.5;
+        speakNpcBubble(chosen, djLabel, 'male');
         if (chosen.includes('Put your hands up')) {
           triggerHandsUpCrowdCheer();
+        }
+      }
+
+      // Periodic authentic 80s NPC rink chatter so Disco-Dieter, Slalom-Steffi, Neon-Nadine, etc. speak audibly (only in Solo mode!)
+      ambientChatterTimer -= dt;
+      if (
+        !p.isMultiplayerActive &&
+        ambientChatterTimer <= 0 &&
+        p.isCurtainOpen &&
+        p.hallGameMode === 'free-skate'
+      ) {
+        ambientChatterTimer = 8.5 + Math.random() * 5.5;
+        const candidates = trackNpcs.filter(
+          (n) => !n.speechText && n.crashTimer <= 0 && n.hitOutTimer <= 0
+        );
+        if (candidates.length > 0) {
+          const speaker =
+            candidates[Math.floor(Math.random() * candidates.length)];
+          const femaleLines = [
+            'Voll der 80er Groove heute im Palladium!',
+            'Schau mal, wie die Neon-Rollen leuchten!',
+            'Gleich noch ein Slush Puppy an der Theke!',
+            'Freie Bahn in der Kurve!',
+          ];
+          const maleLines = [
+            'Palladium Hanau – beste Bahn überhaupt!',
+            'Saubere Spur halten, Leute!',
+            'DJ Magic Force legt heute wieder Bretter auf!',
+            'Achtung, wir ziehen im Windschatten vorbei!',
+          ];
+          const guardLines = [
+            'Immer schön gegen den Uhrzeigersinn rollen!',
+            'Spur frei halten für die Speed-Skater außen!',
+          ];
+          const linePool =
+            speaker.role === 'guard'
+              ? guardLines
+              : speaker.gender === 'female'
+              ? femaleLines
+              : maleLines;
+          const chosenLine =
+            linePool[Math.floor(Math.random() * linePool.length)];
+          speaker.speechText = chosenLine;
+          speaker.speechTimer = 3.4;
+          speakNpcBubble(chosenLine, speaker.name, speaker.gender);
         }
       }
 
@@ -1257,8 +2136,83 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       }
       if (player.medicRescueTimer > 0) {
         player.medicRescueTimer = Math.max(0, player.medicRescueTimer - dt);
-        player.x += (1745 - player.x) * dt * 2.5;
-        player.y += (520 - player.y) * dt * 2.5;
+      }
+
+      // Update Nurse / Paramedic ("SANI-SANDRA") Rescue Sequence
+      if (saniNurse.active) {
+        saniNurse.phaseTimer += dt;
+        if (saniNurse.phase === 'running-in') {
+          // Track player's fallen spot while running in over ~3.0 seconds
+          saniNurse.targetX = player.x + 28;
+          saniNurse.targetY = player.y + 10;
+          const progress = Math.min(
+            1,
+            saniNurse.phaseTimer / saniNurse.phaseDuration
+          );
+          saniNurse.x =
+            saniNurse.startX +
+            (saniNurse.targetX - saniNurse.startX) * progress;
+          saniNurse.y =
+            saniNurse.startY +
+            (saniNurse.targetY - saniNurse.startY) * progress;
+          saniNurse.headingRad = Math.atan2(
+            saniNurse.targetY - saniNurse.startY,
+            saniNurse.targetX - saniNurse.startX
+          );
+          // Keep fallen skater waiting on the parquet until Sani-Sandra arrives
+          if (player.crashTimer > 0 && player.crashTimer < 0.4) {
+            player.crashTimer = 0.4;
+          }
+          if (progress >= 1) {
+            saniNurse.phase = 'kneeling';
+            saniNurse.phaseTimer = 0;
+            saniNurse.phaseDuration = 3.5; // Kneels for ~3.5 seconds to treat the skater
+            saniNurse.speechText =
+              '🩹 Erste Hilfe: Eisspray & Pflaster drauf!';
+            speakNpcBubble(saniNurse.speechText, 'SANI-SANDRA', 'female');
+            player.crashTimer = Math.max(player.crashTimer, 3.2);
+            player.speechBubble = '🩹 Danke, Sani-Sandra!';
+            player.speechTimer = 3.2;
+          }
+        } else if (saniNurse.phase === 'kneeling') {
+          saniNurse.x = player.x + 28;
+          saniNurse.y = player.y + 10;
+          saniNurse.headingRad = Math.atan2(
+            player.y - saniNurse.y,
+            player.x - saniNurse.x
+          );
+          if (saniNurse.phaseTimer >= saniNurse.phaseDuration) {
+            saniNurse.phase = 'walking-out';
+            saniNurse.phaseTimer = 0;
+            saniNurse.phaseDuration = 3.2; // Walks calmly back off the rink
+            saniNurse.targetX = saniNurse.x;
+            saniNurse.targetY = saniNurse.y;
+            saniNurse.speechText = '👍 Wieder fit! Gute Weiterfahrt!';
+            speakNpcBubble(saniNurse.speechText, 'SANI-SANDRA', 'female');
+            player.crashTimer = 0;
+            player.medicRescueTimer = 0;
+          }
+        } else if (saniNurse.phase === 'walking-out') {
+          const progress = Math.min(
+            1,
+            saniNurse.phaseTimer / saniNurse.phaseDuration
+          );
+          saniNurse.x =
+            saniNurse.targetX +
+            (saniNurse.startX - saniNurse.targetX) * progress;
+          saniNurse.y =
+            saniNurse.targetY +
+            (saniNurse.startY - saniNurse.targetY) * progress;
+          saniNurse.headingRad = Math.atan2(
+            saniNurse.startY - saniNurse.targetY,
+            saniNurse.startX - saniNurse.targetX
+          );
+          if (progress >= 1) {
+            saniNurse.active = false;
+            saniNurse.phase = 'idle';
+            saniNurse.speechText = null;
+          }
+        }
       }
 
       // Smoothly animate collapsible Center Stage (`[` & `]` sliding together horizontally)
@@ -1303,7 +2257,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       }
 
       // ----------------------------------------------------------------------
-      // C. PLAYER MOVEMENT, UPGRADES, WAX SLIP & WHEELCHAIR FORWARD FIX
+      // C. PLAYER MOVEMENT, OWN SKATES BONUS vs. STREET SHOES & UPGRADES
       // ----------------------------------------------------------------------
       const keyUp = keysDown['w'] || keysDown['arrowup'] || keysDown['KeyW'];
       const keyDown =
@@ -1323,7 +2277,14 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
       const waxDx = (player.x - waxPatch.x) / waxPatch.radiusX;
       const waxDy = (player.y - waxPatch.y) / waxPatch.radiusY;
-      player.isOnWaxPatch = waxDx * waxDx + waxDy * waxDy <= 1.0;
+      player.isOnWaxPatch =
+        hasSkatesEquipped && waxDx * waxDx + waxDy * waxDy <= 1.0;
+
+      // Own Skates ("Eigene Rollschuhe") grant sportier acceleration (+10%) & cornering (+12%),
+      // whereas Street Shoes (!hasSkatesEquipped) walk slowly on the outer carpet until visiting Rollschuh-Verleih!
+      const ownSkatesSpeedBonus = p.hasOwnSkates ? 1.07 : 1.0;
+      const ownSkatesAccelBonus = p.hasOwnSkates ? 1.11 : 1.0;
+      const streetShoesPenalty = hasSkatesEquipped ? 1.0 : 0.52;
 
       const bearingsMult = p.upgrades.bearingsAbec9 ? 1.18 : 1.0;
       const platesMult = p.upgrades.aluPlatesHighTop ? 1.16 : 1.0;
@@ -1331,9 +2292,21 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       const blobaMult = player.blobaColaRemainingSec > 0 ? 1.15 : 1.0;
       const slipstreamMult = player.isSlipstreamActive ? 1.22 : 1.0;
 
-      const maxSpeed = 355 * bearingsMult * slushMult * slipstreamMult;
+      const maxSpeed =
+        355 *
+        ownSkatesSpeedBonus *
+        streetShoesPenalty *
+        bearingsMult *
+        slushMult *
+        slipstreamMult;
       const airControlMult = player.isJumping ? 0.65 : 1.0;
-      const accel = 540 * platesMult * blobaMult * airControlMult;
+      const accel =
+        540 *
+        ownSkatesAccelBonus *
+        (hasSkatesEquipped ? 1.0 : 0.72) *
+        platesMult *
+        blobaMult *
+        airControlMult;
 
       if (player.crashTimer <= 0 && player.medicRescueTimer <= 0) {
         if (inputMag > 0.05) {
@@ -1350,12 +2323,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             const velAngle = Math.atan2(player.vy, player.vx);
             const inputAngle = Math.atan2(inputY, inputX);
             if (Math.abs(normalizeAngle(inputAngle - velAngle)) > 2.15) {
-              player.crashTimer = 1.6;
+              player.crashTimer = 3.2;
               player.speechBubble = 'Huch, frisch gebohnert!';
-              player.speechTimer = 2.4;
+              player.speechTimer = 2.8;
               player.totalCrashes += 1;
               player.consecutiveCrashes += 1;
               soundFX.playCrash(false);
+              triggerSaniNurseDispatch(player.x, player.y);
             }
           }
         } else if (padThrottle > 0.1) {
@@ -1364,12 +2338,16 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         }
       }
 
-      const baseFriction = player.isOnWaxPatch
+      const baseFriction = !hasSkatesEquipped
+        ? 0.92
+        : player.isOnWaxPatch
         ? p.upgrades.highGripWheels
           ? 0.991
           : 0.9965
         : p.upgrades.bearingsAbec9
         ? 0.9915
+        : p.hasOwnSkates
+        ? 0.99
         : 0.9885;
       const frameDrag = Math.pow(baseFriction, dt * 60);
       player.vx *= frameDrag;
@@ -1386,16 +2364,49 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
       if (speed > 8) {
         const targetHeading = Math.atan2(player.vy, player.vx);
+        const turnRate = p.hasOwnSkates ? 13.0 : 11.5;
         player.headingRad = rotateShortest(
           player.headingRad,
           targetHeading,
-          dt * 11.5
+          dt * turnRate
         );
         player.stridePhase += speed * dt * 0.032;
       }
 
+      // Prevent stepping onto the wooden rink parquet in street shoes (!hasSkatesEquipped)
+      const { rink, djTower } = ARENA_LAYOUT;
+      if (
+        !hasSkatesEquipped &&
+        player.x > rink.x - 10 &&
+        player.x < rink.x + rink.width + 10 &&
+        player.y > rink.y - 10 &&
+        player.y < rink.y + rink.height + 8
+      ) {
+        if (player.y > rink.y + rink.height - 65) {
+          player.y = rink.y + rink.height + 12;
+          player.vy = Math.max(0, player.vy);
+        } else if (player.x < rink.x + 65) {
+          player.x = rink.x - 12;
+          player.vx = Math.min(0, player.vx);
+        } else {
+          player.y = rink.y + rink.height + 12;
+          player.vy = 0;
+        }
+        if (player.speechTimer <= 0.4) {
+          player.speechBubble =
+            '🛑 Erst am Rollschuh-Verleih (unten Mitte) Skates gegen deinen Chip holen! [E]';
+          player.speechTimer = 3.2;
+          speakNpcBubble(
+            'Halt! Nicht mit Straßenschuhen aufs Parkett! Hol dir erst Leih-Rollschuhe am Verleih!',
+            'SKATE GUARD MANNI',
+            'male'
+          );
+        }
+      }
+
       // Record Neon Underglow or Slush / Bloba Wheel Trails on the Parquet
       if (
+        hasSkatesEquipped &&
         speed > 35 &&
         player.jumpZ <= 2 &&
         (p.upgrades.underglowEnabled ||
@@ -1458,8 +2469,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       // ----------------------------------------------------------------------
       // E. COUNTER-CLOCKWISE LAP DETECTION & VIP EGO-VIEW CHECK
       // ----------------------------------------------------------------------
-      const { rink, djTower } = ARENA_LAYOUT;
       const onRinkFloor =
+        hasSkatesEquipped &&
         player.x > rink.x + 20 &&
         player.x < rink.x + rink.width - 20 &&
         player.y > rink.y + 20 &&
@@ -1494,11 +2505,67 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       }
 
       // ----------------------------------------------------------------------
-      // F. UPDATE TRACK NPCS, SLOW-SKATING COUPLES & BARRIER-SITTING GUARD WHISTLE
+      // F. UPDATE TRACK NPCS (SKIPPED IN MULTIPLAYER SO THE RINK BELONGS EXCLUSIVELY TO REAL PLAYERS!)
+      //    & INTERPOLATE CONNECTED REMOTE HUMAN PLAYERS
       // ----------------------------------------------------------------------
       player.isSlipstreamActive = false;
 
+      // Sync & smoothly interpolate connected remote human players
+      const incomingRemotes = p.remotePlayers || [];
+      const activeRemoteIds = new Set<string>();
+      for (const rp of incomingRemotes) {
+        activeRemoteIds.add(rp.peerId);
+        const existing = remotePlayersMap.get(rp.peerId);
+        if (!existing) {
+          remotePlayersMap.set(rp.peerId, {
+            ...rp,
+            renderX: rp.x,
+            renderY: rp.y,
+            renderHeading: rp.headingRad + (rp.spinAngleOffset || 0),
+            renderJumpZ: rp.jumpZ || 0,
+          });
+        } else {
+          const predX = rp.x + (rp.vx || 0) * Math.min(0.05, dt * 0.5);
+          const predY = rp.y + (rp.vy || 0) * Math.min(0.05, dt * 0.5);
+          const distJump = Math.hypot(
+            predX - existing.renderX,
+            predY - existing.renderY
+          );
+          const lerpFactor = Math.min(1, dt * 15);
+          const nextRenderX =
+            distJump > 260
+              ? rp.x
+              : existing.renderX + (predX - existing.renderX) * lerpFactor;
+          const nextRenderY =
+            distJump > 260
+              ? rp.y
+              : existing.renderY + (predY - existing.renderY) * lerpFactor;
+          const nextHeading = rotateShortest(
+            existing.renderHeading,
+            rp.headingRad + (rp.spinAngleOffset || 0),
+            dt * 18
+          );
+          const nextJumpZ =
+            existing.renderJumpZ +
+            ((rp.jumpZ || 0) - existing.renderJumpZ) * Math.min(1, dt * 16);
+
+          remotePlayersMap.set(rp.peerId, {
+            ...rp,
+            renderX: nextRenderX,
+            renderY: nextRenderY,
+            renderHeading: nextHeading,
+            renderJumpZ: nextJumpZ,
+          });
+        }
+      }
+      for (const oldId of Array.from(remotePlayersMap.keys())) {
+        if (!activeRemoteIds.has(oldId)) {
+          remotePlayersMap.delete(oldId);
+        }
+      }
+
       if (
+        !p.isMultiplayerActive &&
         p.hallGameMode !== 'stuhlsprung' &&
         onRinkFloor &&
         speed < 12 &&
@@ -1510,8 +2577,11 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         player.guardEscortActive = false;
       }
 
-      // Random Barrier-Sitting Event: Every ~13–18s in free-skate, a regular NPC sits on the blue outer barrier
-      if (p.hallGameMode === 'free-skate') {
+      const isSlowSkating = p.lightingMode === 'slow-skating';
+
+      if (!p.isMultiplayerActive) {
+        // Random Barrier-Sitting Event: Every ~13–18s in free-skate (NEVER during Slow-Skating!), a regular NPC sits on the blue outer barrier
+        if (p.hallGameMode === 'free-skate' && !isSlowSkating) {
         if (!activeBarrierSitterId) {
           barrierSitTimer -= dt;
           if (barrierSitTimer <= 0) {
@@ -1528,6 +2598,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               chosen.sittingBarrierSpot = spot;
               chosen.speechText = 'Kurz auf der Bande sitzen...';
               chosen.speechTimer = 4.5;
+              speakNpcBubble(chosen.speechText, chosen.name, chosen.gender);
               activeBarrierSitterId = chosen.id;
             }
             barrierSitTimer = 14 + Math.random() * 6;
@@ -1540,14 +2611,17 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         activeBarrierSitterId = null;
       }
 
-      const isSlowSkating = p.lightingMode === 'slow-skating';
       const activeSitterNpc = activeBarrierSitterId
         ? trackNpcs.find((n) => n.id === activeBarrierSitterId)
         : null;
 
       // Find nearest Skate Guard to intercept any NPC sitting on the blue barrier
       let assignedBarrierGuardId: string | null = null;
-      if (activeSitterNpc && activeSitterNpc.sittingBarrierSpot) {
+      if (
+        !isSlowSkating &&
+        activeSitterNpc &&
+        activeSitterNpc.sittingBarrierSpot
+      ) {
         const guards = trackNpcs.filter((n) => n.role === 'guard');
         if (guards.length > 0) {
           guards.sort(
@@ -1559,6 +2633,90 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               Math.hypot(b.x - activeSitterNpc.x, b.y - activeSitterNpc.y)
           );
           assignedBarrierGuardId = guards[0].id;
+        }
+      }
+
+      // Romantic Slow-Skating Couples Definition (3 couples skating synchronously, 1 partner backwards facing the other at a clean fixed distance!)
+      const slowSkateCouples: Record<
+        string,
+        {
+          leaderId: string;
+          isBackwardsPartner: boolean;
+          rx: number;
+          ry: number;
+          orbitSpeed: number;
+        }
+      > = {
+        'reg-1': {
+          leaderId: 'reg-1',
+          isBackwardsPartner: false,
+          rx: 482,
+          ry: 238,
+          orbitSpeed: 0.34,
+        },
+        'reg-2': {
+          leaderId: 'reg-1',
+          isBackwardsPartner: true,
+          rx: 482,
+          ry: 238,
+          orbitSpeed: 0.34,
+        },
+        'speed-3': {
+          leaderId: 'speed-3',
+          isBackwardsPartner: false,
+          rx: 642,
+          ry: 322,
+          orbitSpeed: 0.36,
+        },
+        'speed-2': {
+          leaderId: 'speed-3',
+          isBackwardsPartner: true,
+          rx: 642,
+          ry: 322,
+          orbitSpeed: 0.36,
+        },
+        'speed-1': {
+          leaderId: 'speed-1',
+          isBackwardsPartner: false,
+          rx: 564,
+          ry: 282,
+          orbitSpeed: 0.35,
+        },
+        'speed-4': {
+          leaderId: 'speed-1',
+          isBackwardsPartner: true,
+          rx: 564,
+          ry: 282,
+          orbitSpeed: 0.35,
+        },
+      };
+
+      // Pre-enforce minimum longitudinal spacing between solo AI skaters on the oval so they never bunch up or overlap badges
+      const soloNpcs = trackNpcs.filter(
+        (n) =>
+          !n.sittingBarrierSpot &&
+          n.hitOutTimer <= 0 &&
+          !(isSlowSkating && slowSkateCouples[n.id]?.isBackwardsPartner)
+      );
+      for (let i = 0; i < soloNpcs.length; i++) {
+        for (let j = i + 1; j < soloNpcs.length; j++) {
+          const a = soloNpcs[i];
+          const b = soloNpcs[j];
+          // Only space skaters that share similar lane radii (or when in Slow-Skating)
+          if (Math.abs(a.laneRadiusX - b.laneRadiusX) < 65 || isSlowSkating) {
+            const angDiff = normalizeAngle(a.orbitAngle - b.orbitAngle);
+            const minAngGap = a.role === 'speed' && !isSlowSkating ? 0.16 : 0.28;
+            if (Math.abs(angDiff) < minAngGap) {
+              const push = (minAngGap - Math.abs(angDiff)) * 0.5 * dt;
+              if (angDiff >= 0) {
+                a.orbitAngle = normalizeAngle(a.orbitAngle + push);
+                b.orbitAngle = normalizeAngle(b.orbitAngle - push);
+              } else {
+                a.orbitAngle = normalizeAngle(a.orbitAngle - push);
+                b.orbitAngle = normalizeAngle(b.orbitAngle + push);
+              }
+            }
+          }
         }
       }
 
@@ -1598,7 +2756,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         }
 
         // 3. NPC currently sitting on the blue outer barrier (waiting until Skate Guard whistles!)
-        if (npc.sittingBarrierSpot) {
+        if (!isSlowSkating && npc.sittingBarrierSpot) {
           const spot = npc.sittingBarrierSpot;
           npc.x += (spot.x - npc.x) * Math.min(1, dt * 4.5);
           npc.y += (spot.y - npc.y) * Math.min(1, dt * 4.5);
@@ -1614,6 +2772,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
         // 4. Skate Guard intercepting an NPC sitting on the blue outer barrier!
         if (
+          !isSlowSkating &&
           npc.id === assignedBarrierGuardId &&
           activeSitterNpc &&
           activeSitterNpc.sittingBarrierSpot
@@ -1638,9 +2797,12 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             );
           } else {
             // Skate Guard arrived at the barrier-sitting skater -> Blow Whistle & Order off the barrier!
-            soundFX.playSkateGuardWhistle();
+            if (p.skateGuardWhistleEnabled) {
+              soundFX.playSkateGuardWhistle();
+            }
             npc.speechText = '📣 TRILLER! Nicht auf der Bande sitzen!';
             npc.speechTimer = 3.4;
+            speakNpcBubble(npc.speechText, npc.name, npc.gender);
             activeSitterNpc.sittingBarrierSpot = null;
             activeSitterNpc.speechText = 'Ups, schon wieder unten!';
             activeSitterNpc.speechTimer = 2.4;
@@ -1653,107 +2815,129 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           return;
         }
 
-        // 5. Slow-Skating Mode: Romantic couples skating side-by-side + skilled backward skaters!
-        const speedMult = isSlowSkating
-          ? npc.role === 'speed'
-            ? 0.55
-            : 0.68
-          : 1.0;
+        // 5. Slow-Skating Mode: 3 Romantic Couples skating synchronously (one partner skating backwards facing the other at a clean 36px distance!)
+        const coupleCfg =
+          isSlowSkating && p.hallGameMode === 'free-skate'
+            ? slowSkateCouples[npc.id]
+            : undefined;
 
-        // Pair up 'reg-2' (Neon-Nadine, female) right next to 'reg-1' (Disco-Dieter, male) & 'speed-2' (Aero-Anja) next to 'speed-3' (Turbo-Marek)
-        if (isSlowSkating && npc.id === 'reg-2') {
-          const partner = trackNpcs.find((n) => n.id === 'reg-1');
-          if (partner) {
-            npc.orbitAngle = partner.orbitAngle;
+        if (coupleCfg) {
+          if (!coupleCfg.isBackwardsPartner) {
+            npc.orbitAngle = normalizeAngle(
+              npc.orbitAngle - coupleCfg.orbitSpeed * dt
+            );
+          } else {
+            const leader = trackNpcs.find((n) => n.id === coupleCfg.leaderId);
+            if (leader) {
+              npc.orbitAngle = leader.orbitAngle;
+            }
           }
-        } else if (isSlowSkating && npc.id === 'speed-2') {
-          const partner = trackNpcs.find((n) => n.id === 'speed-3');
-          if (partner) {
-            npc.orbitAngle = partner.orbitAngle;
-          }
+
+          const trackPt = computeTrackOvalPoint(
+            rink.centerX,
+            rink.centerY,
+            coupleCfg.rx,
+            coupleCfg.ry,
+            npc.orbitAngle,
+            coupleCfg.rx > 600
+          );
+
+          // Offset the two partners cleanly along the track tangent (+18px ahead for backwards partner, -18px behind for forward partner -> 36px clean face-to-face distance!)
+          const tanCos = Math.cos(trackPt.tangentRad);
+          const tanSin = Math.sin(trackPt.tangentRad);
+          const normCos = -tanSin;
+          const normSin = tanCos;
+
+          const alongOffset = coupleCfg.isBackwardsPartner ? 18 : -18;
+          const sideOffset = coupleCfg.isBackwardsPartner ? -6 : 6;
+
+          const targetX =
+            trackPt.x + tanCos * alongOffset + normCos * sideOffset;
+          const targetY =
+            trackPt.y + tanSin * alongOffset + normSin * sideOffset;
+
+          npc.vx = (targetX - npc.x) / Math.max(0.016, dt);
+          npc.vy = (targetY - npc.y) / Math.max(0.016, dt);
+          npc.x = targetX;
+          npc.y = targetY;
+
+          // Backwards partner faces directly toward the forward partner!
+          const desiredHeading = coupleCfg.isBackwardsPartner
+            ? normalizeAngle(trackPt.tangentRad + Math.PI)
+            : trackPt.tangentRad;
+
+          npc.headingRad = rotateShortest(
+            npc.headingRad === 0 ? desiredHeading : npc.headingRad,
+            desiredHeading,
+            dt * 14
+          );
         } else {
+          const speedMult = isSlowSkating ? 0.58 : 1.0;
           npc.orbitAngle = normalizeAngle(
             npc.orbitAngle - npc.baseSpeed * speedMult * dt
           );
-        }
 
-        const effectiveRadiusX =
-          isSlowSkating && npc.id === 'reg-2'
-            ? 466
-            : isSlowSkating && npc.id === 'speed-2'
-            ? 630
-            : npc.laneRadiusX;
-        const effectiveRadiusY =
-          isSlowSkating && npc.id === 'reg-2'
-            ? 232
-            : isSlowSkating && npc.id === 'speed-2'
-            ? 315
-            : npc.laneRadiusY;
+          const trackPt = computeTrackOvalPoint(
+            rink.centerX,
+            rink.centerY,
+            npc.laneRadiusX,
+            npc.laneRadiusY,
+            npc.orbitAngle,
+            npc.role === 'speed'
+          );
 
-        const trackPt = computeTrackOvalPoint(
-          rink.centerX,
-          rink.centerY,
-          effectiveRadiusX,
-          effectiveRadiusY,
-          npc.orbitAngle,
-          npc.role === 'speed'
-        );
+          let targetX = trackPt.x;
+          let targetY = trackPt.y;
 
-        let targetX = trackPt.x;
-        let targetY = trackPt.y;
-
-        if (npc.role === 'regular' && !isSlowSkating) {
-          const sway = Math.sin(now * 0.004 + npc.laneRadiusX) * 12;
-          targetX += Math.cos(npc.orbitAngle) * sway;
-          targetY += Math.sin(npc.orbitAngle) * sway;
-        }
-
-        // Skate Guard #1 handles 15s AFK escort if player stands still on the rink
-        if (npc.id === 'guard-1' && player.afkSecondsOnTrack >= 15) {
-          targetX = player.x - 24;
-          targetY = player.y - 24;
-          const distToAfk = Math.hypot(player.x - npc.x, player.y - npc.y);
-          if (distToAfk < 65) {
-            if (!player.guardEscortActive) {
-              player.guardEscortActive = true;
-              npc.speechText = 'Trrriiiiieeeet! Nicht auf der Bahn stehen!';
-              npc.speechTimer = 3.5;
-              soundFX.playSkateGuardWhistle();
-            }
-            player.vx = (1745 - player.x) * 1.4;
-            player.vy = (550 - player.y) * 1.4;
+          if (npc.role === 'regular' && !isSlowSkating) {
+            const sway = Math.sin(now * 0.004 + npc.laneRadiusX) * 10;
+            targetX += Math.cos(npc.orbitAngle) * sway;
+            targetY += Math.sin(npc.orbitAngle) * sway;
           }
-        }
 
-        const dx = targetX - npc.x;
-        const dy = targetY - npc.y;
-        npc.vx = dx / Math.max(0.016, dt);
-        npc.vy = dy / Math.max(0.016, dt);
-        npc.x = targetX;
-        npc.y = targetY;
+          // Skate Guard #1 handles 15s AFK escort if player stands still on the rink
+          if (npc.id === 'guard-1' && player.afkSecondsOnTrack >= 15) {
+            targetX = player.x - 24;
+            targetY = player.y - 24;
+            const distToAfk = Math.hypot(player.x - npc.x, player.y - npc.y);
+            if (distToAfk < 65) {
+              if (!player.guardEscortActive) {
+                player.guardEscortActive = true;
+                npc.speechText = 'Trrriiiiieeeet! Nicht auf der Bahn stehen!';
+                npc.speechTimer = 3.5;
+                if (p.skateGuardWhistleEnabled) {
+                  soundFX.playSkateGuardWhistle();
+                }
+                speakNpcBubble(npc.speechText, npc.name, npc.gender);
+              }
+              player.vx = (1745 - player.x) * 1.4;
+              player.vy = (550 - player.y) * 1.4;
+            }
+          }
 
-        // In Slow-Skating mode, Slalom-Steffi ('reg-4') and Paceline-Leader Kai ('speed-1') skate backwards!
-        const skatesBackwards =
-          isSlowSkating && (npc.id === 'reg-4' || npc.id === 'speed-1');
-        const desiredHeading = skatesBackwards
-          ? normalizeAngle(trackPt.tangentRad + Math.PI)
-          : trackPt.tangentRad;
+          const dx = targetX - npc.x;
+          const dy = targetY - npc.y;
+          npc.vx = dx / Math.max(0.016, dt);
+          npc.vy = dy / Math.max(0.016, dt);
+          npc.x = targetX;
+          npc.y = targetY;
 
-        npc.headingRad = rotateShortest(
-          npc.headingRad === 0 ? desiredHeading : npc.headingRad,
-          desiredHeading,
-          dt * 14
-        );
+          npc.headingRad = rotateShortest(
+            npc.headingRad === 0 ? trackPt.tangentRad : npc.headingRad,
+            trackPt.tangentRad,
+            dt * 14
+          );
 
-        // Check if player is drafting in the visible Slipstream behind the Speed-Skater paceline
-        if (npc.role === 'speed') {
-          const behindX = npc.x - Math.cos(trackPt.tangentRad) * 65;
-          const behindY = npc.y - Math.sin(trackPt.tangentRad) * 65;
-          if (
-            Math.hypot(player.x - behindX, player.y - behindY) < 82 &&
-            speed > 110
-          ) {
-            player.isSlipstreamActive = true;
+          // Check if player is drafting in the visible Slipstream behind the Speed-Skater paceline
+          if (npc.role === 'speed' && !isSlowSkating) {
+            const behindX = npc.x - Math.cos(trackPt.tangentRad) * 65;
+            const behindY = npc.y - Math.sin(trackPt.tangentRad) * 65;
+            if (
+              Math.hypot(player.x - behindX, player.y - behindY) < 82 &&
+              speed > 110
+            ) {
+              player.isSlipstreamActive = true;
+            }
           }
         }
 
@@ -1767,7 +2951,10 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             npc.speechText = 'Trrriiiiieeeet! Gegen den Uhrzeigersinn!';
             npc.speechTimer = 2.8;
             player.cleanLapsStreak = 0;
-            soundFX.playSkateGuardWhistle();
+            if (p.skateGuardWhistleEnabled) {
+              soundFX.playSkateGuardWhistle();
+            }
+            speakNpcBubble(npc.speechText, npc.name, npc.gender);
           }
         }
 
@@ -1784,23 +2971,30 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
             const relSpeed = Math.hypot(player.vx - npc.vx, player.vy - npc.vy);
             if (relSpeed > 250 && player.crashTimer <= 0) {
-              player.crashTimer = 2.0;
+              player.crashTimer = 3.4;
               player.totalCrashes += 1;
               player.consecutiveCrashes += 1;
-              player.vx = nx * 140;
-              player.vy = ny * 140;
-              player.speechBubble = 'Hoppla!';
-              player.speechTimer = 2.0;
-              npc.speechText = 'Uff! Aufpassen!';
-              npc.speechTimer = 2.0;
+              player.vx = nx * 120;
+              player.vy = ny * 120;
+              player.speechBubble = 'Autsch! Sturz auf dem Parkett!';
+              player.speechTimer = 3.0;
+              npc.speechText = 'Uff! Alles okay?!';
+              npc.speechTimer = 2.4;
+              speakNpcBubble(npc.speechText, npc.name, npc.gender);
+
+              // Dispatch Sani-Sandra nurse to run across the rink to the fallen player!
+              triggerSaniNurseDispatch(player.x, player.y);
 
               if (player.consecutiveCrashes >= 3) {
                 player.consecutiveCrashes = 0;
-                player.medicRescueTimer = 3.6;
-                player.speechBubble = '🚑 Sanitäter-Einsatz! Ab an die Bande!';
-                player.speechTimer = 3.6;
+                player.medicRescueTimer = 6.5;
+                player.speechBubble =
+                  '🚑 Sanitäterin Sani-Sandra übernimmt die Erstversorgung!';
+                player.speechTimer = 4.0;
                 soundFX.playCrash(true);
-                soundFX.playSkateGuardWhistle();
+                if (p.skateGuardWhistleEnabled) {
+                  soundFX.playSkateGuardWhistle();
+                }
               } else {
                 soundFX.playCrash(false);
               }
@@ -1817,13 +3011,44 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         }
       });
 
-      if (player.isSlipstreamActive) {
-        player.slipstreamAccumSec += dt;
-        p.onChallengeProgress(
-          'slipstream_10s',
-          Math.floor(player.slipstreamAccumSec),
-          true
-        );
+      // Pairwise minimum-distance separation between non-coupled NPCs so figures and name badges never overlap!
+      for (let i = 0; i < trackNpcs.length; i++) {
+        for (let j = i + 1; j < trackNpcs.length; j++) {
+          const a = trackNpcs[i];
+          const b = trackNpcs[j];
+          if (a.sittingBarrierSpot || b.sittingBarrierSpot) continue;
+          const isCouple =
+            isSlowSkating &&
+            p.hallGameMode === 'free-skate' &&
+            slowSkateCouples[a.id] &&
+            slowSkateCouples[b.id] &&
+            slowSkateCouples[a.id].leaderId === slowSkateCouples[b.id].leaderId;
+          if (isCouple) continue;
+
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.hypot(dx, dy);
+          const minSep = 76;
+          if (dist < minSep && dist > 0.1) {
+            const push = (minSep - dist) * 0.5;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            a.x -= nx * push;
+            a.y -= ny * push;
+            b.x += nx * push;
+            b.y += ny * push;
+          }
+        }
+      }
+
+        if (player.isSlipstreamActive) {
+          player.slipstreamAccumSec += dt;
+          p.onChallengeProgress(
+            'slipstream_10s',
+            Math.floor(player.slipstreamAccumSec),
+            true
+          );
+        }
       }
 
       // ----------------------------------------------------------------------
@@ -1885,6 +3110,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               npc.hitOutTimer = 5.5;
               npc.speechText = 'Getroffen!';
               npc.speechTimer = 2.4;
+              speakNpcBubble(npc.speechText, npc.name, npc.gender);
               soundFX.playBallThrowOrHit(true);
               if (b.fromPlayer) {
                 player.ballspielHits += 1;
@@ -1983,6 +3209,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
                     specNpc.speechText =
                       cheerMessages[(chair.id + sIdx) % cheerMessages.length];
                     specNpc.speechTimer = 2.0;
+                    if (sIdx === 0) {
+                      speakNpcBubble(
+                        specNpc.speechText,
+                        specNpc.name,
+                        specNpc.gender
+                      );
+                    }
                     for (let k = 0; k < 5; k++) {
                       const ang = (Math.PI * 2 * k) / 5 + Math.random() * 0.5;
                       sparks.push({
@@ -2004,13 +3237,14 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               }
             } else if (chair.knockedOverTimer <= 0 && player.crashTimer <= 0) {
               chair.knockedOverTimer = 2.5;
-              player.crashTimer = 1.6;
+              player.crashTimer = 3.2;
               player.totalCrashes += 1;
               player.vx *= -0.35;
               player.vy *= -0.35;
               player.speechBubble = 'Schepper! Zu spät abgesprungen!';
-              player.speechTimer = 2.2;
+              player.speechTimer = 2.6;
               soundFX.playCrash(false);
+              triggerSaniNurseDispatch(player.x, player.y);
             }
           } else if (Math.hypot(relX, relY) > 125) {
             chair.clearedByPlayer = false;
@@ -2036,12 +3270,18 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       // ----------------------------------------------------------------------
       // I. RENDER COMPLETE 16:9 WIDESCREEN ARENA
       // ----------------------------------------------------------------------
+      const interpolatedRemotePlayers = Array.from(remotePlayersMap.values());
       renderCompleteScene(
         ctx,
         now,
-        p,
+        {
+          ...p,
+          fogMachineEnabled: fogEnabledRef.current,
+          arenaStyle: arenaStyleRef.current,
+        },
         player,
         trackNpcs,
+        interpolatedRemotePlayers,
         waxPatch,
         stageCloseProgress,
         slalomCones,
@@ -2050,8 +3290,41 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         trails,
         sparks,
         djSpeechBubble,
-        djHandsUpCheerTimer > 0
+        djHandsUpCheerTimer > 0,
+        fogBurstTimer,
+        saniNurse
       );
+
+      // ----------------------------------------------------------------------
+      // I2. EMIT LOCAL SKATER STATE FOR MULTIPLAYER (~18x PER SECOND / EVERY 55ms)
+      // ----------------------------------------------------------------------
+      if (
+        p.isMultiplayerActive &&
+        p.onLocalPlayerState &&
+        now - lastMultiplayerEmitTime >= 55
+      ) {
+        lastMultiplayerEmitTime = now;
+        p.onLocalPlayerState({
+          name:
+            p.isAnonymousGuest || !p.playerName.trim()
+              ? 'Gast-Skater'
+              : p.playerName.trim(),
+          shirtColor: p.playerShirtColor || '#1e1b4b',
+          x: Math.round(player.x * 10) / 10,
+          y: Math.round(player.y * 10) / 10,
+          vx: Math.round(player.vx),
+          vy: Math.round(player.vy),
+          headingRad: Math.round(player.headingRad * 1000) / 1000,
+          spinAngleOffset: Math.round(player.spinAngleOffset * 1000) / 1000,
+          isSpinning: player.isSpinning,
+          jumpZ: Math.round(player.jumpZ * 10) / 10,
+          isJumping: player.isJumping,
+          characterMode: p.characterMode,
+          kengolHat: p.kengolHatEnabled,
+          crashTimer: Math.round(player.crashTimer * 10) / 10,
+          speechBubble: player.speechBubble,
+        });
+      }
 
       // ----------------------------------------------------------------------
       // J. EMIT LIVE TELEMETRY TO REACT HUD
@@ -2063,6 +3336,9 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           player.y - ARENA_LAYOUT.djTower.centerY
         );
         const djProximity = Math.max(0.15, Math.min(1, 1 - djDist / 1350));
+        const rentalCenterX =
+          ARENA_LAYOUT.proShopAndRental.rentalBounds.x +
+          ARENA_LAYOUT.proShopAndRental.rentalBounds.width / 2;
 
         p.onTelemetry({
           x: Math.round(player.x),
@@ -2082,6 +3358,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               player.x - ARENA_LAYOUT.proShopAndRental.proShopInteractX,
               player.y - ARENA_LAYOUT.proShopAndRental.proShopInteractY
             ) <= ARENA_LAYOUT.proShopAndRental.proShopInteractRadius,
+          nearSkateRental:
+            Math.hypot(player.x - rentalCenterX, player.y - 895) <= 135,
           nearBistroCounter:
             Math.hypot(
               player.x - ARENA_LAYOUT.bistro.interactX,
@@ -2092,6 +3370,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               player.x - ARENA_LAYOUT.djTower.egoTriggerX,
               player.y - ARENA_LAYOUT.djTower.egoTriggerY
             ) <= ARENA_LAYOUT.djTower.egoTriggerRadius,
+          hasSkatesEquipped,
           djAudioProximity: djProximity,
           gamepadConnected,
           gamepadName,
@@ -2383,24 +3662,48 @@ function resolvePlayerArenaCollisions(
 // WIDESCREEN 2D/2.5D RENDERER (ALL ZONES, CURVED DJ-TOWER, KENGOL BREAKDANCERS)
 // ============================================================================
 
+let activeArenaStyle: ArenaVisualStyle = 'classic-neon';
+
+interface DeferredOverlayItem {
+  kind: 'badge' | 'bubble';
+  worldX: number;
+  worldY: number;
+  text: string;
+  borderColor?: string;
+  hasMultiplayerStar?: boolean;
+}
+let isDeferringOverlays = false;
+const deferredOverlayQueue: DeferredOverlayItem[] = [];
+
 function renderCompleteScene(
   ctx: CanvasRenderingContext2D,
   now: number,
   p: {
     playerName: string;
+    playerShirtColor?: string;
     isAnonymousGuest: boolean;
     showNames: boolean;
     characterMode: PlayerCharacterMode;
     cameraMode: CameraViewMode;
     lightingMode: LightingMode;
     centerStageMode: CenterStageMode;
+    concertLightingMode: ConcertLightingMode;
+    arenaStyle: ArenaVisualStyle;
+    activeDjName: string;
     activeBandName: string;
+    bandSkinTone: BandSkinToneMode;
+    bandGender: BandGenderMode;
     hallGameMode: HallGameMode;
     djTickerText: string;
     specialSkaters: string[];
     ghostSkatersEnabled: boolean;
     kengolHatEnabled: boolean;
     upgrades: ProShopUpgradesState;
+    fogMachineEnabled: boolean;
+    hasOwnSkates: boolean;
+    hasRentedSkates: boolean;
+    drinkChipAvailable: boolean;
+    isMultiplayerActive?: boolean;
   },
   player: {
     x: number;
@@ -2423,6 +3726,7 @@ function renderCompleteScene(
     speechBubble: string | null;
   },
   trackNpcs: TrackNpc[],
+  remotePlayers: InterpolatedRemotePlayer[],
   waxPatch: { x: number; y: number; radiusX: number; radiusY: number },
   stageCloseProgress: number,
   slalomCones: SlalomCone[],
@@ -2431,13 +3735,28 @@ function renderCompleteScene(
   trails: WheelTrailPoint[],
   sparks: SparkParticle[],
   djSpeechBubble: string | null,
-  djHandsUpActive: boolean
+  djHandsUpActive: boolean,
+  fogBurstTimer: number,
+  saniNurse: {
+    active: boolean;
+    phase: 'idle' | 'running-in' | 'kneeling' | 'walking-out';
+    x: number;
+    y: number;
+    headingRad: number;
+    speechText: string | null;
+  }
 ): void {
   const isPutzlicht = p.lightingMode === 'putzlicht';
   const isBlacklight = p.lightingMode === 'blacklight';
   const isSlowSkating = p.lightingMode === 'slow-skating';
+  activeArenaStyle = p.arenaStyle || 'classic-neon';
+
+  // Defer all skater/NPC name badges & speech bubbles so they are drawn ABOVE the fog and floor spots!
+  deferredOverlayQueue.length = 0;
+  isDeferringOverlays = true;
 
   ctx.save();
+  ctx.imageSmoothingEnabled = activeArenaStyle !== 'pixel-16bit';
 
   ctx.fillStyle = isPutzlicht
     ? '#475569'
@@ -2445,6 +3764,10 @@ function renderCompleteScene(
     ? '#110726'
     : isSlowSkating
     ? '#1a0f1e'
+    : activeArenaStyle === 'palladium-1989'
+    ? '#080612'
+    : activeArenaStyle === 'pixel-16bit'
+    ? '#121024'
     : '#181B24';
   ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
@@ -2472,33 +3795,85 @@ function renderCompleteScene(
     ctx.translate(-lookAheadX, -lookAheadY);
   }
 
-  // 1. OUTER HALL FLOOR
-  ctx.fillStyle = isPutzlicht
-    ? '#475569'
-    : isBlacklight
-    ? '#110726'
-    : isSlowSkating
-    ? '#1e1224'
-    : '#232631';
-  ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  // 1. OUTER HALL FLOOR & EPOCH STYLE WALL/FLOOR TREATMENT
+  switch (activeArenaStyle) {
+    case 'palladium-1989': {
+      // Windowless dark 1989 hall floor & side wall neon/chrome ornaments
+      ctx.fillStyle = isPutzlicht ? '#334155' : '#090714';
+      ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
-  ctx.strokeStyle = isPutzlicht
-    ? 'rgba(255,255,255,0.08)'
-    : isBlacklight
-    ? 'rgba(139,92,246,0.12)'
-    : 'rgba(255,255,255,0.04)';
-  ctx.lineWidth = 1;
-  for (let gx = 0; gx < WORLD_WIDTH; gx += 48) {
-    ctx.beginPath();
-    ctx.moveTo(gx, 0);
-    ctx.lineTo(gx, WORLD_HEIGHT);
-    ctx.stroke();
-  }
-  for (let gy = 0; gy < WORLD_HEIGHT; gy += 48) {
-    ctx.beginPath();
-    ctx.moveTo(0, gy);
-    ctx.lineTo(WORLD_WIDTH, gy);
-    ctx.stroke();
+      // Subtle chrome/violet 1989 carpet grid outside the rink
+      ctx.strokeStyle = 'rgba(192, 132, 252, 0.09)';
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx < WORLD_WIDTH; gx += 48) {
+        ctx.beginPath();
+        ctx.moveTo(gx, 0);
+        ctx.lineTo(gx, WORLD_HEIGHT);
+        ctx.stroke();
+      }
+      for (let gy = 0; gy < WORLD_HEIGHT; gy += 48) {
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.lineTo(WORLD_WIDTH, gy);
+        ctx.stroke();
+      }
+
+      // Windowless 1989 Right & Bottom Wall Geometric Neon/Chrome Line Ornaments
+      ctx.save();
+      ctx.strokeStyle = 'rgba(226, 232, 240, 0.35)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(10, 8, WORLD_WIDTH - 20, WORLD_HEIGHT - 16);
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.38)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(14, 12, WORLD_WIDTH - 28, WORLD_HEIGHT - 24);
+      ctx.restore();
+      break;
+    }
+    case 'pixel-16bit': {
+      // 16-Bit Arcade checkerboard tile floor
+      ctx.fillStyle = isPutzlicht ? '#3b4262' : '#141229';
+      ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      for (let gx = 0; gx < WORLD_WIDTH; gx += 32) {
+        for (let gy = 0; gy < WORLD_HEIGHT; gy += 32) {
+          if (((gx + gy) / 32) % 2 === 0) {
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.05)';
+            ctx.fillRect(gx, gy, 32, 32);
+          }
+        }
+      }
+      break;
+    }
+    case 'classic-neon':
+    default: {
+      ctx.fillStyle = isPutzlicht
+        ? '#475569'
+        : isBlacklight
+        ? '#110726'
+        : isSlowSkating
+        ? '#1e1224'
+        : '#232631';
+      ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+
+      ctx.strokeStyle = isPutzlicht
+        ? 'rgba(255,255,255,0.08)'
+        : isBlacklight
+        ? 'rgba(139,92,246,0.12)'
+        : 'rgba(255,255,255,0.04)';
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx < WORLD_WIDTH; gx += 48) {
+        ctx.beginPath();
+        ctx.moveTo(gx, 0);
+        ctx.lineTo(gx, WORLD_HEIGHT);
+        ctx.stroke();
+      }
+      for (let gy = 0; gy < WORLD_HEIGHT; gy += 48) {
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.lineTo(WORLD_WIDTH, gy);
+        ctx.stroke();
+      }
+      break;
+    }
   }
 
   // 2. SEAMLESS WARM DARK HARDWOOD PARQUET WITH CURVED QUARTER-CIRCLE TOP-LEFT TRANSITION TO DJ-TOWER
@@ -2552,12 +3927,30 @@ function renderCompleteScene(
   } else if (isSlowSkating) {
     woodGrad.addColorStop(0, '#381b18');
     woodGrad.addColorStop(1, '#220e10');
+  } else if (activeArenaStyle === 'palladium-1989') {
+    // Darker 1989 hardwood parquet so golden disco-ball light dots pop vividly!
+    woodGrad.addColorStop(0, '#2a160d');
+    woodGrad.addColorStop(1, '#170b06');
+  } else if (activeArenaStyle === 'pixel-16bit') {
+    woodGrad.addColorStop(0, '#4a2511');
+    woodGrad.addColorStop(1, '#2d1508');
   } else {
     woodGrad.addColorStop(0, '#3f2213');
     woodGrad.addColorStop(1, '#2b160c');
   }
   ctx.fillStyle = woodGrad;
   ctx.fillRect(rink.x, rink.y, rink.width, rink.height);
+
+  // In 'pixel-16bit' mode, draw stepped retro 16-bit parquet planks & pixel track border!
+  if (activeArenaStyle === 'pixel-16bit') {
+    ctx.fillStyle = 'rgba(5, 8, 17, 0.22)';
+    for (let py = rink.y; py < rink.y + rink.height; py += 16) {
+      ctx.fillRect(rink.x, py, rink.width, 2);
+    }
+    ctx.strokeStyle = '#050811';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(rink.x + 12, rink.y + 12, rink.width - 24, rink.height - 24);
+  }
 
   // Subtle green neon reflection glow on the parquet directly in front of the "✦✦ PALLADIUM HANAU ✦✦" back-wall sign!
   const signGlowGrad = ctx.createRadialGradient(
@@ -2623,22 +4016,24 @@ function renderCompleteScene(
   }
   ctx.globalAlpha = 1;
 
-  // Render Visible Slipstream (Windschatten) behind the outer Speed-Skater Paceline
-  const speedSkaters = trackNpcs.filter((n) => n.role === 'speed');
-  for (const sp of speedSkaters) {
-    const tailX = sp.x - Math.cos(sp.headingRad) * 52;
-    const tailY = sp.y - Math.sin(sp.headingRad) * 52;
-    ctx.strokeStyle = isBlacklight
-      ? 'rgba(0, 240, 255, 0.42)'
-      : 'rgba(186, 230, 253, 0.28)';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(
-      sp.x - Math.cos(sp.headingRad) * 18,
-      sp.y - Math.sin(sp.headingRad) * 18
-    );
-    ctx.lineTo(tailX, tailY);
-    ctx.stroke();
+  // Render Visible Slipstream (Windschatten) behind the outer Speed-Skater Paceline (only in Solo mode)
+  if (!p.isMultiplayerActive) {
+    const speedSkaters = trackNpcs.filter((n) => n.role === 'speed');
+    for (const sp of speedSkaters) {
+      const tailX = sp.x - Math.cos(sp.headingRad) * 52;
+      const tailY = sp.y - Math.sin(sp.headingRad) * 52;
+      ctx.strokeStyle = isBlacklight
+        ? 'rgba(0, 240, 255, 0.42)'
+        : 'rgba(186, 230, 253, 0.28)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(
+        sp.x - Math.cos(sp.headingRad) * 18,
+        sp.y - Math.sin(sp.headingRad) * 18
+      );
+      ctx.lineTo(tailX, tailY);
+      ctx.stroke();
+    }
   }
 
   ctx.restore(); // End Rink Clip
@@ -2719,16 +4114,22 @@ function renderCompleteScene(
     djHandsUpActive
   );
 
-  // 5. 90°-ROTATED CENTER U-ISLANDS (`[` LEFT & `]` RIGHT), JAM-SKATERS IN BETWEEN, OR COLLAPSIBLE EVENT STAGE
+  // 5. 90°-ROTATED CENTER U-ISLANDS (`[` LEFT & `]` RIGHT), JAM-SKATERS IN BETWEEN, OR COLLAPSIBLE EVENT STAGE (WITH TRUSS, PAR SPOTS, LIGHT ORGANS & FOG)
+  const fogIntensity =
+    fogBurstTimer > 0 ? 1.35 : p.fogMachineEnabled ? 0.85 : 0;
   renderCenterIslandsOrStage(
     ctx,
     now,
     stageCloseProgress,
     p.centerStageMode,
     p.activeBandName,
+    p.bandSkinTone,
+    p.bandGender,
     p.showNames,
     isBlacklight,
-    djHandsUpActive
+    djHandsUpActive,
+    fogIntensity,
+    Boolean(p.isMultiplayerActive)
   );
 
   // 6. CURVED QUARTER-CIRCLE TOP-LEFT CORNER DJ-TOWER ("KLECKNIX" TURNTABLES + VINYL CABINET + DJ SPEECH BUBBLE)
@@ -2736,13 +4137,21 @@ function renderCompleteScene(
     ctx,
     now,
     p.djTickerText,
+    p.activeDjName || 'DJ Magic Force',
     p.showNames,
     isBlacklight,
     djSpeechBubble
   );
 
   // 7. HALL TOUR: RIGHT WALL BENCHES, ANGLED CASHIER -> PRO-SHOP -> VERLEIH -> COMPACT BOTTOM-LEFT BISTRO
-  renderHallTourZonesAndStaff(ctx, now, p.showNames, isBlacklight);
+  renderHallTourZonesAndStaff(
+    ctx,
+    now,
+    p.showNames,
+    isBlacklight,
+    p.hasOwnSkates || p.hasRentedSkates,
+    p.drinkChipAvailable
+  );
 
   // 8. HALLEN-SPIELE PROPS (SLALOM CONES, FOLDING CHAIRS, NEON SOFTBALLS)
   if (p.hallGameMode === 'slalom') {
@@ -2785,119 +4194,214 @@ function renderCompleteScene(
     ctx.shadowBlur = 0;
   }
 
-  // 9. RENDER TRACK NPCS (WITH FEMALE PONYTAILS/LEGWARMERS, MALE HAIRCUTS, AND SLOW-SKATE HEARTS)
-  if (isSlowSkating && p.hallGameMode === 'free-skate') {
-    const pairIds = [
-      ['reg-1', 'reg-2'],
-      ['speed-3', 'speed-2'],
-    ];
-    for (const [idA, idB] of pairIds) {
-      const a = trackNpcs.find((n) => n.id === idA);
-      const b = trackNpcs.find((n) => n.id === idB);
-      if (a && b) {
-        ctx.strokeStyle = 'rgba(244, 114, 182, 0.55)';
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.stroke();
-        ctx.font = '13px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('💕', (a.x + b.x) / 2, (a.y + b.y) / 2 - 8);
-      }
+  // 9. RENDER TRACK NPCS (ONLY IN SOLO MODE — IN MULTIPLAYER, THE RINK BELONGS EXCLUSIVELY TO REAL CONNECTED PLAYERS!)
+  if (!p.isMultiplayerActive) {
+    if (isSlowSkating && p.hallGameMode === 'free-skate') {
+      const pairIds = [
+        ['reg-1', 'reg-2'],
+        ['speed-3', 'speed-2'],
+        ['speed-1', 'speed-4'],
+      ];
+      pairIds.forEach(([idA, idB], pairIdx) => {
+        const a = trackNpcs.find((n) => n.id === idA);
+        const b = trackNpcs.find((n) => n.id === idB);
+        if (a && b) {
+          const midX = (a.x + b.x) / 2;
+          const midY = (a.y + b.y) / 2;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const perpX = -dy * 0.22;
+          const perpY = dx * 0.22;
+
+          // Visible two-arm hand-holding connection ("Händchenhalten-Verbindung") between both partners
+          ctx.save();
+          ctx.lineCap = 'round';
+          ctx.lineWidth = 4.2;
+          ctx.strokeStyle = a.shirtColor;
+          ctx.beginPath();
+          ctx.moveTo(a.x + perpX * 0.5, a.y + perpY * 0.5);
+          ctx.lineTo(midX + perpX * 0.8, midY + perpY * 0.8);
+          ctx.stroke();
+
+          ctx.strokeStyle = b.shirtColor;
+          ctx.beginPath();
+          ctx.moveTo(b.x + perpX * 0.5, b.y + perpY * 0.5);
+          ctx.lineTo(midX + perpX * 0.8, midY + perpY * 0.8);
+          ctx.stroke();
+
+          // Clasped hands in the middle (left & right hand holding)
+          ctx.fillStyle = '#fde68a';
+          ctx.strokeStyle = '#f472b6';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(midX + perpX * 0.8, midY + perpY * 0.8, 4.2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+
+          // Second hand-holding link on the other side
+          ctx.lineWidth = 3.6;
+          ctx.strokeStyle = a.shirtColor;
+          ctx.beginPath();
+          ctx.moveTo(a.x - perpX * 0.5, a.y - perpY * 0.5);
+          ctx.lineTo(midX - perpX * 0.8, midY - perpY * 0.8);
+          ctx.stroke();
+          ctx.strokeStyle = b.shirtColor;
+          ctx.beginPath();
+          ctx.moveTo(b.x - perpX * 0.5, b.y - perpY * 0.5);
+          ctx.lineTo(midX - perpX * 0.8, midY - perpY * 0.8);
+          ctx.stroke();
+          ctx.fillStyle = '#fde68a';
+          ctx.beginPath();
+          ctx.arc(midX - perpX * 0.8, midY - perpY * 0.8, 3.8, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Small pink/red pixel hearts ("♥") gently floating upward ONLY above these 3 couples!
+          for (let hIdx = 0; hIdx < 2; hIdx++) {
+            const cycle = (now * 0.0009 + pairIdx * 0.7 + hIdx * 0.5) % 1.0;
+            const floatY = midY - 22 - cycle * 32;
+            const swayX =
+              midX + Math.sin(now * 0.005 + pairIdx + hIdx * 2) * 10;
+            const alpha = Math.sin(cycle * Math.PI);
+            ctx.globalAlpha = Math.max(0.15, alpha * 0.92);
+            ctx.fillStyle = hIdx % 2 === 0 ? '#ff2a85' : '#ef4444';
+            ctx.font = 'bold 13px "Silkscreen", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('♥', swayX, floatY);
+          }
+          ctx.restore();
+        }
+      });
+    }
+
+    for (const npc of trackNpcs) {
+      renderCharacterSprite(ctx, now, {
+        x: npc.x,
+        y: npc.y,
+        headingRad: npc.headingRad,
+        jumpZ: 0,
+        gender: npc.gender,
+        isWheelchair: npc.role === 'wheelchair-npc',
+        isSkateGuard: npc.role === 'guard',
+        isSpeedSkater: npc.role === 'speed',
+        isGhost: false,
+        isPalladiumanerStaff: false,
+        shirtColor: npc.shirtColor,
+        accentColor: npc.accentColor,
+        wheelColor: npc.wheelColor,
+        legwarmerColor: npc.legwarmerColor,
+        name: npc.name,
+        showName: p.showNames,
+        isBlacklight,
+        crashTimer: npc.crashTimer,
+        speechBubble: npc.speechText,
+      });
+    }
+
+    // Render Special Ghost Skaters (When enabled in Admin Terminal — only in Solo mode!)
+    if (p.ghostSkatersEnabled) {
+      p.specialSkaters.forEach((ghostName, idx) => {
+        let gx: number;
+        let gy: number;
+        let gHeading: number;
+
+        if (p.hallGameMode === 'stuhlsprung') {
+          gx = 268;
+          gy = 395 + idx * 80;
+          gHeading = Math.atan2(player.y - gy, player.x - gx);
+        } else {
+          const ghostAngle = normalizeAngle(
+            -now * 0.00058 -
+              (idx * Math.PI * 2) / Math.max(1, p.specialSkaters.length)
+          );
+          gx = rink.centerX + Math.cos(ghostAngle) * 355;
+          gy = rink.centerY + Math.sin(ghostAngle) * 195;
+          const tx = Math.sin(ghostAngle) * 355;
+          const ty = -Math.cos(ghostAngle) * 195;
+          gHeading = Math.atan2(ty, tx);
+
+          const perpX = -Math.sin(gHeading) * 11;
+          const perpY = Math.cos(gHeading) * 11;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(0, 240, 255, 0.24)';
+          ctx.lineWidth = 2.2;
+          ctx.setLineDash([5, 5]);
+          [-1, 1].forEach((side) => {
+            const sx = gx + perpX * side;
+            const sy = gy + perpY * side;
+            ctx.beginPath();
+            ctx.moveTo(
+              sx - Math.cos(gHeading) * 10,
+              sy - Math.sin(gHeading) * 10
+            );
+            ctx.lineTo(
+              sx - Math.cos(gHeading) * 46,
+              sy - Math.sin(gHeading) * 46
+            );
+            ctx.stroke();
+          });
+          ctx.restore();
+        }
+
+        renderCharacterSprite(ctx, now, {
+          x: gx,
+          y: gy,
+          headingRad: gHeading,
+          jumpZ: 0,
+          gender: 'male',
+          isWheelchair: false,
+          isSkateGuard: false,
+          isSpeedSkater: false,
+          isGhost: true,
+          isPalladiumanerStaff: false,
+          shirtColor: '#00f0ff',
+          accentColor: '#ffffff',
+          wheelColor: '#00f0ff',
+          name: `👻 ${ghostName}`,
+          showName: p.showNames,
+          isBlacklight,
+          crashTimer: 0,
+          speechBubble: null,
+        });
+      });
     }
   }
 
-  for (const npc of trackNpcs) {
-    renderCharacterSprite(ctx, now, {
-      x: npc.x,
-      y: npc.y,
-      headingRad: npc.headingRad,
-      jumpZ: 0,
-      gender: npc.gender,
-      isWheelchair: npc.role === 'wheelchair-npc',
-      isSkateGuard: npc.role === 'guard',
-      isSpeedSkater: npc.role === 'speed',
-      isGhost: false,
-      isPalladiumanerStaff: false,
-      shirtColor: npc.shirtColor,
-      accentColor: npc.accentColor,
-      wheelColor: npc.wheelColor,
-      legwarmerColor: npc.legwarmerColor,
-      name: npc.name,
-      showName: p.showNames,
-      isBlacklight,
-      crashTimer: npc.crashTimer,
-      speechBubble: npc.speechText,
-    });
-  }
-
-  // Render Special Ghost Skaters (When enabled in Admin Terminal — with subtle dual roller-wheel tracks instead of stick-tail!)
-  if (p.ghostSkatersEnabled) {
-    p.specialSkaters.forEach((ghostName, idx) => {
-      let gx: number;
-      let gy: number;
-      let gHeading: number;
-
-      if (p.hallGameMode === 'stuhlsprung') {
-        gx = 268;
-        gy = 395 + idx * 80;
-        gHeading = Math.atan2(player.y - gy, player.x - gx);
-      } else {
-        const ghostAngle = normalizeAngle(
-          -now * 0.00058 -
-            (idx * Math.PI * 2) / Math.max(1, p.specialSkaters.length)
-        );
-        gx = rink.centerX + Math.cos(ghostAngle) * 355;
-        gy = rink.centerY + Math.sin(ghostAngle) * 195;
-        const tx = Math.sin(ghostAngle) * 355;
-        const ty = -Math.cos(ghostAngle) * 195;
-        gHeading = Math.atan2(ty, tx);
-
-        // Subtle dual roller-wheel tracks ("dezente Rollen-Spuren" instead of a single stick tail!)
-        const perpX = -Math.sin(gHeading) * 11;
-        const perpY = Math.cos(gHeading) * 11;
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0, 240, 255, 0.24)';
-        ctx.lineWidth = 2.2;
-        ctx.setLineDash([5, 5]);
-        [-1, 1].forEach((side) => {
-          const sx = gx + perpX * side;
-          const sy = gy + perpY * side;
-          ctx.beginPath();
-          ctx.moveTo(sx - Math.cos(gHeading) * 10, sy - Math.sin(gHeading) * 10);
-          ctx.lineTo(sx - Math.cos(gHeading) * 46, sy - Math.sin(gHeading) * 46);
-          ctx.stroke();
-        });
-        ctx.restore();
-      }
-
+  // 9b. RENDER CONNECTED HUMAN MULTIPLAYER SKATERS (WITH SMOOTH INTERPOLATION & GOLDEN/TURQUOISE STAR BADGE!)
+  if (p.isMultiplayerActive && remotePlayers.length > 0) {
+    for (const rp of remotePlayers) {
       renderCharacterSprite(ctx, now, {
-        x: gx,
-        y: gy,
-        headingRad: gHeading,
-        jumpZ: 0,
+        x: rp.renderX,
+        y: rp.renderY,
+        headingRad: rp.renderHeading,
+        jumpZ: rp.renderJumpZ,
         gender: 'male',
-        isWheelchair: false,
+        isWheelchair: rp.characterMode === 'wheelchair',
         isSkateGuard: false,
         isSpeedSkater: false,
-        isGhost: true,
+        isGhost: false,
         isPalladiumanerStaff: false,
-        shirtColor: '#00f0ff',
-        accentColor: '#ffffff',
-        wheelColor: '#00f0ff',
-        name: `👻 ${ghostName}`,
+        shirtColor: rp.shirtColor || '#00f0ff',
+        accentColor: '#fde047',
+        wheelColor: rp.kengolHat ? '#ff2a85' : '#00f0ff',
+        kengolHat: rp.kengolHat,
+        kengoShoesWhitePink: rp.kengolHat,
+        isCustomOwnSkates: !rp.kengolHat,
+        name: rp.name || 'Gast-Skater',
         showName: p.showNames,
         isBlacklight,
-        crashTimer: 0,
-        speechBubble: null,
+        crashTimer: rp.crashTimer || 0,
+        speechBubble: rp.speechBubble || null,
+        hasMultiplayerStar: true,
       });
-    });
+    }
   }
 
   // 10. RENDER PLAYER CHARACTER (Supports [H] Kengol-Bucket-Hat & White-Pink Kengo Skates!)
   const displayPlayerName =
     p.isAnonymousGuest || !p.playerName.trim() ? '' : p.playerName.trim();
+
+  const playerHasSkates =
+    p.characterMode === 'wheelchair' || p.hasOwnSkates || p.hasRentedSkates;
 
   renderCharacterSprite(ctx, now, {
     x: player.x,
@@ -2910,23 +4414,36 @@ function renderCompleteScene(
     isSpeedSkater: false,
     isGhost: false,
     isPalladiumanerStaff: false,
-    shirtColor: p.hallGameMode === 'ballspiel' ? '#070a10' : '#1e1b4b',
+    shirtColor:
+      p.hallGameMode === 'ballspiel'
+        ? '#070a10'
+        : p.playerShirtColor || '#1e1b4b',
     accentColor: '#39ff14',
-    wheelColor: p.kengolHatEnabled ? '#ff2a85' : '#00f0ff',
+    wheelColor: p.kengolHatEnabled
+      ? '#ff2a85'
+      : p.hasOwnSkates
+      ? '#39ff14'
+      : '#38bdf8',
     kengolHat: p.kengolHatEnabled,
     kengoShoesWhitePink: p.kengolHatEnabled,
+    isStreetShoes: !playerHasSkates,
+    isRentalSkates: !p.hasOwnSkates && p.hasRentedSkates && !p.kengolHatEnabled,
+    isCustomOwnSkates: p.hasOwnSkates && !p.kengolHatEnabled,
     name: displayPlayerName,
     showName: p.showNames && displayPlayerName.length > 0,
     isBlacklight,
     crashTimer: player.crashTimer,
     speechBubble: player.speechBubble,
-    underglowColor: p.upgrades.underglowEnabled
-      ? p.upgrades.underglowColor
-      : undefined,
+    underglowColor:
+      p.upgrades.underglowEnabled && playerHasSkates
+        ? p.upgrades.underglowColor
+        : undefined,
+    hasMultiplayerStar: Boolean(p.isMultiplayerActive),
   });
 
-  if (player.medicRescueTimer > 0) {
-    renderParamedicsStretcher(ctx, player.x, player.y);
+  // Render Nurse / Paramedic ("SANI-SANDRA") in White Coat with Red Cross Symbol when active!
+  if (saniNurse.active) {
+    renderSaniNurseSprite(ctx, now, saniNurse, p.showNames);
   }
 
   for (const sp of sparks) {
@@ -2946,11 +4463,70 @@ function renderCompleteScene(
     ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
   }
 
+  // 11b. CONCERT LIGHTING LAYER (Automatik / Immer An / Aus):
+  // Dims the rest of the hall with a dark veil while keeping the Live-Band-Bühne cut out and lit by 80s spotlights (Warm White, Magenta, Cyan)
+  const isBandPlayingShowCycle = (now * 0.001) % 48 < 41;
+  const isConcertLightingActive =
+    !isPutzlicht &&
+    (p.concertLightingMode === 'on' ||
+      (p.concertLightingMode === 'auto' &&
+        p.centerStageMode === 'live-band' &&
+        isBandPlayingShowCycle));
+  if (isConcertLightingActive) {
+    renderConcertStageSpotlightOverlay(ctx, now, stageCloseProgress);
+  }
+
+  // 11c. VISIBLE 80s HALL FOG CLOUDS (OVER floor & floor spots, UNDER all Name Badges & HUD Overlays!):
+  // Triggered when Fog Machine is ON (fogMachineEnabled), or automatically when Live-Band is active, or during a Fog Burst!
+  const shouldRenderHallFog =
+    p.fogMachineEnabled ||
+    p.centerStageMode === 'live-band' ||
+    fogBurstTimer > 0;
+  if (shouldRenderHallFog) {
+    const burstBoost =
+      fogBurstTimer > 0 ? Math.min(1.0, fogBurstTimer / 5.0) : 0;
+    render80sDancefloorFogBanks(
+      ctx,
+      now,
+      p.fogMachineEnabled || p.centerStageMode === 'live-band',
+      burstBoost,
+      isBlacklight,
+      isSlowSkating,
+      isConcertLightingActive
+    );
+  }
+
+  // 11d. FLUSH DEFERRED NAME BADGES & SPEECH BUBBLES ON TOP OF FOG & LIGHTING!
+  isDeferringOverlays = false;
+  for (const item of deferredOverlayQueue) {
+    if (item.kind === 'badge') {
+      drawRetroNameBadge(
+        ctx,
+        item.worldX,
+        item.worldY,
+        item.text,
+        item.borderColor || '#00f0ff',
+        item.hasMultiplayerStar
+      );
+    }
+  }
+  for (const item of deferredOverlayQueue) {
+    if (item.kind === 'bubble') {
+      drawSpeechBubble(ctx, item.worldX, item.worldY, item.text);
+    }
+  }
+
   ctx.restore(); // End world camera transform
 
   // 12. FULLSCREEN CAMERA FIX: RENDER CRISP RADAR-MINIMAP TOP-RIGHT WHEN IN CHASE OR EGO VIEW
   if (p.cameraMode === 'chase' || p.cameraMode === 'ego') {
-    renderRadarMinimap(ctx, player, trackNpcs, p.cameraMode);
+    renderRadarMinimap(
+      ctx,
+      player,
+      p.isMultiplayerActive ? [] : trackNpcs,
+      remotePlayers,
+      p.cameraMode
+    );
   }
 }
 
@@ -3023,6 +4599,57 @@ function renderSloped25DBackWallAndVerticalMirror(
   ctx.moveTo(bottomLeftX, bottomY);
   ctx.lineTo(bottomRightX, bottomY);
   ctx.stroke();
+
+  // PALLADIUM 1989 EPOCH LOOK: Windowless dark walls with geometric 80s line ornaments under violet Blacklight ceiling tubes!
+  if (activeArenaStyle === 'palladium-1989') {
+    // Violet Blacklight UV Ceiling Tubes along the top cornice
+    const tubeSegments = 6;
+    const spanW = topRightX - topLeftX - 80;
+    for (let t = 0; t < tubeSegments; t++) {
+      const tx1 = topLeftX + 40 + (spanW / tubeSegments) * t + 10;
+      const tx2 = topLeftX + 40 + (spanW / tubeSegments) * (t + 1) - 10;
+      ctx.save();
+      ctx.shadowColor = '#c084fc';
+      ctx.shadowBlur = 16;
+      ctx.strokeStyle = '#d8b4fe';
+      ctx.lineWidth = 4.5;
+      ctx.beginPath();
+      ctx.moveTo(tx1, topY + 6);
+      ctx.lineTo(tx2, topY + 6);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Geometric 80s Line Ornaments (Triangles, Chevrons & Parallel Stripes in Cyan, Magenta & Gold)
+    ctx.save();
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = 'rgba(0, 240, 255, 0.42)';
+    ctx.beginPath();
+    ctx.moveTo(bottomLeftX + 20, bottomY - 16);
+    ctx.lineTo(bottomRightX - 20, bottomY - 16);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255, 42, 133, 0.42)';
+    ctx.beginPath();
+    ctx.moveTo(bottomLeftX + 24, bottomY - 22);
+    ctx.lineTo(bottomRightX - 24, bottomY - 22);
+    ctx.stroke();
+
+    // 80s geometric zig-zag / triangle ornaments Left & Right of the center neon sign
+    [630, 1480].forEach((ox) => {
+      const oy = (topY + bottomY) / 2 + 4;
+      ctx.strokeStyle = 'rgba(253, 224, 71, 0.55)';
+      ctx.beginPath();
+      ctx.moveTo(ox - 55, oy + 14);
+      ctx.lineTo(ox - 28, oy - 18);
+      ctx.lineTo(ox, oy + 14);
+      ctx.lineTo(ox + 28, oy - 18);
+      ctx.lineTo(ox + 55, oy + 14);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
   ctx.restore();
 
   // 2. ELEGANT 80s CUT-OUT NEON SIGN "PALLADIUM HANAU" + NEON WINGED ROLLER SKATE & PULSATING PA SPEAKER BOXES
@@ -3197,6 +4824,118 @@ function renderSloped25DBackWallAndVerticalMirror(
       djHandsUpActive
     );
   }
+
+  // 6. 3 RELAXED SPECTATORS AT THE EDGE OF THE SPIEGELWAND - JAM-DANCE ZONE
+  // Mixed group of girls and guys with diverse skin tones and 80s outfits, cleanly outside the skating lane!
+  const jamSpectators = [
+    {
+      x: mirrorWall.x + mirrorWall.width + 18,
+      y: mirrorWall.y + 32,
+      gender: 'female' as const,
+      skinCol: '#6b3e26',
+      shirtCol: '#ec4899',
+      accentCol: '#fde047',
+      hairCol: '#171717',
+      phase: 0.3,
+    },
+    {
+      x: mirrorWall.x + mirrorWall.width + 20,
+      y: mirrorWall.y + 182,
+      gender: 'male' as const,
+      skinCol: '#fde68a',
+      shirtCol: '#06b6d4',
+      accentCol: '#ff2a85',
+      hairCol: '#78350f',
+      phase: 1.9,
+    },
+    {
+      x: mirrorWall.x + mirrorWall.width + 18,
+      y: mirrorWall.y + 348,
+      gender: 'female' as const,
+      skinCol: '#d97742',
+      shirtCol: '#a855f7',
+      accentCol: '#39ff14',
+      hairCol: '#1e1b4b',
+      phase: 3.6,
+    },
+  ];
+
+  jamSpectators.forEach((sp, idx) => {
+    const bob = Math.sin(now * 0.008 + sp.phase) * 2.5;
+    const clapCycle = (now * 0.001 + idx * 2.7) % 9.0;
+    const isClapping = clapCycle < 2.4 || djHandsUpActive;
+    const clapOffset = isClapping ? Math.abs(Math.sin(now * 0.025 + idx)) * 5 : 2;
+
+    ctx.save();
+    ctx.translate(sp.x, sp.y + bob);
+
+    // Subtle floor shadow
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+    ctx.beginPath();
+    ctx.ellipse(0, 6, 15, 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Sneakers facing right toward the Jam-Dancers (+X)
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-3, -11, 10, 4.5);
+    ctx.fillRect(-3, 6.5, 10, 4.5);
+    ctx.fillStyle = sp.accentCol;
+    ctx.fillRect(0, -10, 6, 2);
+    ctx.fillRect(0, 7.5, 6, 2);
+
+    // 80s Jacket / Top
+    const shSpan = sp.gender === 'female' ? 24 : 28;
+    ctx.fillStyle = sp.shirtCol;
+    ctx.strokeStyle = isBlacklight ? '#00f0ff' : sp.accentCol;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(-9, -shSpan / 2, 18, shSpan, 7);
+    ctx.fill();
+    ctx.stroke();
+
+    // Clapping / cheering arms in front (+X)
+    ctx.strokeStyle = sp.skinCol;
+    ctx.lineWidth = 3.2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(4, -8);
+    ctx.lineTo(13, -1.5 - clapOffset);
+    ctx.moveTo(4, 8);
+    ctx.lineTo(13, 1.5 + clapOffset);
+    ctx.stroke();
+
+    // Head & Hair
+    ctx.fillStyle = sp.skinCol;
+    ctx.beginPath();
+    ctx.arc(1, 0, 7.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = sp.hairCol;
+    if (sp.gender === 'female') {
+      ctx.beginPath();
+      ctx.arc(-1, 0, 7.5, 0.7, -0.7);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(-9, 0, 5.5, 3.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.arc(-1, 0, 7.5, 0.8, -0.8);
+      ctx.fill();
+      ctx.fillStyle = sp.accentCol;
+      ctx.fillRect(2, -6.5, 2.5, 13);
+    }
+
+    // Occasional brief compact clap/cheer icon (no large name badges!)
+    if (clapCycle < 1.5) {
+      ctx.fillStyle = '#fde047';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(idx === 1 ? '🙌' : '👏', 2, -18);
+    }
+
+    ctx.restore();
+  });
 }
 
 /**
@@ -3810,13 +5549,11 @@ function renderKengolBreakdancer(
   }
 
   if (showNames) {
-    const moveLabel =
-      moveIndex <= 1 ? 'Sync-Mirror-Groove' : moveIndex === 2 ? 'Windmill-Spin' : 'Handstand-Freeze';
     drawRetroNameBadge(
       ctx,
       bd.x + 6,
       bd.y - 44,
-      `${bd.name} (${moveLabel})`,
+      bd.name,
       '#ff2a85'
     );
   }
@@ -3832,9 +5569,13 @@ function renderCenterIslandsOrStage(
   stageCloseProgress: number,
   centerStageMode: CenterStageMode,
   activeBandName: string,
+  bandSkinTone: BandSkinToneMode,
+  bandGender: BandGenderMode,
   showNames: boolean,
   isBlacklight: boolean,
-  djHandsUpActive: boolean
+  djHandsUpActive: boolean,
+  fogIntensity: number,
+  isMultiplayerActive = false
 ): void {
   const { rink, uIslands } = ARENA_LAYOUT;
   const w = uIslands.width;
@@ -3889,8 +5630,26 @@ function renderCenterIslandsOrStage(
   ctx.fillStyle = '#2d1b36';
   ctx.fillRect(rightX, topY + t, w - t, h - t * 2);
 
-  // 3. When the two U-Islands are open, 2 Jam-Roller-Skaters (WITH roller skates!) dance in the wide open center aisle between them!
-  if (stageCloseProgress < 0.3 && centerStageMode === 'islands') {
+  // Subtle 80s Ground-Fog wisps around the center U-islands when Fog Machine is active in 'islands' mode
+  if (fogIntensity > 0 && centerStageMode === 'islands') {
+    render80sStageGroundFog(
+      ctx,
+      now,
+      uIslands.closedStageX,
+      uIslands.closedStageY,
+      uIslands.closedStageWidth,
+      uIslands.closedStageHeight,
+      fogIntensity * 0.75,
+      isBlacklight
+    );
+  }
+
+  // 3. When the two U-Islands are open (in Solo mode), 2 Jam-Roller-Skaters dance in the wide open center aisle between them!
+  if (
+    !isMultiplayerActive &&
+    stageCloseProgress < 0.3 &&
+    centerStageMode === 'islands'
+  ) {
     const centerJamSkaters = [
       {
         name: 'Electric-Mia',
@@ -3922,7 +5681,8 @@ function renderCenterIslandsOrStage(
         x: jx,
         y: jy,
         headingRad: heading,
-        jumpZ: djHandsUpActive ? Math.abs(Math.sin(now * 0.01 + js.phase)) * 6 : 0,
+        jumpZ:
+          djHandsUpActive ? Math.abs(Math.sin(now * 0.01 + js.phase)) * 6 : 0,
         gender: js.gender,
         isWheelchair: false,
         isSkateGuard: false,
@@ -3959,48 +5719,825 @@ function renderCenterIslandsOrStage(
     ctx.stroke();
 
     if (centerStageMode === 'live-band') {
-      ctx.fillStyle = '#090d16';
-      ctx.fillRect(sx + 32, sy + 24, sw - 64, 34);
-      ctx.fillStyle = '#39ff14';
-      ctx.font = 'bold 16px "Silkscreen", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(`★ LIVE: ${activeBandName} ★`, rink.centerX, sy + 46);
+      const beatWave = Math.sin(now * 0.013);
+      const beatPulse = Math.pow(Math.max(0, beatWave), 2);
 
-      const bandPositions = [
-        { bx: rink.centerX, by: sy + 108, col: '#f59e0b' },
-        { bx: rink.centerX, by: sy + 185, col: '#ec4899' },
-        { bx: rink.centerX - 105, by: sy + 155, col: '#00f0ff' },
-        { bx: rink.centerX + 105, by: sy + 155, col: '#39ff14' },
+      // A. STAGE BANNER AT THE VERY TOP EDGE OF THE STAGE
+      ctx.fillStyle = '#090d16';
+      ctx.strokeStyle = '#39ff14';
+      ctx.lineWidth = 1.8;
+      ctx.fillRect(sx + 32, sy + 18, sw - 64, 28);
+      ctx.strokeRect(sx + 32, sy + 18, sw - 64, 28);
+      ctx.fillStyle = '#39ff14';
+      ctx.font = 'bold 14.5px "Silkscreen", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`★ LIVE: ${activeBandName} ★`, rink.centerX, sy + 37);
+
+      // B. 80s STAGE FOG MACHINES (LEFT & RIGHT) + BILLOWY SEMI-TRANSPARENT GROUND FOG WISPS
+      const fogBoxes = [
+        { fx: sx + 22, fy: sy + 152 },
+        { fx: sx + sw - 44, fy: sy + 152 },
       ];
-      for (const m of bandPositions) {
-        const bounce = Math.sin(now * 0.01 + m.bx) * 4;
-        ctx.fillStyle = m.col;
+      for (const fb of fogBoxes) {
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = fogIntensity > 0 ? '#38bdf8' : '#475569';
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(fb.fx, fb.fy, 22, 16);
+        ctx.strokeRect(fb.fx, fb.fy, 22, 16);
+        ctx.fillStyle = fogIntensity > 0 ? '#39ff14' : '#ef4444';
         ctx.beginPath();
-        ctx.arc(m.bx, m.by + bounce, 16, 0, Math.PI * 2);
+        ctx.arc(fb.fx + 11, fb.fy + 8, 2.5, 0, Math.PI * 2);
         ctx.fill();
+      }
+
+      if (fogIntensity > 0) {
+        render80sStageGroundFog(
+          ctx,
+          now,
+          sx,
+          sy,
+          sw,
+          sh,
+          fogIntensity,
+          isBlacklight
+        );
+      }
+
+      // C. 80s LATTICE LIGHTING TRUSS ("GITTER-TRAVERSE / LICHTBRÜCKE") + 6 COLORFUL PAR SPOTLIGHT CONES
+      const trussX = sx + 38;
+      const trussY = sy + 50;
+      const trussW = sw - 76;
+      const trussH = 12;
+
+      const parSpotlights = [
+        {
+          sx: trussX + 28,
+          tx: rink.centerX - 118,
+          ty: sy + 162,
+          col: '#ef4444', // Red
+          rgba: '239, 68, 68',
+        },
+        {
+          sx: trussX + 86,
+          tx: rink.centerX - 118,
+          ty: sy + 162,
+          col: '#f59e0b', // Warm Yellow/Amber
+          rgba: '245, 158, 11',
+        },
+        {
+          sx: trussX + 144,
+          tx: rink.centerX,
+          ty: sy + 92,
+          col: '#00f0ff', // Neon Blue
+          rgba: '0, 240, 255',
+        },
+        {
+          sx: trussX + 204,
+          tx: rink.centerX,
+          ty: sy + 242,
+          col: '#39ff14', // Emerald Green
+          rgba: '57, 255, 20',
+        },
+        {
+          sx: trussX + 262,
+          tx: rink.centerX + 118,
+          ty: sy + 162,
+          col: '#ff2a85', // Magenta
+          rgba: '255, 42, 133',
+        },
+        {
+          sx: trussX + 320,
+          tx: rink.centerX + 118,
+          ty: sy + 162,
+          col: '#fde047', // Gold
+          rgba: '253, 224, 71',
+        },
+      ];
+
+      // Draw soft, semi-transparent PAR spotlight cones sweeping forward over the stage (shimmering more strongly when fog is active!)
+      ctx.save();
+      const coneAlphaBoost = fogIntensity > 0 ? 1.38 : 1.0;
+      parSpotlights.forEach((sp, idx) => {
+        const sway = Math.sin(now * 0.003 + idx * 1.1) * 14;
+        const targetX = sp.tx + sway;
+        const targetY = sp.ty;
+        const coneGrad = ctx.createLinearGradient(
+          sp.sx,
+          trussY + trussH,
+          targetX,
+          targetY + 26
+        );
+        const baseAlpha =
+          (0.18 + ((idx % 2 === 0 ? beatPulse : 1 - beatPulse) * 0.1)) *
+          coneAlphaBoost;
+        coneGrad.addColorStop(0, `rgba(${sp.rgba}, ${Math.min(0.42, baseAlpha)})`);
+        coneGrad.addColorStop(
+          0.65,
+          `rgba(${sp.rgba}, ${Math.min(0.24, baseAlpha * 0.55)})`
+        );
+        coneGrad.addColorStop(1, `rgba(${sp.rgba}, 0)`);
+
+        ctx.fillStyle = coneGrad;
+        ctx.beginPath();
+        ctx.moveTo(sp.sx - 5, trussY + trussH);
+        ctx.lineTo(sp.sx + 5, trussY + trussH);
+        ctx.lineTo(targetX + 38, targetY + 28);
+        ctx.lineTo(targetX - 38, targetY + 28);
+        ctx.closePath();
+        ctx.fill();
+      });
+      ctx.restore();
+
+      // Draw Silvery-Dark Lattice Box Truss ("Gitter-Traverse")
+      ctx.save();
+      ctx.fillStyle = '#1e293b';
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 2;
+      ctx.fillRect(trussX, trussY, trussW, trussH);
+      ctx.strokeRect(trussX, trussY, trussW, trussH);
+
+      // Diagonal cross-bracing struts along the truss
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      for (let tx = trussX; tx < trussX + trussW - 14; tx += 16) {
+        ctx.moveTo(tx, trussY + trussH);
+        ctx.lineTo(tx + 8, trussY);
+        ctx.lineTo(tx + 16, trussY + trussH);
+      }
+      ctx.stroke();
+
+      // Draw the 6 PAR Spotlight Cans mounted on the truss
+      parSpotlights.forEach((sp) => {
+        ctx.fillStyle = '#0f172a';
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.roundRect(sp.sx - 6, trussY + trussH - 2, 12, 9, 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.shadowColor = sp.col;
+        ctx.shadowBlur = 10;
+        ctx.fillStyle = sp.col;
+        ctx.beginPath();
+        ctx.arc(sp.sx, trussY + trussH + 6, 4.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      });
+      ctx.restore();
+
+      // D. TWO 4-CHANNEL 80s LIGHT ORGANS ("4-KANAL-80ER-LICHTORGELN") AT THE FRONT STAGE CORNERS
+      const lightOrgans = [
+        { lx: sx + 24, ly: sy + sh - 74 },
+        { lx: sx + sw - 42, ly: sy + sh - 74 },
+      ];
+      const organColors = ['#ef4444', '#fde047', '#39ff14', '#00f0ff'];
+      const activeChamber = Math.floor(now * 0.008) % 4;
+      for (const lo of lightOrgans) {
+        ctx.save();
+        ctx.fillStyle = '#090d16';
+        ctx.strokeStyle = '#64748b';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.roundRect(lo.lx, lo.ly, 18, 48, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        for (let c = 0; c < 4; c++) {
+          const isLit =
+            c === activeChamber ||
+            (beatPulse > 0.45 && (c + activeChamber) % 2 === 0);
+          const col = organColors[c];
+          ctx.fillStyle = isLit ? col : 'rgba(30, 41, 59, 0.8)';
+          if (isLit) {
+            ctx.shadowColor = col;
+            ctx.shadowBlur = 10;
+          }
+          ctx.fillRect(lo.lx + 3, lo.ly + 3 + c * 11, 12, 8.5);
+          ctx.shadowBlur = 0;
+        }
+        ctx.restore();
+      }
+
+      // E. 4 STANDING BAND MUSICIANS WITH FLOOR SHADOWS, SHOULDERS/ARMS & INSTRUMENTS
+      // Live-adapted to bandSkinTone ('black' | 'white' | 'mixed') & bandGender ('male' | 'female' | 'mixed')!
+      // (Rear drummer at sy + 92 and front singer at sy + 242 so the center under the mirror ball at rink.centerY = 484 remains 100% unobstructed!)
+      const darkTones = ['#6b3e26', '#5c3317', '#784421', '#4e2a14'] as const;
+      const lightTones = ['#fde68a', '#fed7aa', '#fcd34d', '#fde68a'] as const;
+      const getMusicianSkin = (idx: 0 | 1 | 2 | 3) => {
+        const isDark =
+          bandSkinTone === 'black'
+            ? true
+            : bandSkinTone === 'white'
+            ? false
+            : idx % 2 === 0; // 'mixed': Drummer & Keytarist dark, Guitarist & Singer light
+        return {
+          isDark,
+          skinColor: isDark ? darkTones[idx] : lightTones[idx],
+        };
+      };
+      const getMusicianIsFemale = (idx: 0 | 1 | 2 | 3) => {
+        if (bandGender === 'female') return true;
+        if (bandGender === 'male') return false;
+        return idx === 1 || idx === 3; // 'mixed': Guitarist & Lead Singer female, Drummer & Keytarist male
+      };
+
+      const drawMusicianHeadAndHair = (
+        bx: number,
+        headY: number,
+        isFemale: boolean,
+        isDark: boolean,
+        skinColor: string,
+        roleIdx: 0 | 1 | 2 | 3
+      ) => {
+        // Base head circle
+        ctx.fillStyle = skinColor;
+        ctx.beginPath();
+        ctx.arc(bx, headY, 8.6, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (isFemale) {
+          // Female 80s Hairstyles: Voluminous 80s curls, twin braids/ponytails, or long mane with neon headband
+          const hairCol = isDark
+            ? '#170d08'
+            : roleIdx === 2
+            ? '#f59e0b'
+            : roleIdx === 1
+            ? '#9333ea'
+            : '#b45309';
+          ctx.fillStyle = hairCol;
+          // Voluminous side curls / long flowing locks
+          ctx.beginPath();
+          ctx.arc(bx - 7.5, headY + 1, 5.2, 0, Math.PI * 2);
+          ctx.arc(bx + 7.5, headY + 1, 5.2, 0, Math.PI * 2);
+          ctx.arc(bx, headY - 3.5, 8.8, Math.PI * 0.95, Math.PI * 0.05);
+          ctx.fill();
+
+          if (isDark) {
+            // Extra 80s Afro-puff / braided volume crown
+            ctx.beginPath();
+            ctx.arc(bx - 5, headY - 6.5, 4.8, 0, Math.PI * 2);
+            ctx.arc(bx + 5, headY - 6.5, 4.8, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            // High 80s side ponytail / ribbon
+            ctx.beginPath();
+            ctx.ellipse(bx + 9.5, headY - 4, 4.5, 2.8, -0.4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // Neon 80s hairband + hoop earrings
+          ctx.strokeStyle = roleIdx % 2 === 0 ? '#00f0ff' : '#ff2a85';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(bx - 8, headY - 3);
+          ctx.lineTo(bx + 8, headY - 3);
+          ctx.stroke();
+
+          ctx.strokeStyle = '#fde047';
+          ctx.lineWidth = 1.3;
+          ctx.beginPath();
+          ctx.arc(bx - 9.2, headY + 2.5, 2.2, 0, Math.PI * 2);
+          ctx.arc(bx + 9.2, headY + 2.5, 2.2, 0, Math.PI * 2);
+          ctx.stroke();
+        } else {
+          // Male 80s Hairstyles: Afro/curls for dark skin, Vokuhila (mullet) / rocker mane + headband for light skin
+          const hairCol = isDark
+            ? '#140c08'
+            : roleIdx === 2
+            ? '#f59e0b'
+            : roleIdx === 0
+            ? '#451a03'
+            : '#1e1b4b';
+          ctx.fillStyle = hairCol;
+          if (isDark) {
+            // Classic 80s Funk/Soul Afro / Curly High-Top
+            ctx.beginPath();
+            ctx.arc(bx, headY - 2.5, 10.2, Math.PI * 0.85, Math.PI * 0.15);
+            ctx.arc(bx - 6.5, headY - 4, 4.6, 0, Math.PI * 2);
+            ctx.arc(bx + 6.5, headY - 4, 4.6, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            // 80s Vokuhila (Mullet) with neck fringe & spiked top
+            ctx.beginPath();
+            ctx.arc(bx, headY - 2, 8.6, Math.PI * 0.88, Math.PI * 0.12);
+            ctx.fill();
+            ctx.fillRect(bx - 7.5, headY - 2, 3, 6);
+            ctx.fillRect(bx + 4.5, headY - 2, 3, 6);
+          }
+
+          if (roleIdx === 0 || roleIdx === 3) {
+            // 80s Stage Sweatband / Stirnband
+            ctx.strokeStyle = roleIdx === 0 ? '#ef4444' : '#39ff14';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(bx - 8.2, headY - 2.2);
+            ctx.lineTo(bx + 8.2, headY - 2.2);
+            ctx.stroke();
+          }
+        }
+      };
+
+      // 1) REAR DRUMMER (at bx = rink.centerX, by = sy + 92)
+      {
+        const bx = rink.centerX;
+        const by = sy + 92;
+        const bounce = Math.sin(now * 0.014) * 2.5;
+        const stickSwing = Math.sin(now * 0.028) * 7;
+        const { isDark, skinColor } = getMusicianSkin(0);
+        const isFemale = getMusicianIsFemale(0);
+        const torsoW = isFemale ? 26 : 30;
+
+        ctx.save();
+        // Offset floor shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
+        ctx.beginPath();
+        ctx.ellipse(bx + 4, by + 12, 30, 14, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Drummer shoulders & 80s stage top/jacket (behind drum kit)
+        ctx.fillStyle = isFemale ? '#ec4899' : '#f59e0b';
+        ctx.strokeStyle = isFemale ? '#fde047' : '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(
+          bx - torsoW / 2,
+          by - 14 + bounce,
+          torsoW,
+          16,
+          isFemale ? 9 : 7
+        );
+        ctx.fill();
+        ctx.stroke();
+
+        // Drummer arms + drumsticks hitting drums to the beat
+        ctx.strokeStyle = skinColor;
+        ctx.lineWidth = 3.5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(bx - 12, by - 4 + bounce);
+        ctx.lineTo(bx - 9, by + 8 + stickSwing * 0.4);
+        ctx.moveTo(bx + 12, by - 4 + bounce);
+        ctx.lineTo(bx + 9, by + 8 - stickSwing * 0.4);
+        ctx.stroke();
+
+        // Drumsticks
+        ctx.strokeStyle = '#fef08a';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(bx - 9, by + 8 + stickSwing * 0.4);
+        ctx.lineTo(bx - 5, by + 15 + stickSwing * 0.6);
+        ctx.moveTo(bx + 9, by + 8 - stickSwing * 0.4);
+        ctx.lineTo(bx + 5, by + 15 - stickSwing * 0.6);
+        ctx.stroke();
+
+        // Drum kit: Central Bass Drum + 2 Rack Toms + 2 Golden Cymbals
+        ctx.fillStyle = '#dc2626';
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(bx - 14, by + 8, 28, 12, 4);
+        ctx.fill();
+        ctx.stroke();
+
+        // Left & Right Snare/Tom drums
+        ctx.fillStyle = '#f8fafc';
+        ctx.strokeStyle = '#94a3b8';
+        ctx.beginPath();
+        ctx.arc(bx - 13, by + 10, 6.5, 0, Math.PI * 2);
+        ctx.arc(bx + 13, by + 10, 6.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Golden Crash & Ride Cymbals left & right
+        ctx.fillStyle = '#facc15';
+        ctx.strokeStyle = '#fef08a';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.ellipse(bx - 24, by + 6, 8, 4.5, -0.2, 0, Math.PI * 2);
+        ctx.ellipse(bx + 24, by + 6, 8, 4.5, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Drummer Head & 80s Hair/Headband
+        drawMusicianHeadAndHair(bx, by - 7 + bounce, isFemale, isDark, skinColor, 0);
+        ctx.restore();
+      }
+
+      // 2) LEFT STANDING GUITARIST (at bx = rink.centerX - 118, by = sy + 162)
+      {
+        const bx = rink.centerX - 118;
+        const by = sy + 162;
+        const bounce = Math.sin(now * 0.011 + 1.2) * 3;
+        const strum = Math.sin(now * 0.024) * 3.5;
+        const { isDark, skinColor } = getMusicianSkin(1);
+        const isFemale = getMusicianIsFemale(1);
+        const torsoW = isFemale ? 26 : 30;
+
+        ctx.save();
+        // Distinct offset floor shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
+        ctx.beginPath();
+        ctx.ellipse(bx + 5, by + 14, 22, 11, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Standing boots/legs (+ 80s neon legwarmers for female outfit)
+        ctx.fillStyle = isFemale ? '#fdf4ff' : '#0f172a';
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(bx - 10, by + 5, 8, 10);
+        ctx.fillRect(bx + 2, by + 5, 8, 10);
+        if (isFemale) {
+          ctx.fillStyle = '#ff2a85';
+          ctx.fillRect(bx - 10, by + 5, 8, 5);
+          ctx.fillRect(bx + 2, by + 5, 8, 5);
+        }
+
+        // Upright Shoulders & 80s Stage Top / Jacket
+        ctx.fillStyle = isFemale ? '#a855f7' : '#0284c7';
+        ctx.strokeStyle = isFemale ? '#fde047' : '#00f0ff';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.roundRect(
+          bx - torsoW / 2,
+          by - 11 + bounce,
+          torsoW,
+          18,
+          isFemale ? 10 : 8
+        );
+        ctx.fill();
+        ctx.stroke();
+
+        // Guitar Strap across shoulder
+        ctx.strokeStyle = '#fde047';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(bx - 10, by - 10 + bounce);
+        ctx.lineTo(bx + 8, by + 5 + bounce);
+        ctx.stroke();
+
+        // 80s Electric Guitar Body (Neon Pink V/Strat) + Guitar Neck & Headstock
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(bx - 2, by + 2 + bounce);
+        ctx.lineTo(bx + 24, by - 7 + bounce + strum * 0.3);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ff2a85';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.ellipse(bx - 4, by + 3 + bounce, 10, 6.5, -0.25, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Left & Right Arms (fretting hand on neck, strumming hand on body)
+        ctx.strokeStyle = skinColor;
+        ctx.lineWidth = 3.5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(bx - 12, by - 2 + bounce);
+        ctx.lineTo(bx - 3, by + 3 + bounce + strum);
+        ctx.moveTo(bx + 12, by - 2 + bounce);
+        ctx.lineTo(bx + 16, by - 4 + bounce + strum * 0.25);
+        ctx.stroke();
+
+        // Head & 80s Hair
+        drawMusicianHeadAndHair(bx, by - 6 + bounce, isFemale, isDark, skinColor, 1);
+        ctx.restore();
+      }
+
+      // 3) RIGHT STANDING GUITARIST / KEYTARIST (at bx = rink.centerX + 118, by = sy + 162)
+      {
+        const bx = rink.centerX + 118;
+        const by = sy + 162;
+        const bounce = Math.sin(now * 0.011 + 2.6) * 3;
+        const strum = Math.cos(now * 0.024) * 3.5;
+        const { isDark, skinColor } = getMusicianSkin(2);
+        const isFemale = getMusicianIsFemale(2);
+        const torsoW = isFemale ? 26 : 30;
+
+        ctx.save();
+        // Distinct offset floor shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
+        ctx.beginPath();
+        ctx.ellipse(bx + 5, by + 14, 22, 11, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Standing boots/legs (+ 80s legwarmers for female outfit)
+        ctx.fillStyle = isFemale ? '#fdf4ff' : '#0f172a';
+        ctx.strokeStyle = '#39ff14';
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(bx - 10, by + 5, 8, 10);
+        ctx.fillRect(bx + 2, by + 5, 8, 10);
+        if (isFemale) {
+          ctx.fillStyle = '#00f0ff';
+          ctx.fillRect(bx - 10, by + 5, 8, 5);
+          ctx.fillRect(bx + 2, by + 5, 8, 5);
+        }
+
+        // Upright Shoulders & Torso
+        ctx.fillStyle = isFemale ? '#06b6d4' : '#15803d';
+        ctx.strokeStyle = isFemale ? '#fde047' : '#39ff14';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.roundRect(
+          bx - torsoW / 2,
+          by - 11 + bounce,
+          torsoW,
+          18,
+          isFemale ? 10 : 8
+        );
+        ctx.fill();
+        ctx.stroke();
+
+        // Guitar Strap
+        ctx.strokeStyle = '#ff2a85';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(bx + 10, by - 10 + bounce);
+        ctx.lineTo(bx - 8, by + 5 + bounce);
+        ctx.stroke();
+
+        // 80s Electric Guitar / Keytar (Gold/Yellow) + Neck pointing left-up
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(bx + 2, by + 2 + bounce);
+        ctx.lineTo(bx - 24, by - 7 + bounce + strum * 0.3);
+        ctx.stroke();
+
+        ctx.fillStyle = '#fde047';
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.roundRect(bx - 6, by - 2 + bounce, 18, 9, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        // Playing Arms
+        ctx.strokeStyle = skinColor;
+        ctx.lineWidth = 3.5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(bx + 12, by - 2 + bounce);
+        ctx.lineTo(bx + 4, by + 3 + bounce + strum);
+        ctx.moveTo(bx - 12, by - 2 + bounce);
+        ctx.lineTo(bx - 16, by - 4 + bounce + strum * 0.25);
+        ctx.stroke();
+
+        // Head & 80s Hair
+        drawMusicianHeadAndHair(bx, by - 6 + bounce, isFemale, isDark, skinColor, 2);
+        ctx.restore();
+      }
+
+      // 4) FRONTMAN / LEAD SINGER WITH MICROPHONE STAND (at bx = rink.centerX, by = sy + 242 — near front edge, leaving mirror ball at y=484 completely free!)
+      {
+        const bx = rink.centerX;
+        const by = sy + 242;
+        const bounce = Math.sin(now * 0.012 + 0.5) * 3.2;
+        const armGesture = Math.sin(now * 0.016) * 5;
+        const { isDark, skinColor } = getMusicianSkin(3);
+        const isFemale = getMusicianIsFemale(3);
+        const torsoW = isFemale ? 27 : 32;
+
+        ctx.save();
+        // Distinct offset floor shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.beginPath();
+        ctx.ellipse(bx + 5, by + 14, 23, 11, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Standing boots
         ctx.fillStyle = '#ffffff';
+        ctx.fillRect(bx - 10, by + 5, 8, 9);
+        ctx.fillRect(bx + 2, by + 5, 8, 9);
+        if (isFemale) {
+          ctx.fillStyle = '#fde047';
+          ctx.fillRect(bx - 10, by + 5, 8, 4.5);
+          ctx.fillRect(bx + 2, by + 5, 8, 4.5);
+        }
+
+        // Front Singer Shoulders & 80s Glitter Top / Stage Jacket
+        ctx.fillStyle = isFemale ? '#f43f5e' : '#db2777';
+        ctx.strokeStyle = isFemale ? '#00f0ff' : '#fde047';
+        ctx.lineWidth = 2.4;
         ctx.beginPath();
-        ctx.arc(m.bx, m.by - 4 + bounce, 8, 0, Math.PI * 2);
+        ctx.roundRect(
+          bx - torsoW / 2,
+          by - 11 + bounce,
+          torsoW,
+          18,
+          isFemale ? 10 : 8
+        );
         ctx.fill();
+        ctx.stroke();
+
+        // Sequin / Glitter detail on lead singer's 80s outfit
+        ctx.fillStyle = '#fde047';
+        ctx.beginPath();
+        ctx.arc(bx - 6, by - 2 + bounce, 1.6, 0, Math.PI * 2);
+        ctx.arc(bx + 6, by - 2 + bounce, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Left arm holding microphone stand, Right arm gesturing to the crowd
+        ctx.strokeStyle = skinColor;
+        ctx.lineWidth = 3.6;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(bx - 12, by - 1 + bounce);
+        ctx.lineTo(bx - 2, by + 11 + bounce * 0.5);
+        ctx.moveTo(bx + 13, by - 1 + bounce);
+        ctx.lineTo(bx + 21, by + 7 + armGesture);
+        ctx.stroke();
+
+        // Front Singer Head & 80s Hairstyle
+        drawMusicianHeadAndHair(bx, by - 5 + bounce, isFemale, isDark, skinColor, 3);
+
+        // Chrome Microphone Stand ("Mikrofonständer") directly in front of the singer
+        const micX = bx;
+        const micY = by + 16;
+        ctx.fillStyle = '#0f172a';
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.arc(micX, micY + 3, 6.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(micX, micY + 3);
+        ctx.lineTo(micX, micY - 9 + bounce * 0.4);
+        ctx.stroke();
+
+        // Silver Dynamic Microphone Head
+        ctx.fillStyle = '#38bdf8';
+        ctx.beginPath();
+        ctx.arc(micX, micY - 10 + bounce * 0.4, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       }
     } else if (centerStageMode === 'cinema') {
       const scr = uIslands.cinemaScreenRect;
-      ctx.fillStyle = '#020617';
-      ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 4;
-      ctx.fillRect(scr.x, scr.y, scr.width, scr.height);
-      ctx.strokeRect(scr.x, scr.y, scr.width, scr.height);
 
-      ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 13px "Silkscreen", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(
-        '🎬 PALLADIUM KINO-LEINWAND (LIVE-STREAM)',
-        rink.centerX,
-        scr.y - 8
-      );
+      if (activeArenaStyle === 'palladium-1989') {
+        // PALLADIUM 1989 KINO-LEINWAND:
+        // Large white screen mounted directly on a white center pillar, small spectator bench in front,
+        // and an opposite 80s large-screen projector with a flickering light cone in the fog!
+        const projX = rink.centerX;
+        const projY = scr.y + scr.height + 54;
+
+        // 1. White Structural Center Pillar ("weiße Mittelsäule") behind top center of screen
+        ctx.save();
+        ctx.fillStyle = '#f1f5f9';
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.roundRect(rink.centerX - 24, scr.y - 26, 48, 30, 6);
+        ctx.fill();
+        ctx.stroke();
+
+        // 2. White 1989 Projection Screen Frame on the Center Pillar
+        ctx.fillStyle = '#0f172a';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 5;
+        ctx.fillRect(scr.x, scr.y, scr.width, scr.height);
+        ctx.strokeRect(scr.x, scr.y, scr.width, scr.height);
+
+        // 3. Small Wooden Spectator Bench in front of the screen ("kleine Zuschauerbank davor")
+        const benchW = 148;
+        const benchH = 16;
+        const benchX = rink.centerX - benchW / 2;
+        const benchY = scr.y + scr.height + 10;
+        ctx.fillStyle = '#78350f';
+        ctx.strokeStyle = '#d97706';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(benchX, benchY, benchW, benchH, 4);
+        ctx.fill();
+        ctx.stroke();
+
+        // 4. Flickering Projector Light Cone ("sichtbarer, leicht flackernder Lichtkegel im Nebel") from Projector to Screen
+        const flicker =
+          0.16 +
+          Math.sin(now * 0.035) * 0.03 +
+          Math.cos(now * 0.08) * 0.02;
+        const coneGrad = ctx.createLinearGradient(
+          projX,
+          projY,
+          rink.centerX,
+          scr.y + scr.height
+        );
+        coneGrad.addColorStop(0, `rgba(224, 242, 254, ${flicker * 1.6})`);
+        coneGrad.addColorStop(0.5, `rgba(186, 230, 253, ${flicker})`);
+        coneGrad.addColorStop(1, `rgba(56, 189, 248, ${flicker * 0.5})`);
+        ctx.fillStyle = coneGrad;
+        ctx.beginPath();
+        ctx.moveTo(projX - 10, projY - 8);
+        ctx.lineTo(projX + 10, projY - 8);
+        ctx.lineTo(scr.x + scr.width - 8, scr.y + scr.height);
+        ctx.lineTo(scr.x + 8, scr.y + scr.height);
+        ctx.closePath();
+        ctx.fill();
+
+        // 5. Opposite 80s Large-Screen CRT/Three-Lens Projector ("gegenüberliegender 80er-Großbildprojektor")
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(projX - 24, projY - 10, 48, 26, 4);
+        ctx.fill();
+        ctx.stroke();
+        // Iconic 80s Red-Green-Blue CRT Projector Lenses
+        ['#ef4444', '#22c55e', '#3b82f6'].forEach((lensCol, lIdx) => {
+          ctx.fillStyle = lensCol;
+          ctx.beginPath();
+          ctx.arc(projX - 11 + lIdx * 11, projY - 9, 3.8, 0, Math.PI * 2);
+          ctx.fill();
+        });
+
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = 'bold 12px "Silkscreen", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(
+          '📼 PALLADIUM 1989 GROSSPROJEKTOR & MITTELSÄULEN-LEINWAND',
+          rink.centerX,
+          scr.y - 32
+        );
+        ctx.restore();
+      } else {
+        ctx.fillStyle = '#020617';
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 4;
+        ctx.fillRect(scr.x, scr.y, scr.width, scr.height);
+        ctx.strokeRect(scr.x, scr.y, scr.width, scr.height);
+
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = 'bold 13px "Silkscreen", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(
+          '🎬 PALLADIUM KINO-LEINWAND (LIVE-STREAM)',
+          rink.centerX,
+          scr.y - 8
+        );
+      }
     }
   }
+}
+
+/**
+ * Renders soft, billowy, highly semi-transparent 80s ground-fog wisps
+ * across the stage and stage border without obscuring skaters or name badges.
+ */
+function render80sStageGroundFog(
+  ctx: CanvasRenderingContext2D,
+  now: number,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  intensity: number,
+  isBlacklight: boolean
+): void {
+  ctx.save();
+  const puffs = [
+    { ox: 0.22, oy: 0.36, rx: 115, ry: 52, speed: 0.0007, phase: 0.2 },
+    { ox: 0.78, oy: 0.38, rx: 115, ry: 52, speed: -0.0006, phase: 1.5 },
+    { ox: 0.5, oy: 0.52, rx: 145, ry: 64, speed: 0.0005, phase: 2.8 },
+    { ox: 0.3, oy: 0.76, rx: 125, ry: 55, speed: -0.0008, phase: 4.1 },
+    { ox: 0.7, oy: 0.78, rx: 125, ry: 55, speed: 0.0007, phase: 5.3 },
+    { ox: 0.5, oy: 0.92, rx: 155, ry: 58, speed: -0.0005, phase: 3.4 },
+  ];
+
+  for (const pf of puffs) {
+    const driftX = Math.sin(now * pf.speed + pf.phase) * 34;
+    const driftY = Math.cos(now * pf.speed * 1.2 + pf.phase) * 14;
+    const px = sx + sw * pf.ox + driftX;
+    const py = sy + sh * pf.oy + driftY;
+    const rMax = pf.rx * (0.92 + Math.sin(now * 0.002 + pf.phase) * 0.12);
+
+    const fogGrad = ctx.createRadialGradient(px, py, 8, px, py, rMax);
+    const alpha = Math.min(0.22, 0.12 * intensity);
+    if (isBlacklight) {
+      fogGrad.addColorStop(0, `rgba(192, 132, 252, ${alpha})`);
+      fogGrad.addColorStop(0.55, `rgba(56, 189, 248, ${alpha * 0.55})`);
+      fogGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    } else {
+      fogGrad.addColorStop(0, `rgba(226, 232, 240, ${alpha})`);
+      fogGrad.addColorStop(0.55, `rgba(186, 230, 253, ${alpha * 0.55})`);
+      fogGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    }
+
+    ctx.fillStyle = fogGrad;
+    ctx.beginPath();
+    ctx.ellipse(px, py, rMax, pf.ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 // ============================================================================
@@ -4011,6 +6548,7 @@ function renderCurvedDjTowerCorner(
   ctx: CanvasRenderingContext2D,
   now: number,
   djTickerText: string,
+  activeDjName: string,
   showNames: boolean,
   isBlacklight: boolean,
   djSpeechBubble: string | null
@@ -4235,9 +6773,10 @@ function renderCurvedDjTowerCorner(
   ctx.fillStyle = '#00f0ff';
   ctx.font = 'bold 9.5px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
+  const cleanDjLabel = (activeDjName || 'DJ MAGIC FORCE').toUpperCase();
   ctx.fillText(
     showNames
-      ? '🎧 DJ MAGIC FORCE • ► PULT [KLICK]'
+      ? `🎧 ${cleanDjLabel} • ► PULT`
       : '► DJ-PULT [KLICK] ◄',
     0,
     deskY + deskH + 16
@@ -4307,7 +6846,9 @@ function renderHallTourZonesAndStaff(
   ctx: CanvasRenderingContext2D,
   now: number,
   showNames: boolean,
-  isBlacklight: boolean
+  isBlacklight: boolean,
+  hasSkatesEquipped = true,
+  drinkChipAvailable = true
 ): void {
   const {
     rightWallBenches,
@@ -4435,7 +6976,7 @@ function renderHallTourZonesAndStaff(
   ctx.restore();
 
   // ==========================================================================
-  // B. 1) KASSE & EINGANG PALLADIUM (MIRRORED IN BOTTOM-RIGHT CORNER, ANGLED TOWARD HALL CENTER!)
+  // B. 1) KASSE & EINGANG PALLADIUM (FLUSH & STRAIGHT ON THE RIGHT WALL WHERE THE 4TH BENCH USED TO BE!)
   // ==========================================================================
   const { cashierBooth, spinWarmupZone } = bottomEntrance;
 
@@ -4446,7 +6987,7 @@ function renderHallTourZonesAndStaff(
   const cw = cashierBooth.width;
   const ch = cashierBooth.height;
 
-  // Mirrored angled booth body at the bottom-right outer wall facing diagonally up-left into the hall
+  // Straight booth body flush with the right hall wall (x = 1768..1904, y = 692..880)
   ctx.fillStyle = '#1e1b4b';
   ctx.strokeStyle = '#39ff14';
   ctx.lineWidth = 3;
@@ -4455,20 +6996,23 @@ function renderHallTourZonesAndStaff(
   ctx.fill();
   ctx.stroke();
 
-  // Ticket counter window at the front (facing up-left toward the hall interior)
+  // Ticket counter window ("KASSEN-SCHALTER") on the left edge facing into the hall toward Gate 1
   ctx.fillStyle = '#090d16';
   ctx.strokeStyle = '#fde047';
   ctx.lineWidth = 2;
-  ctx.fillRect(-cw / 2 + 22, -ch / 2 + 8, cw - 44, 22);
-  ctx.strokeRect(-cw / 2 + 22, -ch / 2 + 8, cw - 44, 22);
+  ctx.fillRect(-cw / 2 + 6, -ch / 2 + 26, 20, ch - 52);
+  ctx.strokeRect(-cw / 2 + 6, -ch / 2 + 26, 20, ch - 52);
 
   // Historic Oval Emblem "ROLLER DISCO Palladium – HANAU-Grimm Center" mounted on the Cashier roof!
-  drawRollerDiscoOvalEmblem(ctx, 0, 14, 72, 24, isBlacklight);
+  drawRollerDiscoOvalEmblem(ctx, 10, 14, 52, 22, isBlacklight);
 
   ctx.fillStyle = '#39ff14';
-  ctx.font = 'bold 11.5px "Outfit", sans-serif';
+  ctx.font = 'bold 10.5px "Outfit", sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('1) KASSE & EINGANG PALLADIUM', 0, -17);
+  ctx.fillText('1) KASSE & EINGANG', 8, -ch / 2 + 18);
+  ctx.fillStyle = '#fde047';
+  ctx.font = 'bold 9.5px "JetBrains Mono", monospace';
+  ctx.fillText('PALLADIUM HANAU', 8, ch / 2 - 12);
   ctx.restore();
 
   // Circular Spin- & Warm-Up-Zone near the bottom-right entrance
@@ -4662,6 +7206,29 @@ function renderHallTourZonesAndStaff(
     rentalBounds.x + rentalBounds.width / 2,
     rentalBounds.y + 23
   );
+
+  // Interactive prompt circle in front of Rollschuhverleih counter (especially highlighted when player is on street shoes!)
+  const rentalInteractX = rentalBounds.x + rentalBounds.width / 2;
+  const rentalInteractY = 895;
+  ctx.save();
+  ctx.strokeStyle = !hasSkatesEquipped
+    ? `rgba(250, 204, 21, ${0.65 + Math.sin(now * 0.008) * 0.3})`
+    : 'rgba(56, 189, 248, 0.45)';
+  ctx.lineWidth = !hasSkatesEquipped ? 3 : 2;
+  ctx.beginPath();
+  ctx.arc(rentalInteractX, rentalInteractY, 32, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = !hasSkatesEquipped ? '#fde047' : '#7dd3fc';
+  ctx.font = 'bold 10px "JetBrains Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(
+    !hasSkatesEquipped && drinkChipAvailable
+      ? '🛼 LEIH-SKATES HOLEN [E] (CHIP)'
+      : 'LEIH-SKATE AUSGABE [E]',
+    rentalInteractX,
+    rentalCounter.y - 8
+  );
+  ctx.restore();
 
   renderCharacterSprite(ctx, now, {
     x: rentalBounds.x + rentalBounds.width / 2,
@@ -4902,6 +7469,7 @@ function renderRadarMinimap(
   ctx: CanvasRenderingContext2D,
   player: { x: number; y: number; headingRad: number },
   trackNpcs: TrackNpc[],
+  remotePlayers: InterpolatedRemotePlayer[],
   cameraMode: CameraViewMode
 ): void {
   const mapW = 230;
@@ -4967,6 +7535,22 @@ function renderRadarMinimap(
     ctx.fill();
   }
 
+  for (const rp of remotePlayers) {
+    ctx.fillStyle = '#fde047';
+    ctx.strokeStyle = '#00f0ff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(
+      mapX + rp.renderX * scaleX,
+      mapY + rp.renderY * scaleY,
+      3.5,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+    ctx.stroke();
+  }
+
   const px = mapX + player.x * scaleX;
   const py = mapY + player.y * scaleY;
   ctx.fillStyle = '#39ff14';
@@ -5018,14 +7602,23 @@ function renderCharacterSprite(
     legwarmerColor?: string;
     kengolHat?: boolean;
     kengoShoesWhitePink?: boolean;
+    isStreetShoes?: boolean;
+    isRentalSkates?: boolean;
+    isCustomOwnSkates?: boolean;
     name: string;
     showName: boolean;
     isBlacklight: boolean;
     crashTimer: number;
     speechBubble: string | null;
     underglowColor?: string;
+    hasMultiplayerStar?: boolean;
   }
 ): void {
+  if (activeArenaStyle === 'pixel-16bit') {
+    render16BitPixelCharacterSprite(ctx, now, opts);
+    return;
+  }
+
   const isFemale = opts.gender === 'female';
 
   ctx.save();
@@ -5084,29 +7677,54 @@ function renderCharacterSprite(
     ctx.fillRect(-14, -15, 22, 30);
     ctx.fillStyle = opts.accentColor;
     ctx.fillRect(-17, -14, 5, 28);
+  } else if (opts.isStreetShoes) {
+    // Normal 80s Street Sneakers (No roller wheels — player must rent skates at Rollschuh-Verleih first!)
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(-9, -18, 18, 7);
+    ctx.fillRect(-9, 11, 18, 7);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(-7, -16, 13, 2.5);
+    ctx.fillRect(-7, 13, 13, 2.5);
   } else {
-    // Roller Skates OR White-Pink Kengo Skates ([H] mode)
+    // Roller Skates: Custom Own Skates (dual-tone neon green/pink), 80s Brown/Blue Rental Skates, or Kengo Skates
     const wheelCol = opts.kengoShoesWhitePink
       ? '#ff2a85'
+      : opts.isRentalSkates
+      ? '#38bdf8'
       : opts.isBlacklight
       ? '#00f0ff'
       : opts.wheelColor;
     ctx.fillStyle = wheelCol;
-    if (opts.kengoShoesWhitePink && opts.isBlacklight) {
-      ctx.shadowColor = '#ff2a85';
+    if ((opts.kengoShoesWhitePink || opts.isCustomOwnSkates) && opts.isBlacklight) {
+      ctx.shadowColor = wheelCol;
       ctx.shadowBlur = 10;
     }
     ctx.fillRect(-10, -21, 18, 5);
     ctx.fillRect(-10, 16, 18, 5);
 
-    // Boot (Crisp white with neon-pink Kengo stripes when kengoShoesWhitePink is active!)
-    ctx.fillStyle = '#ffffff';
+    if (opts.isCustomOwnSkates) {
+      // Sporty dual-color custom racing wheel accent on own skates!
+      ctx.fillStyle = '#ff2a85';
+      ctx.fillRect(-1, -21, 9, 5);
+      ctx.fillRect(-1, 16, 9, 5);
+    }
+
+    // Boot (Amber-brown leather for classic 80s rental skates, crisp white with racing stripes for own/Kengo skates!)
+    ctx.fillStyle = opts.isRentalSkates ? '#b45309' : '#ffffff';
     ctx.fillRect(-11, -18, 20, 7);
     ctx.fillRect(-11, 11, 20, 7);
     if (opts.kengoShoesWhitePink) {
       ctx.fillStyle = '#ff2a85';
       ctx.fillRect(-9, -16, 16, 3);
       ctx.fillRect(-9, 13, 16, 3);
+    } else if (opts.isCustomOwnSkates) {
+      ctx.fillStyle = '#39ff14';
+      ctx.fillRect(-9, -16, 16, 2.5);
+      ctx.fillRect(-9, 13, 16, 2.5);
+    } else if (opts.isRentalSkates) {
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(-8, -16, 14, 2);
+      ctx.fillRect(-8, 13, 14, 2);
     }
     ctx.shadowBlur = 0;
 
@@ -5236,18 +7854,24 @@ function renderCharacterSprite(
 
   ctx.restore();
 
-  if (opts.speechBubble) {
-    drawSpeechBubble(ctx, opts.x, opts.y - opts.jumpZ - 56, opts.speechBubble);
-  }
-
   if (opts.showName && opts.name) {
     drawRetroNameBadge(
       ctx,
       opts.x,
       opts.y - opts.jumpZ - 34,
       opts.name,
-      isCrewOrGuard ? '#39ff14' : opts.accentColor
+      isCrewOrGuard ? '#39ff14' : opts.accentColor,
+      opts.hasMultiplayerStar
     );
+  }
+
+  // Always render speech bubbles cleanly ABOVE the name badge so they never overlap!
+  if (opts.speechBubble) {
+    const bubbleY =
+      opts.showName && opts.name
+        ? opts.y - opts.jumpZ - 64
+        : opts.y - opts.jumpZ - 46;
+    drawSpeechBubble(ctx, opts.x, bubbleY, opts.speechBubble);
   }
 }
 
@@ -5257,30 +7881,67 @@ function drawRetroNameBadge(
   worldX: number,
   worldY: number,
   text: string,
-  borderColor: string
+  borderColor: string,
+  hasMultiplayerStar?: boolean
 ): void {
+  if (isDeferringOverlays) {
+    deferredOverlayQueue.push({
+      kind: 'badge',
+      worldX,
+      worldY,
+      text,
+      borderColor,
+      hasMultiplayerStar,
+    });
+    return;
+  }
   ctx.save();
-  ctx.font = 'bold 11.5px "Silkscreen", "JetBrains Mono", monospace';
+  ctx.font = 'bold 10px "Silkscreen", "JetBrains Mono", monospace';
   const metrics = ctx.measureText(text);
-  const padX = 9;
-  const w = metrics.width + padX * 2;
-  const h = 21;
+  const starExtraW = hasMultiplayerStar ? 20 : 0;
+  const padX = 6;
+  const w = metrics.width + padX * 2 + starExtraW;
+  const h = 18;
 
   const cx = Math.max(w / 2 + 8, Math.min(WORLD_WIDTH - w / 2 - 8, worldX));
   const cy = Math.max(h / 2 + 8, Math.min(WORLD_HEIGHT - h / 2 - 36, worldY));
 
   ctx.fillStyle = 'rgba(5, 8, 17, 0.92)';
-  ctx.strokeStyle = borderColor;
-  ctx.lineWidth = 1.8;
+  ctx.strokeStyle = hasMultiplayerStar ? '#00f0ff' : borderColor;
+  ctx.lineWidth = hasMultiplayerStar ? 1.8 : 1.6;
   ctx.beginPath();
-  ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 5);
+  ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 4);
   ctx.fill();
   ctx.stroke();
 
-  ctx.fillStyle = '#f8fafc';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, cx, cy + 1);
+  if (hasMultiplayerStar) {
+    // Subtle golden/turquoise star badge next to connected human skater's name!
+    const badgeX = cx - w / 2 + 10;
+    ctx.fillStyle = '#083344';
+    ctx.strokeStyle = '#00f0ff';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(badgeX, cy, 6.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#fde047';
+    ctx.font = 'bold 9.5px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('★', badgeX, cy + 0.5);
+
+    ctx.font = 'bold 10px "Silkscreen", "JetBrains Mono", monospace';
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, cx + starExtraW / 2 - 1, cy + 0.5);
+  } else {
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, cx, cy + 0.5);
+  }
   ctx.restore();
 }
 
@@ -5290,6 +7951,15 @@ function drawSpeechBubble(
   worldY: number,
   text: string
 ): void {
+  if (isDeferringOverlays) {
+    deferredOverlayQueue.push({
+      kind: 'bubble',
+      worldX,
+      worldY,
+      text,
+    });
+    return;
+  }
   ctx.save();
   ctx.font = 'bold 13px "Plus Jakarta Sans", sans-serif';
   const w = ctx.measureText(text).width + 20;
@@ -5313,28 +7983,139 @@ function drawSpeechBubble(
   ctx.restore();
 }
 
-function renderParamedicsStretcher(
+/**
+ * Renders Nurse / Paramedic ("SANI-SANDRA") in a white coat with red cross emblem
+ * and first-aid bag, running across the rink, kneeling beside the fallen skater,
+ * and walking calmly back off the field.
+ */
+function renderSaniNurseSprite(
   ctx: CanvasRenderingContext2D,
-  px: number,
-  py: number
+  now: number,
+  saniNurse: {
+    phase: 'idle' | 'running-in' | 'kneeling' | 'walking-out';
+    x: number;
+    y: number;
+    headingRad: number;
+    speechText: string | null;
+  },
+  showNames: boolean
 ): void {
+  const isKneeling = saniNurse.phase === 'kneeling';
+  const isRunning = saniNurse.phase === 'running-in';
+  const stride = isKneeling
+    ? 0
+    : Math.sin(now * (isRunning ? 0.022 : 0.012)) * (isRunning ? 8 : 4.5);
+
   ctx.save();
-  ctx.translate(px, py + 32);
-  ctx.fillStyle = '#f97316';
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.fillRect(-36, -10, 72, 20);
-  ctx.strokeRect(-36, -10, 72, 20);
-  [-46, 46].forEach((mx) => {
+  ctx.translate(saniNurse.x, saniNurse.y);
+
+  // Floor shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.44)';
+  ctx.beginPath();
+  ctx.ellipse(0, 8, isKneeling ? 22 : 24, 14, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.rotate(saniNurse.headingRad);
+
+  if (!isKneeling) {
+    // Running / Walking feet in white medical sneakers
     ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.arc(mx, 0, 14, 0, Math.PI * 2);
+    ctx.roundRect(-8 + stride, -15, 14, 6, 3);
+    ctx.roundRect(-8 - stride, 9, 14, 6, 3);
     ctx.fill();
-    ctx.fillStyle = '#ef4444';
-    ctx.fillRect(mx - 6, -2, 12, 4);
-    ctx.fillRect(mx - 2, -6, 4, 12);
-  });
-  ctx.restore();
+    ctx.stroke();
+  }
+
+  // White Nurse / Paramedic Coat ("weißer Kittel")
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#ef4444';
+  ctx.lineWidth = 2.6;
+  ctx.beginPath();
+  ctx.roundRect(-13, -16, 24, 32, 10);
+  ctx.fill();
+  ctx.stroke();
+
+  // Prominent Red Cross Symbol ("rotes Kreuz-Symbol") on the back/shoulders of the white coat
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(-7, -2.2, 12, 4.4);
+  ctx.fillRect(-3.2, -6, 4.4, 12);
+
+  // First-Aid Medkit Case ("Erste-Hilfe-Koffer") carried at her side / placed beside the skater when kneeling
+  const kitX = isKneeling ? 14 : 2;
+  const kitY = isKneeling ? 15 : 20;
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#dc2626';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(kitX - 8, kitY - 6, 16, 12, 3);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#dc2626';
+  ctx.fillRect(kitX - 4, kitY - 1.5, 8, 3);
+  ctx.fillRect(kitX - 1.5, kitY - 4, 3, 8);
+
+  // Kneeling care arms reaching out toward the injured skater
+  if (isKneeling) {
+    const careMotion = Math.sin(now * 0.015) * 3;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(8, -10);
+    ctx.lineTo(18 + careMotion, -5);
+    ctx.moveTo(8, 10);
+    ctx.lineTo(18 - careMotion, 5);
+    ctx.stroke();
+  }
+
+  // Head + Nurse Cap with Red Cross
+  ctx.fillStyle = '#fde68a';
+  ctx.beginPath();
+  ctx.arc(3, 0, 9.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Blonde hair ponytail
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath();
+  ctx.ellipse(-11, 0, 6.5, 4.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Classic White Nurse Cap with Red Cross on top
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(-2, -9, 9, 18, 3);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(0.5, -3.5, 4, 7);
+  ctx.fillRect(-1, -2, 7, 4);
+
+  ctx.restore(); // End rotation
+  ctx.restore(); // End translation
+
+  if (showNames) {
+    drawRetroNameBadge(
+      ctx,
+      saniNurse.x,
+      saniNurse.y - 36,
+      '➕ SANI-SANDRA',
+      '#ef4444'
+    );
+  }
+  if (saniNurse.speechText) {
+    drawSpeechBubble(
+      ctx,
+      saniNurse.x,
+      showNames ? saniNurse.y - 66 : saniNurse.y - 46,
+      saniNurse.speechText
+    );
+  }
 }
 
 // ============================================================================
@@ -5352,121 +8133,592 @@ function renderMirrorBallAndDiscoLighting(
   const cy = rink.centerY;
 
   if (isSlowSkating) {
-    // Warm dimmed romantic amber/rose Slow-Skating ambiance
+    // 1. SLOW-SKATING MODE:
+    // Spots & strobe pause completely; warm dimmed ambiance + illuminated rotating Mirror Ball!
     ctx.fillStyle = 'rgba(24, 6, 20, 0.34)';
     ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-  }
 
-  const spots = [
-    {
-      x: cx + Math.cos(now * 0.0008) * 420,
-      y: cy + Math.sin(now * 0.0011) * 230,
-      col: isBlacklight
-        ? 'rgba(139, 92, 246, 0.16)'
-        : isSlowSkating
-        ? 'rgba(245, 158, 11, 0.16)'
-        : 'rgba(236, 72, 153, 0.11)',
-    },
-    {
-      x: cx + Math.cos(now * 0.0009 + 2) * 440,
-      y: cy + Math.sin(now * 0.0007 + 1) * 240,
-      col: isBlacklight
-        ? 'rgba(0, 240, 255, 0.14)'
-        : isSlowSkating
-        ? 'rgba(244, 63, 94, 0.15)'
-        : 'rgba(6, 182, 212, 0.11)',
-    },
-    {
-      x: cx + Math.cos(now * 0.0007 + 4) * 390,
-      y: cy + Math.sin(now * 0.001 + 3) * 220,
-      col: isBlacklight
-        ? 'rgba(217, 70, 239, 0.15)'
-        : isSlowSkating
-        ? 'rgba(217, 119, 6, 0.14)'
-        : 'rgba(57, 255, 20, 0.09)',
-    },
-    {
-      x: cx + Math.cos(now * 0.001 + 5) * 360,
-      y: cy + Math.sin(now * 0.0008 + 4) * 210,
-      col: isBlacklight
-        ? 'rgba(99, 102, 241, 0.15)'
-        : isSlowSkating
-        ? 'rgba(192, 132, 252, 0.13)'
-        : 'rgba(250, 204, 21, 0.09)',
-    },
-  ];
+    // Rotating Mirror Ball reflections across the rink
+    const rot = now * 0.00022;
+    const numDots = 78;
+    for (let i = 0; i < numDots; i++) {
+      const ring = (i % 6) + 1;
+      const angle = rot * (ring % 2 === 0 ? 1 : -1.2) + (i * Math.PI * 2) / 13;
+      const distX = ring * 115 + Math.sin(now * 0.001 + i) * 24;
+      const distY = ring * 68 + Math.cos(now * 0.001 + i) * 18;
+      const rx = cx + Math.cos(angle) * distX;
+      const ry = cy + Math.sin(angle) * distY;
 
-  for (const s of spots) {
-    const grad = ctx.createRadialGradient(s.x, s.y, 10, s.x, s.y, 260);
-    grad.addColorStop(0, s.col);
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grad;
+      ctx.fillStyle =
+        i % 3 === 0
+          ? 'rgba(253, 224, 71, 0.44)'
+          : i % 3 === 1
+          ? 'rgba(255, 255, 255, 0.38)'
+          : 'rgba(244, 114, 182, 0.36)';
+      ctx.beginPath();
+      ctx.ellipse(rx, ry, 5.5, 3.8, angle, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Two ceiling pin-spot beams shining directly onto the Mirror Ball
+    ctx.save();
+    ctx.globalAlpha = 0.28;
+    ctx.fillStyle = '#fde047';
     ctx.beginPath();
-    ctx.arc(s.x, s.y, 260, 0, Math.PI * 2);
+    ctx.moveTo(cx - 380, 0);
+    ctx.lineTo(cx - 28, cy);
+    ctx.lineTo(cx + 28, cy);
+    ctx.closePath();
     ctx.fill();
-  }
 
-  const rot = now * (isSlowSkating ? 0.00018 : 0.00035);
-  const numDots = 72;
-  for (let i = 0; i < numDots; i++) {
-    const ring = (i % 6) + 1;
-    const angle = rot * (ring % 2 === 0 ? 1 : -1.2) + (i * Math.PI * 2) / 12;
-    const distX = ring * 115 + Math.sin(now * 0.001 + i) * 25;
-    const distY = ring * 68 + Math.cos(now * 0.001 + i) * 18;
-    const rx = cx + Math.cos(angle) * distX;
-    const ry = cy + Math.sin(angle) * distY;
-
-    ctx.fillStyle = isBlacklight
-      ? i % 2 === 0
-        ? 'rgba(0, 240, 255, 0.42)'
-        : 'rgba(232, 121, 249, 0.42)'
-      : isSlowSkating
-      ? 'rgba(253, 224, 71, 0.36)'
-      : 'rgba(255, 255, 255, 0.32)';
     ctx.beginPath();
-    ctx.ellipse(rx, ry, 5, 3.5, angle, 0, Math.PI * 2);
+    ctx.moveTo(cx + 380, 0);
+    ctx.lineTo(cx - 28, cy);
+    ctx.lineTo(cx + 28, cy);
+    ctx.closePath();
     ctx.fill();
+    ctx.restore();
+
+    // Illuminated, sparkling rotating Mirror Ball at (cx, cy)
+    ctx.save();
+    ctx.shadowColor = '#fde047';
+    ctx.shadowBlur = 24;
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = '#334155';
+    ctx.strokeStyle = '#fef08a';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    const facetShift = (now * 0.016) % 10;
+    for (let fy = -24; fy <= 24; fy += 10) {
+      const rowWidth = Math.sqrt(Math.max(0, 32 * 32 - fy * fy));
+      for (let fx = -rowWidth + facetShift; fx < rowWidth - 4; fx += 10) {
+        ctx.fillStyle =
+          Math.floor(fx + fy) % 2 === 0 ? '#ffffff' : '#fde047';
+        ctx.fillRect(cx + fx - 3, cy + fy - 3, 6.5, 6.5);
+      }
+    }
+    ctx.restore();
+    return;
   }
 
+  if (isBlacklight) {
+    // 2. BLACKLIGHT UV MODE: Deep UV spots
+    const uvSpots = [
+      {
+        x: cx + Math.cos(now * 0.0008) * 420,
+        y: cy + Math.sin(now * 0.0011) * 230,
+        col: 'rgba(139, 92, 246, 0.16)',
+      },
+      {
+        x: cx + Math.cos(now * 0.0009 + 2) * 440,
+        y: cy + Math.sin(now * 0.0007 + 1) * 240,
+        col: 'rgba(0, 240, 255, 0.14)',
+      },
+      {
+        x: cx + Math.cos(now * 0.0007 + 4) * 390,
+        y: cy + Math.sin(now * 0.001 + 3) * 220,
+        col: 'rgba(217, 70, 239, 0.15)',
+      },
+    ];
+    for (const s of uvSpots) {
+      const grad = ctx.createRadialGradient(s.x, s.y, 10, s.x, s.y, 260);
+      grad.addColorStop(0, s.col);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 260, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    // 3. DISCO-SPOTS MODE:
+    // Mirror ball stays OFF! Instead: subtle, cool white spotlight cones + short, rhythmic strobe impulses!
+    const coolWhiteSpots = [
+      {
+        sx: cx - 420,
+        sy: 110,
+        tx: cx + Math.cos(now * 0.0009) * 410,
+        ty: cy + Math.sin(now * 0.0011) * 225,
+      },
+      {
+        sx: cx + 420,
+        sy: 110,
+        tx: cx + Math.cos(now * 0.0008 + 2.2) * 420,
+        ty: cy + Math.sin(now * 0.0009 + 1.4) * 230,
+      },
+      {
+        sx: cx - 220,
+        sy: 110,
+        tx: cx + Math.cos(now * 0.0007 + 4.1) * 370,
+        ty: cy + Math.sin(now * 0.001 + 3.2) * 210,
+      },
+      {
+        sx: cx + 220,
+        sy: 110,
+        tx: cx + Math.cos(now * 0.001 + 5.2) * 350,
+        ty: cy + Math.sin(now * 0.0008 + 4.5) * 205,
+      },
+    ];
+
+    ctx.save();
+    for (const sp of coolWhiteSpots) {
+      // Subtle cool-white beam cone
+      const beamGrad = ctx.createLinearGradient(sp.sx, sp.sy, sp.tx, sp.ty);
+      beamGrad.addColorStop(0, 'rgba(224, 242, 254, 0.09)');
+      beamGrad.addColorStop(1, 'rgba(186, 230, 253, 0.01)');
+      ctx.fillStyle = beamGrad;
+      ctx.beginPath();
+      ctx.moveTo(sp.sx - 8, sp.sy);
+      ctx.lineTo(sp.sx + 8, sp.sy);
+      ctx.lineTo(sp.tx + 95, sp.ty);
+      ctx.lineTo(sp.tx - 95, sp.ty);
+      ctx.closePath();
+      ctx.fill();
+
+      // Cool-white floor pool
+      const poolGrad = ctx.createRadialGradient(
+        sp.tx,
+        sp.ty,
+        12,
+        sp.tx,
+        sp.ty,
+        195
+      );
+      poolGrad.addColorStop(0, 'rgba(240, 249, 255, 0.13)');
+      poolGrad.addColorStop(0.55, 'rgba(186, 230, 253, 0.06)');
+      poolGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = poolGrad;
+      ctx.beginPath();
+      ctx.arc(sp.tx, sp.ty, 195, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Short, rhythmic cool-white Strobe impulses synced to the beat (subtle & comfortable on the eyes)
+    const strobeCycle = (now % 1850) / 1850;
+    const isStrobeFlash =
+      (strobeCycle > 0.0 && strobeCycle < 0.028) ||
+      (strobeCycle > 0.065 && strobeCycle < 0.088);
+    if (isStrobeFlash) {
+      ctx.fillStyle = 'rgba(224, 242, 254, 0.085)';
+      ctx.fillRect(rink.x, rink.y, rink.width, rink.height);
+    }
+
+    // PALLADIUM 1989 EPOCH LOOK: Golden disco-ball light dots orbiting across the dark floor!
+    if (activeArenaStyle === 'palladium-1989') {
+      const rot89 = now * 0.00028;
+      for (let i = 0; i < 72; i++) {
+        const ring = (i % 6) + 1;
+        const angle =
+          rot89 * (ring % 2 === 0 ? 1 : -1.15) + (i * Math.PI * 2) / 13;
+        const rx = cx + Math.cos(angle) * (ring * 116);
+        const ry = cy + Math.sin(angle) * (ring * 66);
+        ctx.fillStyle =
+          i % 3 === 0
+            ? 'rgba(253, 224, 71, 0.48)'
+            : i % 3 === 1
+            ? 'rgba(254, 243, 199, 0.36)'
+            : 'rgba(245, 158, 11, 0.34)';
+        ctx.beginPath();
+        ctx.ellipse(rx, ry, 5.5, 3.8, angle, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // Mirror Ball at ceiling: Golden & illuminated in 'palladium-1989' mode; resting in other non-slow-skating modes!
   ctx.save();
-  ctx.globalAlpha = 0.22;
-  ctx.fillStyle = isBlacklight
-    ? '#c084fc'
-    : isSlowSkating
-    ? '#fbbf24'
-    : '#bae6fd';
-  ctx.beginPath();
-  ctx.moveTo(cx - 380, 0);
-  ctx.lineTo(cx - 28, cy);
-  ctx.lineTo(cx + 28, cy);
-  ctx.closePath();
-  ctx.fill();
+  if (activeArenaStyle === 'palladium-1989') {
+    ctx.shadowColor = '#fde047';
+    ctx.shadowBlur = 22;
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = '#422006';
+    ctx.strokeStyle = '#fde047';
+    ctx.lineWidth = 2.8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 33, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
 
-  ctx.beginPath();
-  ctx.moveTo(cx + 380, 0);
-  ctx.lineTo(cx - 28, cy);
-  ctx.lineTo(cx + 28, cy);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
+    const facetShift = (now * 0.015) % 10;
+    for (let fy = -23; fy <= 23; fy += 10) {
+      const rowWidth = Math.sqrt(Math.max(0, 31 * 31 - fy * fy));
+      for (let fx = -rowWidth + facetShift; fx < rowWidth - 4; fx += 10) {
+        ctx.fillStyle =
+          Math.floor(fx + fy) % 2 === 0 ? '#fef08a' : '#f59e0b';
+        ctx.fillRect(cx + fx - 3, cy + fy - 3, 6, 6);
+      }
+    }
+  } else {
+    ctx.globalAlpha = 0.42;
+    ctx.fillStyle = '#0f172a';
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 32, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
 
-  ctx.save();
-  ctx.globalAlpha = 0.72;
-  ctx.fillStyle = '#1e293b';
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 34, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  const facetShift = (now * 0.015) % 10;
-  for (let fy = -24; fy <= 24; fy += 10) {
-    const rowWidth = Math.sqrt(Math.max(0, 32 * 32 - fy * fy));
-    for (let fx = -rowWidth + facetShift; fx < rowWidth - 4; fx += 10) {
-      ctx.fillStyle = Math.floor(fx + fy) % 2 === 0 ? '#f8fafc' : '#38bdf8';
-      ctx.fillRect(cx + fx - 3, cy + fy - 3, 6, 6);
+    for (let fy = -22; fy <= 22; fy += 11) {
+      const rowWidth = Math.sqrt(Math.max(0, 29 * 29 - fy * fy));
+      for (let fx = -rowWidth; fx < rowWidth - 4; fx += 11) {
+        ctx.fillStyle = Math.floor(fx + fy) % 2 === 0 ? '#334155' : '#1e293b';
+        ctx.fillRect(cx + fx - 3, cy + fy - 3, 5.5, 5.5);
+      }
     }
   }
   ctx.restore();
 }
+
+/**
+ * VISIBLE 80s HALL & DANCEFLOOR FOG CLOUDS (Rendered OVER floor & floor spots, UNDER Name Badges & HUD Overlays):
+ * Soft radial gradient banks in `rgba(215, 230, 255, 0.25)` to `0.40` drifting across the parquet and stage,
+ * softly tinted by the Disco-Spots / Stage Spotlights!
+ */
+function render80sDancefloorFogBanks(
+  ctx: CanvasRenderingContext2D,
+  now: number,
+  baseActive: boolean,
+  burstBoost: number,
+  isBlacklight: boolean,
+  isSlowSkating: boolean,
+  isConcertLightingActive: boolean
+): void {
+  const { rink } = ARENA_LAYOUT;
+  const cx = rink.centerX;
+  const cy = rink.centerY;
+
+  // Base alpha between 0.25 and 0.40 as requested!
+  const baseAlpha = baseActive ? 0.27 : 0.0;
+  const peakAlpha = Math.min(0.42, baseAlpha + burstBoost * 0.15);
+  if (peakAlpha <= 0.01) return;
+
+  const fogClouds = [
+    { ox: -310, oy: -120, rx: 310, ry: 155, spd: 0.00045, ph: 0.2, tint: 'cool' },
+    { ox: 0, oy: -35, rx: 370, ry: 180, spd: -0.00038, ph: 1.4, tint: 'magenta' },
+    { ox: 320, oy: -110, rx: 300, ry: 150, spd: 0.00042, ph: 2.7, tint: 'cyan' },
+    { ox: -260, oy: 135, rx: 320, ry: 160, spd: -0.00048, ph: 3.9, tint: 'cyan' },
+    { ox: 40, oy: 115, rx: 380, ry: 175, spd: 0.00036, ph: 5.1, tint: 'warm' },
+    { ox: 310, oy: 130, rx: 310, ry: 155, spd: -0.00044, ph: 6.0, tint: 'magenta' },
+    { ox: -490, oy: 10, rx: 250, ry: 135, spd: 0.0005, ph: 2.1, tint: 'cool' },
+    { ox: 480, oy: 15, rx: 250, ry: 135, spd: -0.0005, ph: 4.4, tint: 'cool' },
+  ];
+
+  ctx.save();
+  for (const fc of fogClouds) {
+    const driftX = Math.sin(now * fc.spd + fc.ph) * 75;
+    const driftY = Math.cos(now * fc.spd * 1.15 + fc.ph) * 32;
+    const fx = cx + fc.ox + driftX;
+    const fy = cy + fc.oy + driftY;
+    const pulseR = fc.rx * (0.94 + Math.sin(now * 0.0014 + fc.ph) * 0.1 + burstBoost * 0.18);
+    const pulseRy = fc.ry * (0.94 + Math.cos(now * 0.0012 + fc.ph) * 0.1 + burstBoost * 0.18);
+
+    const g = ctx.createRadialGradient(fx, fy, 18, fx, fy, pulseR);
+    // Core fog in rgba(215, 230, 255, 0.25..0.40) + subtle spotlight color tint in mid-ring
+    g.addColorStop(0, `rgba(215, 230, 255, ${peakAlpha.toFixed(3)})`);
+    if (isBlacklight) {
+      g.addColorStop(
+        0.52,
+        fc.tint === 'cyan'
+          ? `rgba(125, 211, 252, ${(peakAlpha * 0.68).toFixed(3)})`
+          : `rgba(216, 180, 254, ${(peakAlpha * 0.68).toFixed(3)})`
+      );
+    } else if (isConcertLightingActive || isSlowSkating) {
+      g.addColorStop(
+        0.52,
+        fc.tint === 'magenta'
+          ? `rgba(244, 114, 182, ${(peakAlpha * 0.65).toFixed(3)})`
+          : fc.tint === 'cyan'
+          ? `rgba(103, 232, 249, ${(peakAlpha * 0.65).toFixed(3)})`
+          : `rgba(254, 240, 138, ${(peakAlpha * 0.65).toFixed(3)})`
+      );
+    } else {
+      g.addColorStop(0.55, `rgba(215, 230, 255, ${(peakAlpha * 0.58).toFixed(3)})`);
+    }
+    g.addColorStop(1, 'rgba(215, 230, 255, 0)');
+
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(fx, fy, pulseR, pulseRy, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/**
+ * 16-BIT ARCADE PIXEL-ART SPRITE RENDERER ('pixel-16bit')
+ * Draws all skaters and NPCs on a crisp 2px pixel grid with 1px dark outlines,
+ * 80s neon outfits, and animated roller skates!
+ */
+function render16BitPixelCharacterSprite(
+  ctx: CanvasRenderingContext2D,
+  now: number,
+  opts: {
+    x: number;
+    y: number;
+    headingRad: number;
+    jumpZ: number;
+    gender?: 'female' | 'male';
+    isWheelchair: boolean;
+    isSkateGuard: boolean;
+    isSpeedSkater: boolean;
+    isGhost: boolean;
+    isPalladiumanerStaff: boolean;
+    shirtColor: string;
+    accentColor: string;
+    wheelColor: string;
+    legwarmerColor?: string;
+    kengolHat?: boolean;
+    kengoShoesWhitePink?: boolean;
+    isStreetShoes?: boolean;
+    isRentalSkates?: boolean;
+    isCustomOwnSkates?: boolean;
+    name: string;
+    showName: boolean;
+    isBlacklight: boolean;
+    crashTimer: number;
+    speechBubble: string | null;
+    underglowColor?: string;
+    hasMultiplayerStar?: boolean;
+  }
+): void {
+  const isFemale = opts.gender === 'female';
+  const isCrewOrGuard = opts.isSkateGuard || opts.isPalladiumanerStaff;
+  const pxSnap = (v: number) => Math.round(v / 2) * 2;
+  const x = pxSnap(opts.x);
+  const y = pxSnap(opts.y);
+  const strideFrame = Math.floor(now * 0.012 + (opts.x + opts.y) * 0.02) % 2 === 0 ? -3 : 3;
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.translate(x, y);
+
+  if (opts.isGhost) {
+    ctx.globalAlpha = 0.68;
+  }
+
+  // Pixelated drop shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
+  ctx.fillRect(-18, 6, 36, 12);
+  ctx.fillRect(-14, 4, 28, 16);
+
+  ctx.translate(0, -pxSnap(opts.jumpZ));
+
+  if (opts.underglowColor) {
+    const glowMap: Record<string, string> = {
+      pink: '#ff2a85',
+      cyan: '#00f0ff',
+      green: '#39ff14',
+      gold: '#fde047',
+    };
+    ctx.fillStyle = glowMap[opts.underglowColor] || '#00f0ff';
+    ctx.globalAlpha = 0.34;
+    ctx.fillRect(-24, -20, 48, 40);
+    ctx.globalAlpha = opts.isGhost ? 0.68 : 1;
+  }
+
+  ctx.save();
+  // Quantize rotation to 16 arcade directions for authentic 16-bit arcade feel!
+  const quantHeading =
+    Math.round(opts.headingRad / (Math.PI / 8)) * (Math.PI / 8);
+  ctx.rotate(quantHeading);
+
+  const outlineCol = '#050811';
+  const wheelCol = opts.kengoShoesWhitePink
+    ? '#ff2a85'
+    : opts.isRentalSkates
+    ? '#38bdf8'
+    : opts.isBlacklight
+    ? '#00f0ff'
+    : opts.wheelColor;
+
+  if (opts.isWheelchair) {
+    // 16-bit pixel wheelchair + neon rim wheels
+    ctx.fillStyle = outlineCol;
+    ctx.fillRect(-18, -24, 28, 48);
+    ctx.fillStyle = wheelCol;
+    ctx.fillRect(-16, -22, 24, 6);
+    ctx.fillRect(-16, 16, 24, 6);
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(-12, -14, 20, 28);
+  } else {
+    // Animated 16-bit Pixel Roller Skates (Left & Right boot + 4 pixel wheels)
+    [-19, 13].forEach((sideY, idx) => {
+      const legShift = idx === 0 ? strideFrame : -strideFrame;
+      // 1px dark pixel outline around skate
+      ctx.fillStyle = outlineCol;
+      ctx.fillRect(-12 + legShift, sideY - 2, 22, 10);
+      // Pixel wheels
+      if (!opts.isStreetShoes) {
+        ctx.fillStyle = wheelCol;
+        ctx.fillRect(-10 + legShift, sideY < 0 ? sideY - 3 : sideY + 6, 6, 3);
+        ctx.fillRect(0 + legShift, sideY < 0 ? sideY - 3 : sideY + 6, 6, 3);
+      }
+      // Boot block
+      ctx.fillStyle = opts.isStreetShoes
+        ? '#334155'
+        : opts.isRentalSkates
+        ? '#b45309'
+        : '#ffffff';
+      ctx.fillRect(-10 + legShift, sideY, 18, 6);
+      // 80s neon stripe on boot
+      ctx.fillStyle = opts.kengoShoesWhitePink
+        ? '#ff2a85'
+        : opts.isCustomOwnSkates
+        ? '#39ff14'
+        : opts.accentColor;
+      ctx.fillRect(-8 + legShift, sideY + 2, 12, 2);
+    });
+  }
+
+  // Torso / 80s Shoulder-Pad Jacket with 1px dark outline
+  const shW = isFemale ? 30 : 36;
+  ctx.fillStyle = outlineCol;
+  ctx.fillRect(-14, -shW / 2 - 2, 26, shW + 4);
+
+  ctx.fillStyle = isCrewOrGuard ? '#070a10' : opts.shirtColor;
+  ctx.fillRect(-12, -shW / 2, 22, shW);
+
+  // 80s Neon V-Chevron / Stripe on shoulders
+  ctx.fillStyle = isCrewOrGuard
+    ? '#39ff14'
+    : opts.isBlacklight
+    ? '#00f0ff'
+    : opts.accentColor;
+  ctx.fillRect(-10, -shW / 2 + 2, 4, shW - 4);
+  ctx.fillRect(4, -shW / 2 + 2, 4, shW - 4);
+
+  // Pixel Head with 1px dark outline
+  ctx.fillStyle = outlineCol;
+  ctx.fillRect(-6, -10, 20, 20);
+  ctx.fillStyle = opts.isGhost ? '#cffafe' : '#fde68a';
+  ctx.fillRect(-4, -8, 16, 16);
+
+  if (opts.kengolHat) {
+    // 16-bit Pixel Kengol Bucket Hat
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(-6, -10, 18, 20);
+    ctx.fillStyle = '#ff2a85';
+    ctx.fillRect(-2, -8, 4, 16);
+    ctx.fillStyle = '#fde047';
+    ctx.fillRect(4, -2, 4, 4);
+  } else if (isFemale) {
+    // 16-bit Pixel High Ponytail + Scrunchie
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillRect(-6, -8, 10, 16);
+    ctx.fillRect(-16, -4, 8, 8);
+    ctx.fillStyle = opts.legwarmerColor || '#ff2a85';
+    ctx.fillRect(-8, -3, 4, 6);
+  } else {
+    // 16-bit Pixel 80s Hair + Neon Headband
+    ctx.fillStyle = '#451a03';
+    ctx.fillRect(-6, -8, 10, 16);
+    ctx.fillStyle = opts.accentColor;
+    ctx.fillRect(4, -8, 4, 16);
+  }
+
+  ctx.restore();
+  ctx.restore();
+
+  if (opts.showName && opts.name) {
+    drawRetroNameBadge(
+      ctx,
+      opts.x,
+      opts.y - opts.jumpZ - 34,
+      opts.name,
+      isCrewOrGuard ? '#39ff14' : opts.accentColor,
+      opts.hasMultiplayerStar
+    );
+  }
+  if (opts.speechBubble) {
+    const bubbleY =
+      opts.showName && opts.name
+        ? opts.y - opts.jumpZ - 62
+        : opts.y - opts.jumpZ - 46;
+    drawSpeechBubble(ctx, opts.x, bubbleY, opts.speechBubble);
+  }
+}
+
+/**
+ * CONCERT LIGHTING OVERLAY ("🔦 KONZERTBELEUCHTUNG"):
+ * Dims the surrounding hall with a dark veil (`rgba(5, 6, 18, 0.68)`) while keeping
+ * the Live-Band-Bühne cut out and illuminated by sweeping 80s spotlights (Warm White, Magenta, Cyan).
+ */
+function renderConcertStageSpotlightOverlay(
+  ctx: CanvasRenderingContext2D,
+  now: number,
+  stageCloseProgress: number
+): void {
+  const { uIslands, rink } = ARENA_LAYOUT;
+  const sx = uIslands.closedStageX - 24;
+  const sy = uIslands.closedStageY - 26;
+  const sw = uIslands.closedStageWidth + 48;
+  const sh = uIslands.closedStageHeight + 52;
+
+  ctx.save();
+  // 1. Dark Hall Light Veil with even-odd Stage Cut-Out
+  ctx.fillStyle = `rgba(5, 6, 18, ${0.52 + 0.16 * stageCloseProgress})`;
+  ctx.beginPath();
+  ctx.rect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  // Cut out rounded stage spotlight zone in the middle
+  ctx.roundRect(sx, sy, sw, sh, 44);
+  ctx.fill('evenodd');
+
+  // Soft glowing feather rim around the illuminated stage cut-out
+  ctx.strokeStyle = 'rgba(255, 42, 133, 0.35)';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.roundRect(sx, sy, sw, sh, 44);
+  ctx.stroke();
+
+  // 2. Sweeping 80s Stage Spotlight Cones in Warm White, Magenta, and Cyan
+  const stageSpots = [
+    {
+      ox: uIslands.closedStageX + 55,
+      oy: uIslands.closedStageY + 12,
+      tx: rink.centerX - 95 + Math.sin(now * 0.0022) * 85,
+      ty: uIslands.closedStageY + 195 + Math.cos(now * 0.0018) * 35,
+      colStart: 'rgba(254, 243, 199, 0.28)',
+      colEnd: 'rgba(254, 243, 199, 0.02)',
+    },
+    {
+      ox: rink.centerX,
+      oy: uIslands.closedStageY + 10,
+      tx: rink.centerX + Math.cos(now * 0.0026 + 1.2) * 115,
+      ty: uIslands.closedStageY + 215 + Math.sin(now * 0.002) * 30,
+      colStart: 'rgba(255, 42, 133, 0.26)',
+      colEnd: 'rgba(255, 42, 133, 0.02)',
+    },
+    {
+      ox: uIslands.closedStageX + uIslands.closedStageWidth - 55,
+      oy: uIslands.closedStageY + 12,
+      tx: rink.centerX + 95 + Math.sin(now * 0.0024 + 2.5) * 85,
+      ty: uIslands.closedStageY + 195 + Math.cos(now * 0.0019 + 1) * 35,
+      colStart: 'rgba(0, 240, 255, 0.26)',
+      colEnd: 'rgba(0, 240, 255, 0.02)',
+    },
+  ];
+
+  for (const cone of stageSpots) {
+    const g = ctx.createLinearGradient(cone.ox, cone.oy, cone.tx, cone.ty);
+    g.addColorStop(0, cone.colStart);
+    g.addColorStop(1, cone.colEnd);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(cone.ox - 10, cone.oy);
+    ctx.lineTo(cone.ox + 10, cone.oy);
+    ctx.lineTo(cone.tx + 72, cone.ty);
+    ctx.lineTo(cone.tx - 72, cone.ty);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+

@@ -1,13 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ADMIN_PIN,
+  ArenaVisualStyle,
+  BandGenderMode,
+  BandSkinToneMode,
   CameraViewMode,
   CenterStageMode,
   ChallengeDefinition,
   ChallengeId,
+  ConcertLightingMode,
+  DEFAULT_DJ_NAME,
   DEFAULT_DJ_TICKER,
   DEFAULT_SPECIAL_SKATERS,
   DEFAULT_TWITCH_CHANNEL,
+  GuestDjPreset,
   HallGameMode,
   LightingMode,
   PALLADIUM_CHALLENGES,
@@ -16,8 +22,10 @@ import {
   ProShopUpgradesState,
   NeonUnderglowColor,
 } from './config/arenaConfig';
+import Peer, { DataConnection } from 'peerjs';
 import {
   ArenaLiveTelemetry,
+  MultiplayerPlayerState,
   RollerArenaEngine,
 } from './components/RollerArenaEngine';
 import { soundFX } from './utils/soundEffects';
@@ -25,10 +33,13 @@ import {
   AdminPersistentSettings,
   ChallengeProgressMap,
   computePeakHourLabel,
+  EntryPassData,
   HallStatsData,
   loadAdminSettings,
   loadAdminUnlockedSession,
   loadChallengesProgress,
+  loadEntryPass,
+  loadGuestDjPresets,
   loadHallStats,
   loadHasEnteredBefore,
   loadHideChronik,
@@ -36,17 +47,73 @@ import {
   loadProShopUpgrades,
   loadSpecialSkaters,
   recordSessionVisit,
+  resetEntryPass,
   resetHallStats,
   saveAdminSettings,
   saveAdminUnlockedSession,
   saveChallengesProgress,
+  saveEntryPass,
+  saveGuestDjPresets,
   saveHallStats,
   saveHasEnteredBefore,
   saveHideChronik,
   savePlayerProfile,
   saveProShopUpgrades,
   saveSpecialSkaters,
+  SingleplayerDifficulty,
 } from './utils/storageAndStats';
+
+const MULTIPLAYER_OUTFIT_COLORS = [
+  { id: 'neon-pink', label: 'Neon-Pink', hex: '#ff2a85' },
+  { id: 'cyber-cyan', label: 'Cyber-Cyan', hex: '#00f0ff' },
+  { id: 'laser-green', label: 'Laser-Grün', hex: '#39ff14' },
+  { id: 'sunset-gold', label: 'Sunset-Gold', hex: '#f59e0b' },
+  { id: 'electric-violet', label: 'Electric-Violett', hex: '#a855f7' },
+  { id: 'turbo-red', label: 'Turbo-Rot', hex: '#ef4444' },
+] as const;
+
+interface AdminSyncPayload {
+  lightingMode: LightingMode;
+  centerStageMode: CenterStageMode;
+  activeBandName: string;
+  customBandInput: string;
+  bandSkinTone: BandSkinToneMode;
+  bandGender: BandGenderMode;
+  hallGameMode: HallGameMode;
+  concertLightingMode: ConcertLightingMode;
+  fogMachineEnabled: boolean;
+  fogBurstCount: number;
+  activeDjName: string;
+  djTickerText: string;
+  twitchChannel: string;
+  isMaintenanceMode: boolean;
+  liveArenaStyle: ArenaVisualStyle;
+}
+
+type MultiplayerPacket =
+  | {
+      type: 'guest-hello';
+      state: MultiplayerPlayerState;
+    }
+  | {
+      type: 'player-state';
+      state: MultiplayerPlayerState;
+    }
+  | {
+      type: 'world-players';
+      players: MultiplayerPlayerState[];
+    }
+  | {
+      type: 'admin-sync';
+      payload: AdminSyncPayload;
+    }
+  | {
+      type: 'kicked';
+      reason?: string;
+    }
+  | {
+      type: 'room-closed';
+    };
 
 export function App() {
   // First-visit curtain & chronicle state (cookie-free localStorage)
@@ -81,7 +148,28 @@ export function App() {
     useState<CenterStageMode>('islands');
   const [activeBandName, setActiveBandName] = useState<string>(PARODY_BANDS[0]);
   const [customBandInput, setCustomBandInput] = useState<string>('');
+  const [bandSkinTone, setBandSkinTone] = useState<BandSkinToneMode>('mixed');
+  const [bandGender, setBandGender] = useState<BandGenderMode>('mixed');
   const [hallGameMode, setHallGameMode] = useState<HallGameMode>('free-skate');
+
+  // Singleplayer Experience Level, Own Skates vs. Rental Skates & Anti-Cheat Entry Pass
+  const initialEntryPass = useMemo(() => loadEntryPass(), []);
+  const [entryPass, setEntryPass] = useState<EntryPassData | null>(
+    initialEntryPass
+  );
+  const [difficulty, setDifficulty] = useState<SingleplayerDifficulty>(
+    initialEntryPass?.difficulty || 'intermediate'
+  );
+  const [hasOwnSkates, setHasOwnSkates] = useState<boolean>(
+    initialEntryPass ? initialEntryPass.hasOwnSkates : true
+  );
+  const [hasRentedSkates, setHasRentedSkates] = useState<boolean>(
+    initialEntryPass ? initialEntryPass.hasRentedSkates : false
+  );
+  const [drinkChipAvailable, setDrinkChipAvailable] = useState<boolean>(
+    initialEntryPass ? initialEntryPass.drinkChipAvailable : true
+  );
+  const [isMuted, setIsMuted] = useState<boolean>(false);
 
   // Admin & Persistent Settings
   const initialAdminSettings = useMemo(() => loadAdminSettings(), []);
@@ -92,6 +180,24 @@ export function App() {
   );
   const [newGhostName, setNewGhostName] = useState<string>('');
 
+  // Guest-DJ Presets & Form State
+  const [guestDjPresets, setGuestDjPresets] = useState<GuestDjPreset[]>(() =>
+    loadGuestDjPresets()
+  );
+  const [newGuestDjName, setNewGuestDjName] = useState<string>('');
+  const [newGuestDjChannel, setNewGuestDjChannel] = useState<string>('');
+  const [newGuestDjTicker, setNewGuestDjTicker] = useState<string>('');
+
+  // Arena Visual Style (Admin Preview vs. Live Unlocked Style)
+  const [selectedStyleTile, setSelectedStyleTile] = useState<ArenaVisualStyle>(
+    initialAdminSettings.liveArenaStyle || 'classic-neon'
+  );
+  const [adminPreviewStyle, setAdminPreviewStyle] =
+    useState<ArenaVisualStyle | null>(null);
+  const [styleFeedbackToast, setStyleFeedbackToast] = useState<string | null>(
+    null
+  );
+
   // Lighting & Schedule Automation States
   const [blacklightTimerSec, setBlacklightTimerSec] = useState<number>(0);
   const preBlacklightModeRef = useRef<LightingMode>('disco');
@@ -99,22 +205,81 @@ export function App() {
   const wasBallspielRef = useRef<boolean>(false);
   const wasCinemaScheduledRef = useRef<boolean>(false);
 
-  // URL parameter bypass for Maintenance mode (?access=palladium)
+  // URL parameter bypass for Maintenance mode (?access=palladium) & Multiplayer Room (?room=<RAUM_ID>)
   const hasUrlBackstageBypass = useMemo(() => {
     if (typeof window === 'undefined') return false;
     const params = new URLSearchParams(window.location.search);
     return params.get('access')?.toLowerCase() === 'palladium';
   }, []);
 
-  // Admin PIN Authentication (sessionStorage)
+  const initialUrlRoomId = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    const r = params.get('room')?.trim();
+    return r && r.length > 0 ? r : null;
+  }, []);
+
+  // Admin PIN Authentication (sessionStorage) — hidden for invited guests unless they unlock with Admin-PIN
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() =>
-    loadAdminUnlockedSession()
+    initialUrlRoomId ? false : loadAdminUnlockedSession()
   );
   const [showAdminPinModal, setShowAdminPinModal] = useState<boolean>(false);
   const [showAdminTerminal, setShowAdminTerminal] = useState<boolean>(false);
   const [pinInput, setPinInput] = useState<string>('');
   const [pinError, setPinError] = useState<string | null>(null);
   const logoClickTimestampsRef = useRef<number[]>([]);
+
+  // ============================================================================
+  // PEERJS / WEBRTC REAL-TIME MULTIPLAYER STATE (HOST & GUEST)
+  // ============================================================================
+  const [playerShirtColor, setPlayerShirtColor] = useState<string>(
+    initialUrlRoomId ? '#ff2a85' : '#1e1b4b'
+  );
+  const [mpRole, setMpRole] = useState<'solo' | 'host' | 'guest'>('solo');
+  const [mpRoomId, setMpRoomId] = useState<string | null>(initialUrlRoomId);
+  const [mpStatus, setMpStatus] = useState<
+    'idle' | 'connecting' | 'connected' | 'error'
+  >('idle');
+  const [mpNotice, setMpNotice] = useState<string | null>(null);
+  const [inviteCopied, setInviteCopied] = useState<boolean>(false);
+  const [remotePlayers, setRemotePlayers] = useState<MultiplayerPlayerState[]>(
+    []
+  );
+  const [showGuestJoinModal, setShowGuestJoinModal] = useState<boolean>(() =>
+    Boolean(initialUrlRoomId)
+  );
+  const [guestJoinNameInput, setGuestJoinNameInput] = useState<string>(() =>
+    initialProfile.name && initialProfile.name !== 'Gast'
+      ? initialProfile.name
+      : ''
+  );
+
+  const peerInstanceRef = useRef<Peer | null>(null);
+  const hostConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
+  const hostGuestsStateRef = useRef<Map<string, MultiplayerPlayerState>>(
+    new Map()
+  );
+  const guestConnRef = useRef<DataConnection | null>(null);
+  const localSkaterSnapshotRef = useRef<MultiplayerPlayerState>({
+    peerId: 'local',
+    name: playerName || 'Skater',
+    shirtColor: playerShirtColor,
+    x: 1320,
+    y: 725,
+    vx: 0,
+    vy: 0,
+    headingRad: -Math.PI / 2,
+    spinAngleOffset: 0,
+    isSpinning: false,
+    jumpZ: 0,
+    isJumping: false,
+    characterMode: 'skater',
+    kengolHat: false,
+    crashTimer: 0,
+    speechBubble: null,
+  });
+
+  const isMultiplayerActive = mpRole === 'host' || mpRole === 'guest';
 
   // Challenges & Pro-Shop Upgrades
   const [challengesProgress, setChallengesProgress] =
@@ -132,7 +297,13 @@ export function App() {
   const [showHallGamesModal, setShowHallGamesModal] = useState<boolean>(false);
   const [showStatsModal, setShowStatsModal] = useState<boolean>(false);
   const [showTwitchWidget, setShowTwitchWidget] = useState<boolean>(false);
+  const [isTwitchOnline, setIsTwitchOnline] = useState<boolean>(false);
+  const [isCinemaScheduleActive, setIsCinemaScheduleActive] =
+    useState<boolean>(false);
   const [twitchMuted, setTwitchMuted] = useState<boolean>(false);
+  const [fogBurstCount, setFogBurstCount] = useState<number>(0);
+  const [isBottomBarCollapsed, setIsBottomBarCollapsed] =
+    useState<boolean>(false);
 
   // Hall Statistics
   const [hallStats, setHallStats] = useState<HallStatsData>(() =>
@@ -155,8 +326,10 @@ export function App() {
     freeSlushCount: 1,
     freeBlobaCount: 1,
     nearProShop: false,
+    nearSkateRental: false,
     nearBistroCounter: false,
     nearDjTower: false,
+    hasSkatesEquipped: true,
     djAudioProximity: 0.35,
     gamepadConnected: false,
     gamepadName: '',
@@ -241,9 +414,49 @@ export function App() {
     handleStart15MinBlacklight,
   ]);
 
+  // Check whether the configured Twitch channel is actually LIVE / online
+  // Keeps the top-right Twitch dock and center Cinema screen hidden when offline so the white "offline" screen never blocks the playfield!
+  useEffect(() => {
+    const channel = (adminSettings.twitchChannel || '').trim();
+    if (!channel) {
+      setIsTwitchOnline(false);
+      return;
+    }
+    let cancelled = false;
+    const checkTwitchLive = async () => {
+      try {
+        const res = await fetch(
+          `https://decapi.me/twitch/uptime/${encodeURIComponent(channel)}`
+        );
+        if (!res.ok) {
+          if (!cancelled) setIsTwitchOnline(false);
+          return;
+        }
+        const text = (await res.text()).trim().toLowerCase();
+        const isLive =
+          text.length > 0 &&
+          !text.includes('offline') &&
+          !text.includes('error') &&
+          !text.includes('not found');
+        if (!cancelled) {
+          setIsTwitchOnline(isLive);
+        }
+      } catch {
+        if (!cancelled) setIsTwitchOnline(false);
+      }
+    };
+    checkTwitchLive();
+    const timer = window.setInterval(checkTwitchLive, 60000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [adminSettings.twitchChannel]);
+
   // Automatic Kino-Zeitplan (Weekday + Start/End Time -> switches to 'cinema' and back to 'islands')
   useEffect(() => {
     if (!adminSettings.cinemaScheduleEnabled) {
+      setIsCinemaScheduleActive(false);
       if (wasCinemaScheduledRef.current) {
         wasCinemaScheduledRef.current = false;
         setCenterStageMode('islands');
@@ -283,13 +496,17 @@ export function App() {
           : nowMinutes >= startMinutes || nowMinutes < endMinutes;
 
       if (dayMatches && inTimeWindow) {
+        setIsCinemaScheduleActive(true);
         if (!wasCinemaScheduledRef.current) {
           wasCinemaScheduledRef.current = true;
           setCenterStageMode('cinema');
         }
-      } else if (wasCinemaScheduledRef.current) {
-        wasCinemaScheduledRef.current = false;
-        setCenterStageMode('islands');
+      } else {
+        setIsCinemaScheduleActive(false);
+        if (wasCinemaScheduledRef.current) {
+          wasCinemaScheduledRef.current = false;
+          setCenterStageMode('islands');
+        }
       }
     };
 
@@ -337,9 +554,18 @@ export function App() {
         return;
       }
 
+      const tag = (e.target as HTMLElement)?.tagName;
+      const isInput =
+        tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+      if (!isInput && e.key.toLowerCase() === 'i' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        setIsBottomBarCollapsed((prev) => !prev);
+        return;
+      }
+
       if (!isCurtainOpen && (e.key === 'Enter' || e.key === ' ')) {
-        const tag = (e.target as HTMLElement)?.tagName;
-        if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+        if (!isInput) {
           e.preventDefault();
           handleEnterHall();
         }
@@ -355,9 +581,67 @@ export function App() {
     setHasEnteredBefore(true);
     setIsCurtainOpen(true);
     setShowChronicleModal(false);
+
+    // Lock Singleplayer Entry Stamp (palladium_entry_pass) for this visit if not already locked
+    setEntryPass((prev) => {
+      if (prev?.locked) return prev;
+      const lockedPass: EntryPassData = {
+        locked: true,
+        difficulty,
+        hasOwnSkates,
+        hasRentedSkates: false,
+        drinkChipAvailable: true,
+        stampedAt: new Date().toISOString(),
+      };
+      saveEntryPass(lockedPass);
+      setHasRentedSkates(false);
+      setDrinkChipAvailable(true);
+      return lockedPass;
+    });
+
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+  }, [difficulty, hasOwnSkates]);
+
+  const handleRedeemDrinkChipAtRental = useCallback(() => {
+    setHasRentedSkates(true);
+    setDrinkChipAvailable(false);
+    setEntryPass((prev) => {
+      const updated: EntryPassData = {
+        locked: true,
+        difficulty: prev ? prev.difficulty : difficulty,
+        hasOwnSkates: prev ? prev.hasOwnSkates : hasOwnSkates,
+        hasRentedSkates: true,
+        drinkChipAvailable: false,
+        stampedAt: prev?.stampedAt || new Date().toISOString(),
+      };
+      saveEntryPass(updated);
+      return updated;
+    });
+  }, [difficulty, hasOwnSkates]);
+
+  const handleRedeemDrinkChipAtBistro = useCallback(() => {
+    setDrinkChipAvailable(false);
+    setEntryPass((prev) => {
+      const updated: EntryPassData = {
+        locked: true,
+        difficulty: prev ? prev.difficulty : difficulty,
+        hasOwnSkates: prev ? prev.hasOwnSkates : hasOwnSkates,
+        hasRentedSkates: prev ? prev.hasRentedSkates : hasRentedSkates,
+        drinkChipAvailable: false,
+        stampedAt: prev?.stampedAt || new Date().toISOString(),
+      };
+      saveEntryPass(updated);
+      return updated;
+    });
+  }, [difficulty, hasOwnSkates, hasRentedSkates]);
+
+  const handleResetEntryPassFromAdmin = useCallback(() => {
+    resetEntryPass();
+    setEntryPass(null);
+    setHasRentedSkates(false);
+    setDrinkChipAvailable(true);
   }, []);
 
   const handleLogoClick = () => {
@@ -416,6 +700,409 @@ export function App() {
   const handleToggleKengolHat = useCallback(() => {
     setKengolHatEnabled((prev) => !prev);
   }, []);
+
+  // ============================================================================
+  // PEERJS MULTIPLAYER HANDLERS (OPEN ROOM, JOIN ROOM, KICK, CLOSE & ADMIN SYNC)
+  // ============================================================================
+
+  const buildCurrentAdminSyncPayload = useCallback((): AdminSyncPayload => {
+    return {
+      lightingMode,
+      centerStageMode,
+      activeBandName,
+      customBandInput,
+      bandSkinTone,
+      bandGender,
+      hallGameMode,
+      concertLightingMode: adminSettings.concertLightingMode,
+      fogMachineEnabled: adminSettings.fogMachineEnabled,
+      fogBurstCount,
+      activeDjName: adminSettings.activeDjName || DEFAULT_DJ_NAME,
+      djTickerText: adminSettings.djTickerText,
+      twitchChannel: adminSettings.twitchChannel,
+      isMaintenanceMode: adminSettings.isMaintenanceMode,
+      liveArenaStyle: adminSettings.liveArenaStyle || 'classic-neon',
+    };
+  }, [
+    lightingMode,
+    centerStageMode,
+    activeBandName,
+    customBandInput,
+    bandSkinTone,
+    bandGender,
+    hallGameMode,
+    adminSettings.concertLightingMode,
+    adminSettings.fogMachineEnabled,
+    fogBurstCount,
+    adminSettings.activeDjName,
+    adminSettings.djTickerText,
+    adminSettings.twitchChannel,
+    adminSettings.isMaintenanceMode,
+    adminSettings.liveArenaStyle,
+  ]);
+
+  const adminSyncPayloadRef = useRef<AdminSyncPayload>(
+    buildCurrentAdminSyncPayload()
+  );
+  useEffect(() => {
+    adminSyncPayloadRef.current = buildCurrentAdminSyncPayload();
+  }, [buildCurrentAdminSyncPayload]);
+
+  // Broadcast Hallenleiter-Sync from Host to all connected Guests whenever any Admin setting changes!
+  useEffect(() => {
+    if (mpRole !== 'host') return;
+    const pkt: MultiplayerPacket = {
+      type: 'admin-sync',
+      payload: buildCurrentAdminSyncPayload(),
+    };
+    hostConnectionsRef.current.forEach((conn) => {
+      if (conn.open) {
+        try {
+          conn.send(pkt);
+        } catch {
+          // Ignore transient send error
+        }
+      }
+    });
+  }, [mpRole, buildCurrentAdminSyncPayload]);
+
+  const cleanupPeerSession = useCallback(() => {
+    hostConnectionsRef.current.forEach((c) => {
+      try {
+        c.close();
+      } catch {
+        // ignore
+      }
+    });
+    hostConnectionsRef.current.clear();
+    hostGuestsStateRef.current.clear();
+    if (guestConnRef.current) {
+      try {
+        guestConnRef.current.close();
+      } catch {
+        // ignore
+      }
+      guestConnRef.current = null;
+    }
+    if (peerInstanceRef.current) {
+      try {
+        peerInstanceRef.current.destroy();
+      } catch {
+        // ignore
+      }
+      peerInstanceRef.current = null;
+    }
+    setRemotePlayers([]);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cleanupPeerSession();
+    };
+  }, [cleanupPeerSession]);
+
+  const handleOpenHostRoom = useCallback(
+    (customRoomId?: string) => {
+      cleanupPeerSession();
+      const targetId =
+        customRoomId ||
+        `palladium-hanau-89-${Math.floor(100 + Math.random() * 900)}`;
+      setMpStatus('connecting');
+      setMpNotice('Starte Multiplayer-Host-Raum...');
+
+      const peer = new Peer(targetId);
+      peerInstanceRef.current = peer;
+
+      peer.on('open', (id) => {
+        setMpRole('host');
+        setMpRoomId(id);
+        setMpStatus('connected');
+        setMpNotice(
+          `🌐 Multiplayer-Raum „${id}“ ist live! Teile den Einladungs-Link mit deinen Freunden.`
+        );
+        localSkaterSnapshotRef.current.peerId = id;
+      });
+
+      peer.on('connection', (conn) => {
+        hostConnectionsRef.current.set(conn.peer, conn);
+
+        conn.on('open', () => {
+          // Immediately send current Hallenleiter-Sync state & world players to the joining guest
+          try {
+            const syncPkt: MultiplayerPacket = {
+              type: 'admin-sync',
+              payload: adminSyncPayloadRef.current,
+            };
+            conn.send(syncPkt);
+
+            const allPlayers: MultiplayerPlayerState[] = [
+              {
+                ...localSkaterSnapshotRef.current,
+                peerId: peer.id || targetId,
+              },
+              ...Array.from(hostGuestsStateRef.current.values()),
+            ];
+            const worldPkt: MultiplayerPacket = {
+              type: 'world-players',
+              players: allPlayers,
+            };
+            conn.send(worldPkt);
+          } catch {
+            // ignore
+          }
+        });
+
+        conn.on('data', (raw) => {
+          const pkt = raw as MultiplayerPacket;
+          if (!pkt || typeof pkt !== 'object') return;
+          if (pkt.type === 'guest-hello' || pkt.type === 'player-state') {
+            const updatedGuest: MultiplayerPlayerState = {
+              ...pkt.state,
+              peerId: conn.peer,
+            };
+            hostGuestsStateRef.current.set(conn.peer, updatedGuest);
+            setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
+          }
+        });
+
+        const handleDisconnect = () => {
+          hostConnectionsRef.current.delete(conn.peer);
+          hostGuestsStateRef.current.delete(conn.peer);
+          setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
+        };
+
+        conn.on('close', handleDisconnect);
+        conn.on('error', handleDisconnect);
+      });
+
+      peer.on('error', (err: { type?: string }) => {
+        if (err?.type === 'unavailable-id' && !customRoomId) {
+          handleOpenHostRoom(
+            `palladium-hanau-89-${Math.floor(1000 + Math.random() * 9000)}`
+          );
+          return;
+        }
+        setMpStatus('error');
+        setMpNotice('Verbindungsfehler beim Erstellen des Multiplayer-Raums.');
+      });
+    },
+    [cleanupPeerSession]
+  );
+
+  const handleCloseHostRoom = useCallback(() => {
+    const closePkt: MultiplayerPacket = { type: 'room-closed' };
+    hostConnectionsRef.current.forEach((conn) => {
+      if (conn.open) {
+        try {
+          conn.send(closePkt);
+        } catch {
+          // ignore
+        }
+      }
+    });
+    window.setTimeout(() => {
+      cleanupPeerSession();
+      setMpRole('solo');
+      setMpRoomId(null);
+      setMpStatus('idle');
+      setMpNotice('Multiplayer-Raum geschlossen. KI-Skater sind wieder aktiv.');
+    }, 80);
+  }, [cleanupPeerSession]);
+
+  const handleKickGuest = useCallback((guestPeerId: string) => {
+    const conn = hostConnectionsRef.current.get(guestPeerId);
+    if (conn) {
+      try {
+        const kickPkt: MultiplayerPacket = {
+          type: 'kicked',
+          reason: 'Vom Hallenleiter aus dem Raum entfernt.',
+        };
+        conn.send(kickPkt);
+      } catch {
+        // ignore
+      }
+      window.setTimeout(() => {
+        try {
+          conn.close();
+        } catch {
+          // ignore
+        }
+      }, 60);
+    }
+    hostConnectionsRef.current.delete(guestPeerId);
+    hostGuestsStateRef.current.delete(guestPeerId);
+    setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
+  }, []);
+
+  const handleConnectAsGuest = useCallback(
+    (roomIdToJoin: string, chosenName: string, chosenColor: string) => {
+      cleanupPeerSession();
+      const cleanName = chosenName.trim() || 'Gast-Skater';
+      setPlayerName(cleanName);
+      setIsAnonymousGuest(false);
+      setPlayerShirtColor(chosenColor);
+      setHasOwnSkates(true);
+      setIsCurtainOpen(true);
+      setShowChronicleModal(false);
+      setShowGuestJoinModal(false);
+      setMpStatus('connecting');
+      setMpNotice(`Verbinde mit Palladium-Raum „${roomIdToJoin}“...`);
+
+      const peer = new Peer();
+      peerInstanceRef.current = peer;
+
+      peer.on('open', (myPeerId) => {
+        localSkaterSnapshotRef.current.peerId = myPeerId;
+        localSkaterSnapshotRef.current.name = cleanName;
+        localSkaterSnapshotRef.current.shirtColor = chosenColor;
+
+        const conn = peer.connect(roomIdToJoin, { reliable: true });
+        guestConnRef.current = conn;
+
+        conn.on('open', () => {
+          setMpRole('guest');
+          setMpRoomId(roomIdToJoin);
+          setMpStatus('connected');
+          setMpNotice(`🌐 Live verbunden mit Raum „${roomIdToJoin}“!`);
+
+          const helloPkt: MultiplayerPacket = {
+            type: 'guest-hello',
+            state: {
+              ...localSkaterSnapshotRef.current,
+              peerId: myPeerId,
+              name: cleanName,
+              shirtColor: chosenColor,
+            },
+          };
+          try {
+            conn.send(helloPkt);
+          } catch {
+            // ignore
+          }
+        });
+
+        conn.on('data', (raw) => {
+          const pkt = raw as MultiplayerPacket;
+          if (!pkt || typeof pkt !== 'object') return;
+
+          if (pkt.type === 'world-players') {
+            const others = (pkt.players || []).filter(
+              (pl) => pl.peerId !== myPeerId
+            );
+            setRemotePlayers(others);
+          } else if (pkt.type === 'admin-sync') {
+            const s = pkt.payload;
+            setLightingMode(s.lightingMode);
+            setCenterStageMode(s.centerStageMode);
+            setActiveBandName(s.activeBandName);
+            setCustomBandInput(s.customBandInput);
+            setBandSkinTone(s.bandSkinTone);
+            setBandGender(s.bandGender);
+            setHallGameMode(s.hallGameMode);
+            setFogBurstCount(s.fogBurstCount);
+            setAdminPreviewStyle(null);
+            setAdminSettings((prev) => ({
+              ...prev,
+              concertLightingMode: s.concertLightingMode,
+              fogMachineEnabled: s.fogMachineEnabled,
+              activeDjName: s.activeDjName,
+              djTickerText: s.djTickerText,
+              twitchChannel: s.twitchChannel,
+              isMaintenanceMode: s.isMaintenanceMode,
+              liveArenaStyle: s.liveArenaStyle,
+            }));
+          } else if (pkt.type === 'kicked') {
+            cleanupPeerSession();
+            setMpRole('solo');
+            setMpStatus('idle');
+            setMpNotice(
+              '🛑 Du wurdest vom Hallenleiter aus dem Multiplayer-Raum entfernt.'
+            );
+          } else if (pkt.type === 'room-closed') {
+            cleanupPeerSession();
+            setMpRole('solo');
+            setMpStatus('idle');
+            setMpNotice(
+              'ℹ️ Der Hallenleiter hat den Multiplayer-Raum geschlossen (Solo-Modus aktiv).'
+            );
+          }
+        });
+
+        conn.on('close', () => {
+          cleanupPeerSession();
+          setMpRole('solo');
+          setMpStatus('idle');
+        });
+
+        conn.on('error', () => {
+          setMpStatus('error');
+          setMpNotice(
+            `Raum „${roomIdToJoin}“ ist aktuell nicht erreichbar (Solo-Modus aktiv).`
+          );
+          setMpRole('solo');
+        });
+      });
+
+      peer.on('error', () => {
+        setMpStatus('error');
+        setMpNotice(
+          `Raum „${roomIdToJoin}“ konnte nicht erreicht werden (Solo-Modus aktiv).`
+        );
+        setMpRole('solo');
+      });
+    },
+    [cleanupPeerSession]
+  );
+
+  // Called ~18x per second (every 55ms) by RollerArenaEngine when in Multiplayer
+  const handleLocalMultiplayerState = useCallback(
+    (stateNoId: Omit<MultiplayerPlayerState, 'peerId'>) => {
+      const myPeerId = peerInstanceRef.current?.id || 'local';
+      const fullState: MultiplayerPlayerState = {
+        ...stateNoId,
+        peerId: myPeerId,
+      };
+      localSkaterSnapshotRef.current = fullState;
+
+      if (mpRole === 'host') {
+        const guests = Array.from(hostGuestsStateRef.current.values());
+        const allPlayers: MultiplayerPlayerState[] = [fullState, ...guests];
+        const worldPkt: MultiplayerPacket = {
+          type: 'world-players',
+          players: allPlayers,
+        };
+        hostConnectionsRef.current.forEach((conn) => {
+          if (conn.open) {
+            try {
+              conn.send(worldPkt);
+            } catch {
+              // ignore
+            }
+          }
+        });
+      } else if (mpRole === 'guest') {
+        const conn = guestConnRef.current;
+        if (conn && conn.open) {
+          const statePkt: MultiplayerPacket = {
+            type: 'player-state',
+            state: fullState,
+          };
+          try {
+            conn.send(statePkt);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    },
+    [mpRole]
+  );
+
+  const inviteRoomUrl = useMemo(() => {
+    if (typeof window === 'undefined' || !mpRoomId) return '';
+    const base = `${window.location.origin}${window.location.pathname}`;
+    return `${base}?room=${encodeURIComponent(mpRoomId)}`;
+  }, [mpRoomId]);
 
   const handleChallengeProgress = useCallback(
     (id: ChallengeId, amount: number, isAbsolute = false) => {
@@ -549,6 +1236,11 @@ export function App() {
     !isAdminUnlocked &&
     !hasUrlBackstageBypass;
 
+  const publishedStyle: ArenaVisualStyle =
+    adminSettings.liveArenaStyle || 'classic-neon';
+  const previewStyle = adminPreviewStyle;
+  const activeStyle: ArenaVisualStyle = previewStyle || publishedStyle;
+
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#070A12] text-[#FFF8E7] select-none flex flex-col">
       {/* TOP RETRO HUD BAR (Full Widescreen Width) */}
@@ -599,6 +1291,57 @@ export function App() {
           {telemetry.isSlipstreamActive && (
             <span className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-950/90 border border-cyan-400 text-cyan-200 font-mono font-bold text-[11px] shadow-[0_0_12px_rgba(34,211,238,0.5)]">
               💨 Windschatten aktiv!
+            </span>
+          )}
+
+          {/* Slow-Skating Announcement Badge in HUD */}
+          {lightingMode === 'slow-skating' && (
+            <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-gradient-to-r from-amber-950/95 via-rose-950/95 to-fuchsia-950/95 border border-amber-300 text-amber-200 font-mono font-bold text-[11px] shadow-[0_0_14px_rgba(251,191,36,0.45)] animate-pulse">
+              🪩 JETZT BEGINNT DAS SLOW-SKATING!
+            </span>
+          )}
+
+          {/* Active Singleplayer Difficulty & Skate Status Badge */}
+          <span
+            title="Aktuelle Erfahrungsstufe & Rollschuh-Status (fixiert durch Eintrittsstempel)"
+            className="px-2 py-0.5 rounded bg-slate-900/90 border border-slate-700 text-slate-200 font-mono text-[11px] flex items-center gap-1.5"
+          >
+            <span>
+              {difficulty === 'beginner'
+                ? '🟢 Anfänger'
+                : difficulty === 'pro'
+                ? '🔴 Profi'
+                : '🟡 Fortgeschr.'}
+            </span>
+            <span className="text-slate-600">•</span>
+            <span
+              className={
+                hasOwnSkates
+                  ? 'text-emerald-300 font-bold'
+                  : hasRentedSkates
+                  ? 'text-sky-300 font-bold'
+                  : 'text-amber-300 font-bold animate-pulse'
+              }
+            >
+              {hasOwnSkates
+                ? '🛼 Eigene Skates'
+                : hasRentedSkates
+                ? '🛼 Leih-Skates'
+                : '👟 Straßenschuhe (Verleih [E])'}
+            </span>
+          </span>
+
+          {/* Freigetränk-Chip Status */}
+          {drinkChipAvailable && (
+            <span
+              title={
+                hasOwnSkates
+                  ? 'Dein Freigetränk-Chip kann an der Bistro-Theke [E] für ein extra Getränk eingelöst werden!'
+                  : 'Tausche deinen Freigetränk-Chip am Rollschuh-Verleih [E] gegen 80er-Leih-Rollschuhe!'
+              }
+              className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/80 text-amber-200 font-mono font-bold text-[11px] shadow-[0_0_10px_rgba(251,191,36,0.28)]"
+            >
+              🪙 1x Freigetränk-Chip
             </span>
           )}
 
@@ -735,6 +1478,52 @@ export function App() {
             📊 Hallen-Statistik
           </button>
 
+          <button
+            type="button"
+            onClick={() => {
+              const nextMuted = !isMuted;
+              setIsMuted(nextMuted);
+              soundFX.setMuted(nextMuted);
+              if (
+                nextMuted &&
+                typeof window !== 'undefined' &&
+                'speechSynthesis' in window
+              ) {
+                window.speechSynthesis.cancel();
+              }
+            }}
+            title="Spiel-Sound & Sprachausgabe stummschalten / aktivieren"
+            className={`px-2 py-1 rounded border font-mono text-[11px] transition cursor-pointer ${
+              isMuted
+                ? 'bg-rose-950/90 border-rose-400/70 text-rose-200'
+                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-emerald-300'
+            }`}
+          >
+            {isMuted ? '🔇 Stumm' : '🔊 Ton'}
+          </button>
+
+          {/* Live Multiplayer Status Badge in Top HUD */}
+          {isMultiplayerActive && (
+            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-cyan-950/90 border border-cyan-400 text-cyan-200 font-mono font-bold text-[11px] shadow-[0_0_12px_rgba(34,211,238,0.4)]">
+              <span>
+                🌐 LIVE ({remotePlayers.length + 1} Skater)
+              </span>
+              {mpRole === 'guest' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    cleanupPeerSession();
+                    setMpRole('solo');
+                    setMpStatus('idle');
+                  }}
+                  className="ml-1 px-1.5 py-0.5 rounded bg-rose-950 hover:bg-rose-900 border border-rose-400/60 text-rose-200 text-[10px] cursor-pointer"
+                >
+                  Verlassen
+                </button>
+              )}
+            </span>
+          )}
+
           {isAdminUnlocked && (
             <button
               type="button"
@@ -749,24 +1538,86 @@ export function App() {
 
       {/* MAIN 16:9 WIDESCREEN ARENA CONTAINER */}
       <main className="relative flex-1 w-full h-full overflow-hidden flex items-center justify-center bg-[#070A12]">
+        {/* COMPACT TOP STATUS BAR FOR ACTIVE ADMIN PREVIEW */}
+        {previewStyle && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-1.5 rounded-full bg-amber-950/95 border-2 border-amber-400 text-amber-100 font-mono text-xs font-bold shadow-[0_0_24px_rgba(251,191,36,0.55)] backdrop-blur-md">
+            <span>
+              👁️ ADMIN-VORSCHAU:{' '}
+              <strong className="text-amber-300">
+                {previewStyle === 'palladium-1989'
+                  ? 'PALLADIUM 1989'
+                  : previewStyle === 'pixel-16bit'
+                  ? '16-BIT'
+                  : 'CLASSIC NEON'}
+              </strong>{' '}
+              <span className="text-amber-200/80 font-normal">
+                (PALLADIUM 1989 / 16-BIT)
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setAdminPreviewStyle(null)}
+              className="px-2.5 py-0.5 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono text-[11px] font-black transition cursor-pointer"
+            >
+              [Vorschau beenden]
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAdminTerminal(true)}
+              className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-amber-400/50 text-amber-200 font-mono text-[11px] transition cursor-pointer"
+            >
+              [🎛️ Regie]
+            </button>
+          </div>
+        )}
+
         <RollerArenaEngine
           playerName={playerName}
+          playerShirtColor={playerShirtColor}
           isAnonymousGuest={isAnonymousGuest}
           showNames={showNames}
           characterMode={characterMode}
           cameraMode={cameraMode}
           lightingMode={lightingMode}
-          centerStageMode={centerStageMode}
+          centerStageMode={
+            centerStageMode === 'cinema' &&
+            !isTwitchOnline &&
+            !isCinemaScheduleActive &&
+            activeStyle !== 'palladium-1989'
+              ? 'live-band'
+              : centerStageMode
+          }
           activeBandName={
             customBandInput.trim() ? customBandInput.trim() : activeBandName
           }
+          bandSkinTone={bandSkinTone}
+          bandGender={bandGender}
           hallGameMode={hallGameMode}
-          djTickerText={adminSettings.djTickerText}
+          djTickerText={
+            lightingMode === 'slow-skating'
+              ? `🪩 JETZT BEGINNT DAS SLOW-SKATING! +++ ${adminSettings.djTickerText}`
+              : adminSettings.djTickerText
+          }
           specialSkaters={specialSkaters}
           ghostSkatersEnabled={adminSettings.ghostSkatersEnabled}
           kengolHatEnabled={kengolHatEnabled}
           upgrades={upgrades}
+          fogMachineEnabled={adminSettings.fogMachineEnabled}
+          fogBurstCount={fogBurstCount}
+          difficulty={difficulty}
+          hasOwnSkates={hasOwnSkates}
+          hasRentedSkates={hasRentedSkates}
+          drinkChipAvailable={drinkChipAvailable}
+          npcVoicesEnabled={adminSettings.npcVoicesEnabled}
+          skateGuardWhistleEnabled={adminSettings.skateGuardWhistleEnabled}
+          concertLightingMode={adminSettings.concertLightingMode}
+          arenaStyle={activeStyle}
+          activeDjName={adminSettings.activeDjName || DEFAULT_DJ_NAME}
+          isMuted={isMuted}
           isCurtainOpen={isCurtainOpen && !isBlockedByMaintenance}
+          isMultiplayerActive={isMultiplayerActive}
+          remotePlayers={remotePlayers}
+          onLocalPlayerState={handleLocalMultiplayerState}
           onToggleCamera={handleToggleCamera}
           onToggleCharacterMode={handleToggleCharacterMode}
           onToggleShowNames={handleToggleShowNames}
@@ -775,15 +1626,18 @@ export function App() {
           onOpenProShopModal={() => setShowProShopModal(true)}
           onOpenChronicleModal={() => setShowChronicleModal(true)}
           onEnterHallFromGamepad={handleEnterHall}
-          onToggleTwitchStream={() => setShowTwitchWidget((prev) => !prev)}
+          onToggleTwitchStream={() => setCenterStageMode('cinema')}
+          onRedeemDrinkChipAtRental={handleRedeemDrinkChipAtRental}
+          onRedeemDrinkChipAtBistro={handleRedeemDrinkChipAtBistro}
           onChallengeProgress={handleChallengeProgress}
           onTelemetry={setTelemetry}
         />
 
-        {/* LIVE TWITCH VIDEO OVERLAY DIRECTLY ON THE CENTER PALLADIUM KINO-LEINWAND */}
+        {/* LIVE TWITCH VIDEO OVERLAY DIRECTLY ON THE CENTER PALLADIUM KINO-LEINWAND (Only when stream is live or Auto-Kino-Zeitplan is active!) */}
         {isCurtainOpen &&
           !isBlockedByMaintenance &&
           centerStageMode === 'cinema' &&
+          (isTwitchOnline || isCinemaScheduleActive) &&
           cameraMode === 'top-down' && (
             <div
               style={{
@@ -832,7 +1686,7 @@ export function App() {
           </div>
         )}
 
-        {/* CONTEXTUAL INTERACTION PROMPTS NEAR PRO-SHOP / BISTRO / DJ TOWER */}
+        {/* CONTEXTUAL INTERACTION PROMPTS NEAR PRO-SHOP / SKATE RENTAL / BISTRO / DJ TOWER */}
         {isCurtainOpen && telemetry.nearProShop && !showProShopModal && (
           <div className="absolute bottom-14 left-6 z-30 flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-950/95 border border-cyan-400 shadow-lg text-xs">
             <span className="text-cyan-300 font-bold">
@@ -852,135 +1706,126 @@ export function App() {
           </div>
         )}
 
-        {/* COMPACT TWITCH STREAM DOCK (STARTS COLLAPSED BY DEFAULT, OPENS ON CLICK ON DJ-PULT OR BAR) */}
-        {isCurtainOpen && !isBlockedByMaintenance && (
-          <div className="z-25 absolute top-2.5 right-3 w-72 bg-[#0B0E18]/92 border border-fuchsia-500/50 rounded-lg shadow-xl overflow-hidden transition-all duration-200">
-            {/* Clickable Header Bar */}
-            <div
-              onClick={() => setShowTwitchWidget((prev) => !prev)}
-              className="flex items-center justify-between px-2.5 py-1.5 bg-gradient-to-r from-fuchsia-950/90 to-slate-900 border-b border-fuchsia-500/30 text-[11px] cursor-pointer hover:from-fuchsia-900/90"
-            >
-              <div className="flex items-center gap-1.5 truncate">
-                <span className="inline-block w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-                <span className="font-mono font-bold text-fuchsia-200 truncate">
-                  DJ-TOWER: {adminSettings.twitchChannel}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span
-                  title="Räumlicher Sound-Pegel je nach Abstand zum DJ-Tower"
-                  className="font-mono text-[10px] text-cyan-300"
-                >
-                  🔊 {Math.round(telemetry.djAudioProximity * 100)}%
-                </span>
+        {isCurtainOpen &&
+          !telemetry.hasSkatesEquipped &&
+          characterMode !== 'wheelchair' && (
+            <div className="absolute bottom-14 right-6 z-30 flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-amber-950/95 border-2 border-amber-400 shadow-[0_0_25px_rgba(251,191,36,0.45)] text-xs">
+              <span className="text-amber-300 font-bold">
+                👟 Noch auf Straßenschuhen:
+              </span>
+              <span className="text-amber-100">
+                Gehe unten zum <strong>Rollschuh-Verleih</strong> und löse mit{' '}
+                <kbd className="px-1.5 py-0.5 bg-slate-900 rounded border border-amber-400/50">
+                  [E]
+                </kbd>{' '}
+                deinen <strong>Freigetränk-Chip</strong> gegen Leih-Rollschuhe ein!
+              </span>
+              {telemetry.nearSkateRental && drinkChipAvailable && (
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowTwitchWidget((prev) => !prev);
-                  }}
-                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                  onClick={handleRedeemDrinkChipAtRental}
+                  className="ml-1 px-2.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold cursor-pointer"
                 >
-                  {showTwitchWidget ? '–' : '+'}
+                  🛼 Jetzt Chip einlösen [E]
                 </button>
-              </div>
+              )}
+            </div>
+          )}
+
+        {/* COLLAPSIBLE BOTTOM CONTROL LEGEND & RETRO DEVELOPER CREDIT BAR (TOGGLE VIA BUTTON OR KEY [I]) */}
+        {isBottomBarCollapsed ? (
+          <button
+            type="button"
+            onClick={() => setIsBottomBarCollapsed(false)}
+            title="Steuerungs- & Info-Leiste wieder ausklappen [I]"
+            className="z-20 absolute bottom-2 right-3 px-2.5 py-1 rounded-md bg-[#080B12]/90 hover:bg-slate-900 border border-slate-700/80 hover:border-cyan-400/60 text-[11px] font-mono text-cyan-300 shadow-lg cursor-pointer transition"
+          >
+            ▲ Steuerung &amp; Info [I]
+          </button>
+        ) : (
+          <div className="z-20 absolute bottom-0 inset-x-0 px-3 py-1 bg-[#080B12]/90 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-300">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span>
+                <strong className="text-cyan-300">
+                  [WASD / Pfeile / Stick]
+                </strong>{' '}
+                Fahren
+              </span>
+              <span>•</span>
+              <span>
+                <strong className="text-fuchsia-300">
+                  [Space / Q / Pad-B]
+                </strong>{' '}
+                360°-Spin
+              </span>
+              <span>•</span>
+              <span>
+                <strong className="text-amber-300">
+                  [J / Shift / Pad-A]
+                </strong>{' '}
+                Sprung
+              </span>
+              <span>•</span>
+              <span>
+                <strong className="text-emerald-300">
+                  [E / F / Klick / Pad-X]
+                </strong>{' '}
+                Ball / Shop / Bistro
+              </span>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={handleToggleUnderglow}
+                className="hover:text-cyan-300 cursor-pointer"
+              >
+                <strong className="text-pink-400">[L]</strong> Unterboden-Neon:{' '}
+                {upgrades.underglowEnabled ? 'AN' : 'AUS'}
+              </button>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={handleToggleCamera}
+                className="hover:text-cyan-300 cursor-pointer"
+              >
+                <strong className="text-cyan-300">[C / Pad-Y]</strong> Kamera:{' '}
+                {cameraMode.toUpperCase()}
+              </button>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={handleToggleCharacterMode}
+                className="hover:text-cyan-300 cursor-pointer"
+              >
+                <strong className="text-amber-300">[V]</strong> Modus:{' '}
+                {characterMode === 'skater' ? 'Rollschuh' : 'Rollstuhl'}
+              </button>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={handleToggleKengolHat}
+                className="hover:text-cyan-300 cursor-pointer"
+              >
+                <strong className="text-fuchsia-300">[H]</strong> Kengol-Look:{' '}
+                {kengolHatEnabled ? 'AN' : 'AUS'}
+              </button>
             </div>
 
-            {/* Embedded Twitch Player (Only rendered when expanded and not already on Cinema screen) */}
-            {showTwitchWidget && centerStageMode !== 'cinema' && (
-              <>
-                <div className="h-40 w-full">
-                  <iframe
-                    title="DJ Magic Force Twitch Stream"
-                    src={`https://player.twitch.tv/?channel=${encodeURIComponent(
-                      adminSettings.twitchChannel
-                    )}&parent=${encodeURIComponent(twitchParentHost)}&muted=${
-                      twitchMuted ? 'true' : 'false'
-                    }`}
-                    className="w-full h-full border-0 bg-black"
-                    allowFullScreen
-                  />
-                </div>
-                <div className="flex items-center justify-between px-2.5 py-1 bg-slate-950 text-[10px] font-mono text-slate-400">
-                  <span>Klick auf DJ-Pult oder Leiste zum Einklappen</span>
-                  <button
-                    type="button"
-                    onClick={() => setTwitchMuted((m) => !m)}
-                    className="text-cyan-300 hover:underline cursor-pointer"
-                  >
-                    {twitchMuted ? 'Ton an' : 'Stumm'}
-                  </button>
-                </div>
-              </>
-            )}
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-slate-400 hidden lg:inline">
+                Retro-Tribut für alle Hanauer „Palladiumaner“ (1981 Rollerland •
+                1986 Palladium) • 100% lokal ohne Cookies
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsBottomBarCollapsed(true)}
+                title="Fußleiste einklappen [I]"
+                className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 text-[10px] cursor-pointer"
+              >
+                ▼ Einklappen [I]
+              </button>
+            </div>
           </div>
         )}
-
-        {/* BOTTOM CONTROL LEGEND & RETRO DEVELOPER CREDIT BAR */}
-        <div className="z-20 absolute bottom-0 inset-x-0 px-3 py-1 bg-[#080B12]/90 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-300">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span>
-              <strong className="text-cyan-300">[WASD / Pfeile / Stick]</strong>{' '}
-              Fahren
-            </span>
-            <span>•</span>
-            <span>
-              <strong className="text-fuchsia-300">[Space / Q / Pad-B]</strong>{' '}
-              360°-Spin
-            </span>
-            <span>•</span>
-            <span>
-              <strong className="text-amber-300">[J / Shift / Pad-A]</strong>{' '}
-              Sprung
-            </span>
-            <span>•</span>
-            <span>
-              <strong className="text-emerald-300">[E / F / Klick / Pad-X]</strong>{' '}
-              Ball / Shop / Bistro
-            </span>
-            <span>•</span>
-            <button
-              type="button"
-              onClick={handleToggleUnderglow}
-              className="hover:text-cyan-300 cursor-pointer"
-            >
-              <strong className="text-pink-400">[L]</strong> Unterboden-Neon:{' '}
-              {upgrades.underglowEnabled ? 'AN' : 'AUS'}
-            </button>
-            <span>•</span>
-            <button
-              type="button"
-              onClick={handleToggleCamera}
-              className="hover:text-cyan-300 cursor-pointer"
-            >
-              <strong className="text-cyan-300">[C / Pad-Y]</strong> Kamera:{' '}
-              {cameraMode.toUpperCase()}
-            </button>
-            <span>•</span>
-            <button
-              type="button"
-              onClick={handleToggleCharacterMode}
-              className="hover:text-cyan-300 cursor-pointer"
-            >
-              <strong className="text-amber-300">[V]</strong> Modus:{' '}
-              {characterMode === 'skater' ? 'Rollschuh' : 'Rollstuhl'}
-            </button>
-            <span>•</span>
-            <button
-              type="button"
-              onClick={handleToggleKengolHat}
-              className="hover:text-cyan-300 cursor-pointer"
-            >
-              <strong className="text-fuchsia-300">[H]</strong> Kengol-Look:{' '}
-              {kengolHatEnabled ? 'AN' : 'AUS'}
-            </button>
-          </div>
-
-          <div className="text-[10px] text-slate-400">
-            Retro-Tribut für alle Hanauer „Palladiumaner“ (1981 Rollerland •
-            1986 Palladium) • 100% lokal ohne Cookies
-          </div>
-        </div>
 
         {/* ===================================================================== */}
         {/* 1. FIRST-VISIT VELVET CURTAIN & HISTORICAL CHRONICLE OVERLAY          */}
@@ -1520,9 +2365,156 @@ export function App() {
                 </label>
               </div>
 
-              {/* Cashier Entry & Guest Mode Configuration + Retro Welcome Gift Ticket Badge */}
+              {/* Cashier Entry & Guest Mode Configuration + Singleplayer Experience Levels + Own Skates vs. Rental + Anti-Cheat Stamp */}
               <div className="p-4 rounded-xl bg-slate-950/90 border border-slate-700/80 flex flex-col gap-3.5">
-                <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+                {/* Anti-Cheat Entry Stamp Active Notice (when palladium_entry_pass is locked in localStorage) */}
+                {entryPass?.locked && (
+                  <div className="px-3.5 py-2 rounded-lg bg-amber-950/90 border border-amber-400/80 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-amber-200 shadow-[0_0_15px_rgba(251,191,36,0.25)]">
+                    <span className="font-bold">
+                      🎟️ Eintrittsstempel aktiv – Auswahl für diesen Besuch fixiert
+                    </span>
+                    <span className="text-[11px] text-amber-300/90">
+                      (Reset nur über das Hallenleiter-Regie-Terminal möglich)
+                    </span>
+                  </div>
+                )}
+
+                {/* Singleplayer Experience Levels (Anfänger, Fortgeschrittener, Profi) */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="font-mono text-xs text-fuchsia-300 uppercase font-bold">
+                      🏁 1. Singleplayer-Erfahrungsstufe &amp; Start-Bahn wählen:
+                    </label>
+                    <span className="font-mono text-[11px] text-slate-400">
+                      Bestimmt KI-Dichte, Grundtempo &amp; Startspur
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                    {(
+                      [
+                        {
+                          id: 'beginner' as SingleplayerDifficulty,
+                          title: '🟢 Anfänger',
+                          subtitle: 'Wenig Betrieb · Start auf der Innenbahn',
+                          desc: 'Reduzierte KI-Skater-Anzahl, ruhigeres Grundtempo und sicherer Start innen nahe der Mittelbühne.',
+                          activeClass:
+                            'bg-emerald-950/90 border-emerald-400 text-emerald-100 shadow-[0_0_16px_rgba(52,211,153,0.35)]',
+                        },
+                        {
+                          id: 'intermediate' as SingleplayerDifficulty,
+                          title: '🟡 Fortgeschrittener',
+                          subtitle: 'Normaler Disco-Abend · Mittelbahn',
+                          desc: 'Ausgewogene Hallenfülle, normales Disco-Tempo und klassischer Einstieg auf der mittleren Spur.',
+                          activeClass:
+                            'bg-amber-950/90 border-amber-400 text-amber-100 shadow-[0_0_16px_rgba(251,191,36,0.35)]',
+                        },
+                        {
+                          id: 'pro' as SingleplayerDifficulty,
+                          title: '🔴 Profi',
+                          subtitle:
+                            'Samstagabend Volles Haus · Außenbahn & hohes Tempo',
+                          desc: 'Volle Halle, schnelleres Grundtempo, aktive Speed-Skater-Kette außen und Start mitten im Geschehen.',
+                          activeClass:
+                            'bg-rose-950/90 border-rose-400 text-rose-100 shadow-[0_0_16px_rgba(244,63,94,0.35)]',
+                        },
+                      ] as const
+                    ).map((lvl) => {
+                      const isSelected = difficulty === lvl.id;
+                      const isLocked = Boolean(entryPass?.locked);
+                      return (
+                        <button
+                          key={lvl.id}
+                          type="button"
+                          disabled={isLocked}
+                          onClick={() => {
+                            if (isLocked) return;
+                            setDifficulty(lvl.id);
+                          }}
+                          className={`p-3 rounded-xl border text-left transition ${
+                            isSelected
+                              ? lvl.activeClass
+                              : 'bg-slate-900/90 border-slate-700/80 text-slate-300 hover:border-slate-500'
+                          } ${
+                            isLocked
+                              ? 'opacity-65 cursor-not-allowed'
+                              : 'cursor-pointer'
+                          }`}
+                        >
+                          <div className="font-display font-extrabold text-sm flex items-center justify-between">
+                            <span>{lvl.title}</span>
+                            {isSelected && (
+                              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-black/40 border border-white/30">
+                                AKTIV
+                              </span>
+                            )}
+                          </div>
+                          <div className="font-mono text-[11px] font-bold text-cyan-300 mt-0.5">
+                            {lvl.subtitle}
+                          </div>
+                          <p className="text-[11px] text-slate-300/90 mt-1 leading-snug">
+                            {lvl.desc}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Checkbox "🛼 Ich habe eigene Rollschuhe" vs. Rollschuh-Verleih über Freigetränk-Chip */}
+                <div className="p-3 rounded-xl bg-[#141024] border border-cyan-500/40 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+                  <label
+                    className={`flex items-start md:items-center gap-2.5 select-none ${
+                      entryPass?.locked
+                        ? 'opacity-65 cursor-not-allowed'
+                        : 'cursor-pointer'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={hasOwnSkates}
+                      disabled={Boolean(entryPass?.locked)}
+                      onChange={(e) => {
+                        if (entryPass?.locked) return;
+                        setHasOwnSkates(e.target.checked);
+                      }}
+                      className="accent-emerald-400 w-4 h-4 mt-0.5 md:mt-0 rounded cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <div>
+                      <span className="font-mono font-bold text-xs md:text-sm text-emerald-300">
+                        🛼 Ich habe eigene Rollschuhe
+                      </span>
+                      <p className="text-[11px] text-slate-300 mt-0.5">
+                        {hasOwnSkates ? (
+                          <>
+                            <strong>Aktiv:</strong> Du startest direkt auf eigenen
+                            Custom-Skates (+10% Antritt/Kurvenlage) und behältst
+                            deinen <strong>1× Freigetränk-Chip</strong> fürs Bistro!
+                          </>
+                        ) : (
+                          <>
+                            <strong>Keine eigenen Rollschuhe:</strong> Du betrittst
+                            die Halle auf Straßenschuhen und tauscht deinen{' '}
+                            <strong>Freigetränk-Chip am Rollschuh-Verleih [E]</strong>{' '}
+                            verbindlich gegen 80er-Leih-Rollschuhe ein.
+                          </>
+                        )}
+                      </p>
+                    </div>
+                  </label>
+                  <span
+                    className={`shrink-0 px-2.5 py-1 rounded font-mono text-[11px] font-bold border ${
+                      hasOwnSkates
+                        ? 'bg-emerald-950/90 border-emerald-400/70 text-emerald-200'
+                        : 'bg-amber-950/90 border-amber-400/70 text-amber-200'
+                    }`}
+                  >
+                    {hasOwnSkates
+                      ? '🪙 Chip bleibt fürs Bistro'
+                      : '🪙 Chip → Leih-Rollschuhe [E]'}
+                  </span>
+                </div>
+
+                <div className="flex flex-col md:flex-row items-center justify-between gap-4 pt-1 border-t border-slate-800">
                   <div className="flex-1 w-full">
                     <label className="block font-mono text-xs text-cyan-300 uppercase mb-1">
                       🎟️ Kasse &amp; Einstieg — Dein Skater-Name (Optional):
@@ -2192,16 +3184,17 @@ export function App() {
         {/* 8. PIN-PROTECTED ADMIN TERMINAL ("HALLENLEITER-REGIE")                */}
         {/* ===================================================================== */}
         {showAdminTerminal && isAdminUnlocked && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 overflow-y-auto backdrop-blur-sm">
-            <div className="w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-2xl bg-[#120D20] border-2 border-rose-500 shadow-[0_0_60px_rgba(244,63,94,0.4)] p-6 text-white">
-              <div className="flex items-center justify-between border-b border-rose-500/40 pb-3">
-                <div>
-                  <span className="font-mono text-xs text-rose-400 uppercase">
-                    PIN-geschütztes Admin-Terminal (Session aktiv)
-                  </span>
-                  <h2 className="font-display font-black text-2xl text-white">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-2 overflow-y-auto backdrop-blur-sm">
+            <div className="w-full max-w-[96vw] xl:max-w-[1720px] rounded-2xl bg-[#120D20] border-2 border-rose-500 shadow-[0_0_60px_rgba(244,63,94,0.4)] p-3 text-white space-y-2.5">
+              {/* Compact Header */}
+              <div className="flex items-center justify-between border-b border-rose-500/40 pb-2">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <h2 className="font-display font-black text-lg xl:text-xl text-white">
                     🎛️ HALLENLEITER-REGIE — PALLADIUM HANAU
                   </h2>
+                  <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-rose-950/90 border border-rose-500/40 text-rose-300 uppercase">
+                    PIN-geschütztes Admin-Terminal (3-Spalten-Regie)
+                  </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -2211,84 +3204,186 @@ export function App() {
                       saveAdminUnlockedSession(false);
                       setShowAdminTerminal(false);
                     }}
-                    className="px-3 py-1 rounded bg-rose-950 border border-rose-500/50 text-rose-200 font-mono text-xs cursor-pointer"
+                    className="px-2.5 py-1 rounded bg-rose-950 border border-rose-500/50 text-rose-200 font-mono text-xs cursor-pointer"
                   >
                     Abmelden
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowAdminTerminal(false)}
-                    className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
+                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
                   >
                     Schließen
                   </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 my-4">
-                {/* 1. Mittel-Arena & Live-Band-Booking */}
-                <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-700">
-                  <h3 className="font-mono font-bold text-xs uppercase text-amber-300 mb-2">
-                    1. Mittel-Arena &amp; Live-Band-Booking
-                  </h3>
-                  <div className="flex gap-2 mb-3">
-                    {(
-                      [
-                        { id: 'islands', label: '2 U-Inseln (Standard)' },
-                        { id: 'live-band', label: '🎸 Live-Band-Bühne' },
-                        { id: 'cinema', label: '🎬 Kino-Leinwand' },
-                      ] as { id: CenterStageMode; label: string }[]
-                    ).map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => setCenterStageMode(m.id)}
-                        className={`flex-1 py-1.5 px-2 rounded font-mono text-xs font-bold border cursor-pointer ${
-                          centerStageMode === m.id
-                            ? 'bg-amber-400 text-slate-950 border-white'
-                            : 'bg-slate-800 text-slate-200 border-slate-600'
-                        }`}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
+              {/* 3-COLUMN WIDESCREEN GRID */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-stretch">
+                {/* ============================================================= */}
+                {/* SPALTE 1: 1. MITTEL-ARENA & LIVE-BAND-BOOKING                 */}
+                {/* ============================================================= */}
+                <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
+                  <div className="space-y-2">
+                    <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
+                      1. MITTEL-ARENA &amp; LIVE-BAND-BOOKING
+                    </h3>
+                    <div className="flex gap-1.5">
+                      {(
+                        [
+                          { id: 'islands', label: '2 U-Inseln (Standard)' },
+                          { id: 'live-band', label: '🎸 Live-Band-Bühne' },
+                          { id: 'cinema', label: '🎬 Kino-Leinwand' },
+                        ] as { id: CenterStageMode; label: string }[]
+                      ).map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setCenterStageMode(m.id)}
+                          className={`flex-1 py-1 px-1.5 rounded font-mono text-[11px] font-bold border cursor-pointer ${
+                            centerStageMode === m.id
+                              ? 'bg-amber-400 text-slate-950 border-white'
+                              : 'bg-slate-800 text-slate-200 border-slate-600'
+                          }`}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div>
+                      <label className="block font-mono text-[10px] text-slate-300 mb-1">
+                        80s-Parodie-Band auf dem Bühnenbanner:
+                      </label>
+                      <div className="grid grid-cols-2 gap-1 mb-1.5">
+                        {PARODY_BANDS.map((band) => (
+                          <button
+                            key={band}
+                            type="button"
+                            onClick={() => {
+                              setActiveBandName(band);
+                              setCustomBandInput('');
+                              setCenterStageMode('live-band');
+                              if (band === 'LAMIO') {
+                                setBandSkinTone('black');
+                              }
+                            }}
+                            className={`py-1 px-2 rounded font-mono text-[11px] border truncate cursor-pointer ${
+                              activeBandName === band && !customBandInput
+                                ? 'bg-fuchsia-600 border-white text-white font-bold'
+                                : 'bg-slate-800 border-slate-700 text-slate-300'
+                            }`}
+                          >
+                            {band}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="text"
+                        value={customBandInput}
+                        onChange={(e) => setCustomBandInput(e.target.value)}
+                        placeholder="Oder eigener Bandname (Freitext)..."
+                        className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] font-mono text-white"
+                      />
+                    </div>
+
+                    {/* Band-Besetzung (Hautfarbe & Geschlecht) + Konzertbeleuchtung */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-fuchsia-500/35 space-y-1.5">
+                      <div>
+                        <span className="block font-mono text-[10px] uppercase text-fuchsia-300 font-bold mb-0.5">
+                          Band-Besetzung (Hautfarbe):
+                        </span>
+                        <div className="grid grid-cols-3 gap-1">
+                          {(
+                            [
+                              { id: 'black', label: 'Schwarz' },
+                              { id: 'white', label: 'Weiß' },
+                              { id: 'mixed', label: 'Gemischt' },
+                            ] as { id: BandSkinToneMode; label: string }[]
+                          ).map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setBandSkinTone(opt.id)}
+                              className={`py-0.5 px-1.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                                bandSkinTone === opt.id
+                                  ? 'bg-fuchsia-600 border-white text-white shadow-[0_0_8px_rgba(232,121,249,0.4)]'
+                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-500'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="block font-mono text-[10px] uppercase text-cyan-300 font-bold mb-0.5">
+                          Band-Besetzung (Geschlecht):
+                        </span>
+                        <div className="grid grid-cols-3 gap-1">
+                          {(
+                            [
+                              { id: 'male', label: 'Männlich' },
+                              { id: 'female', label: 'Weiblich' },
+                              { id: 'mixed', label: 'Gemischt' },
+                            ] as { id: BandGenderMode; label: string }[]
+                          ).map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setBandGender(opt.id)}
+                              className={`py-0.5 px-1.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                                bandGender === opt.id
+                                  ? 'bg-cyan-500 border-white text-slate-950 shadow-[0_0_8px_rgba(6,182,212,0.4)]'
+                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-500'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="pt-1 border-t border-slate-800/90">
+                        <span className="block font-mono text-[10px] uppercase text-amber-300 font-bold mb-0.5">
+                          🔦 KONZERTBELEUCHTUNG:
+                        </span>
+                        <div className="grid grid-cols-3 gap-1">
+                          {(
+                            [
+                              { id: 'auto', label: 'Automatik' },
+                              { id: 'on', label: 'Immer An' },
+                              { id: 'off', label: 'Aus' },
+                            ] as { id: ConcertLightingMode; label: string }[]
+                          ).map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() =>
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  concertLightingMode: opt.id,
+                                }))
+                              }
+                              className={`py-0.5 px-1.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                                adminSettings.concertLightingMode === opt.id
+                                  ? 'bg-amber-400 border-white text-slate-950 shadow-[0_0_8px_rgba(251,191,36,0.45)]'
+                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-500'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
                   </div>
 
-                  <label className="block font-mono text-[11px] text-slate-300 mb-1">
-                    80s-Parodie-Band auf dem Bühnenbanner:
-                  </label>
-                  <div className="grid grid-cols-2 gap-1.5 mb-2">
-                    {PARODY_BANDS.map((band) => (
-                      <button
-                        key={band}
-                        type="button"
-                        onClick={() => {
-                          setActiveBandName(band);
-                          setCustomBandInput('');
-                          setCenterStageMode('live-band');
-                        }}
-                        className={`py-1 px-2 rounded font-mono text-[11px] border truncate cursor-pointer ${
-                          activeBandName === band && !customBandInput
-                            ? 'bg-fuchsia-600 border-white text-white font-bold'
-                            : 'bg-slate-800 border-slate-700 text-slate-300'
-                        }`}
-                      >
-                        {band}
-                      </button>
-                    ))}
-                  </div>
-                  <input
-                    type="text"
-                    value={customBandInput}
-                    onChange={(e) => setCustomBandInput(e.target.value)}
-                    placeholder="Oder eigener Bandname (Freitext)..."
-                    className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-xs font-mono text-white mb-3"
-                  />
-
-                  {/* Kino-Zeitplan (Automatische Kino-Leinwand nach Wochentag & Uhrzeit) */}
-                  <div className="pt-2.5 border-t border-slate-800">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-mono text-[11px] font-bold text-cyan-300">
+                  {/* Auto-Kino-Zeitplan */}
+                  <div className="pt-2 border-t border-slate-800">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-[10px] font-bold text-cyan-300">
                         🎬 Auto-Kino-Zeitplan (Twitch auf Kino-Leinwand):
                       </span>
                       <button
@@ -2299,7 +3394,7 @@ export function App() {
                             cinemaScheduleEnabled: !s.cinemaScheduleEnabled,
                           }))
                         }
-                        className={`px-2.5 py-0.5 rounded font-mono text-[11px] font-bold cursor-pointer ${
+                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold cursor-pointer ${
                           adminSettings.cinemaScheduleEnabled
                             ? 'bg-cyan-400 text-slate-950'
                             : 'bg-slate-800 text-slate-300'
@@ -2308,9 +3403,9 @@ export function App() {
                         {adminSettings.cinemaScheduleEnabled ? 'AN' : 'AUS'}
                       </button>
                     </div>
-                    <div className="grid grid-cols-3 gap-1.5 text-xs font-mono">
+                    <div className="grid grid-cols-3 gap-1 text-[10px] font-mono">
                       <div>
-                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                        <label className="block text-[9px] text-slate-400">
                           Wochentag
                         </label>
                         <select
@@ -2321,7 +3416,7 @@ export function App() {
                               cinemaWeekday: e.target.value,
                             }))
                           }
-                          className="w-full px-1.5 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] text-white"
+                          className="w-full px-1 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-white"
                         >
                           {[
                             'Montag',
@@ -2340,7 +3435,7 @@ export function App() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                        <label className="block text-[9px] text-slate-400">
                           Von (Start)
                         </label>
                         <input
@@ -2352,11 +3447,11 @@ export function App() {
                               cinemaStartTime: e.target.value,
                             }))
                           }
-                          className="w-full px-1.5 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] text-white"
+                          className="w-full px-1 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-white"
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                        <label className="block text-[9px] text-slate-400">
                           Bis (Ende)
                         </label>
                         <input
@@ -2368,20 +3463,22 @@ export function App() {
                               cinemaEndTime: e.target.value,
                             }))
                           }
-                          className="w-full px-1.5 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] text-white"
+                          className="w-full px-1 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-white"
                         />
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* 2. Hallenlicht / Blacklight / Putzlicht / Slow Skating & 4. Wartungsmodus */}
-                <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-700 flex flex-col justify-between">
-                  <div>
-                    <h3 className="font-mono font-bold text-xs uppercase text-cyan-300 mb-2">
-                      2. Hallenlicht / Blacklight (UV) / Putzlicht / Slow Skating
+                {/* ============================================================= */}
+                {/* SPALTE 2: 2. HALLENLICHT / NEBEL / PFEIFE, 3. EVENT, 4. WARTUNG */}
+                {/* ============================================================= */}
+                <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
+                  <div className="space-y-2">
+                    <h3 className="font-mono font-bold text-xs uppercase text-cyan-300">
+                      2. HALLENLICHT / BLACKLIGHT / NEBEL / TRILLERPFEIFE
                     </h3>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mb-2.5">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
                       {(
                         [
                           { id: 'disco', label: '🪩 Disco-Spots' },
@@ -2394,7 +3491,7 @@ export function App() {
                           key={l.id}
                           type="button"
                           onClick={() => setLightingMode(l.id)}
-                          className={`py-2 px-1.5 rounded font-mono text-[11px] font-bold border cursor-pointer ${
+                          className={`py-1.5 px-1 rounded font-mono text-[10px] font-bold border cursor-pointer ${
                             lightingMode === l.id
                               ? 'bg-cyan-400 text-slate-950 border-white'
                               : 'bg-slate-800 text-slate-200 border-slate-600'
@@ -2406,9 +3503,9 @@ export function App() {
                     </div>
 
                     {/* 15-Minuten Blacklight Timer Steuerung */}
-                    <div className="p-2.5 rounded-lg bg-slate-950/90 border border-fuchsia-500/40 mb-3">
-                      <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <span className="font-mono text-[11px] text-fuchsia-200">
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-fuchsia-500/40 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[10px] text-fuchsia-200">
                           Auto-Blacklight-Timer (15 Min.):
                         </span>
                         <button
@@ -2419,7 +3516,7 @@ export function App() {
                               autoBlacklightEnabled: !s.autoBlacklightEnabled,
                             }))
                           }
-                          className={`px-2.5 py-0.5 rounded font-mono text-[11px] font-bold cursor-pointer ${
+                          className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold cursor-pointer ${
                             adminSettings.autoBlacklightEnabled
                               ? 'bg-fuchsia-500 text-white'
                               : 'bg-slate-800 text-slate-300'
@@ -2428,16 +3525,16 @@ export function App() {
                           {adminSettings.autoBlacklightEnabled ? 'AN' : 'AUS'}
                         </button>
                       </div>
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center justify-between gap-1.5">
                         <button
                           type="button"
                           onClick={handleStart15MinBlacklight}
-                          className="flex-1 py-1 px-2 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white font-mono text-[11px] font-bold cursor-pointer"
+                          className="flex-1 py-1 px-2 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white font-mono text-[10px] font-bold cursor-pointer"
                         >
                           🟣 15 Min. Blacklight starten
                         </button>
                         {blacklightTimerSec > 0 && (
-                          <span className="px-2 py-1 rounded bg-fuchsia-950 border border-fuchsia-400 font-mono text-[11px] text-fuchsia-200 font-bold">
+                          <span className="px-2 py-0.5 rounded bg-fuchsia-950 border border-fuchsia-400 font-mono text-[10px] text-fuchsia-200 font-bold">
                             ⏱️ {Math.floor(blacklightTimerSec / 60)}:
                             {String(blacklightTimerSec % 60).padStart(2, '0')}
                           </span>
@@ -2445,38 +3542,122 @@ export function App() {
                       </div>
                     </div>
 
-                    <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300 mb-1.5">
-                      3. Hallen-Spiel / Event direkt starten (Ballspiel = Putzlicht)
-                    </h3>
-                    <div className="grid grid-cols-4 gap-1.5 mb-3">
-                      {(
-                        [
-                          { id: 'free-skate', label: 'Frei' },
-                          { id: 'ballspiel', label: 'Ballspiel' },
-                          { id: 'slalom', label: 'Slalom' },
-                          { id: 'stuhlsprung', label: 'Stuhlsprung' },
-                        ] as { id: HallGameMode; label: string }[]
-                      ).map((g) => (
+                    {/* 80er-Bühnen-Nebelmaschine, NPC-Stimmen & Trillerpfeife */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-cyan-500/40 space-y-1.5">
+                      <div className="flex items-center justify-between gap-1.5">
                         <button
-                          key={g.id}
                           type="button"
-                          onClick={() => setHallGameMode(g.id)}
-                          className={`py-1.5 rounded font-mono text-[11px] font-bold border cursor-pointer ${
-                            hallGameMode === g.id
-                              ? 'bg-fuchsia-500 text-white border-white'
-                              : 'bg-slate-800 text-slate-300 border-slate-700'
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              fogMachineEnabled: !s.fogMachineEnabled,
+                            }))
+                          }
+                          className={`flex-1 py-1 px-2 rounded font-mono text-[11px] font-bold border transition cursor-pointer ${
+                            adminSettings.fogMachineEnabled
+                              ? 'bg-cyan-500 text-slate-950 border-white shadow-[0_0_12px_rgba(6,182,212,0.4)]'
+                              : 'bg-slate-800 text-slate-300 border-slate-600'
                           }`}
                         >
-                          {g.label}
+                          🌫️ Nebelmaschine:{' '}
+                          {adminSettings.fogMachineEnabled ? 'AN' : 'AUS'}
                         </button>
-                      ))}
+                        <button
+                          type="button"
+                          onClick={() => setFogBurstCount((c) => c + 1)}
+                          className="py-1 px-2.5 rounded bg-indigo-700 hover:bg-indigo-600 border border-indigo-400/60 text-white font-mono text-[11px] font-bold transition cursor-pointer"
+                        >
+                          💨 Nebelstoß
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                        {/* Hörbare NPC-Stimmen (Sprechblasen) Toggle */}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const nextVoices = !s.npcVoicesEnabled;
+                              if (
+                                !nextVoices &&
+                                typeof window !== 'undefined' &&
+                                'speechSynthesis' in window
+                              ) {
+                                window.speechSynthesis.cancel();
+                              }
+                              return {
+                                ...s,
+                                npcVoicesEnabled: nextVoices,
+                              };
+                            })
+                          }
+                          className={`py-1 px-2 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                            adminSettings.npcVoicesEnabled
+                              ? 'bg-emerald-500 text-slate-950 border-white shadow-[0_0_10px_rgba(16,185,129,0.4)]'
+                              : 'bg-slate-800 text-slate-300 border-slate-600'
+                          }`}
+                        >
+                          🗣️ NPC-Stimmen (Sprechblasen):{' '}
+                          {adminSettings.npcVoicesEnabled ? 'AN' : 'AUS'}
+                        </button>
+
+                        {/* 📯 Skate-Guard-Trillerpfeife Toggle */}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              skateGuardWhistleEnabled:
+                                !s.skateGuardWhistleEnabled,
+                            }))
+                          }
+                          className={`py-1 px-2 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                            adminSettings.skateGuardWhistleEnabled
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_10px_rgba(251,191,36,0.4)]'
+                              : 'bg-slate-800 text-slate-300 border-slate-600'
+                          }`}
+                        >
+                          📯 Skate-Guard-Trillerpfeife:{' '}
+                          {adminSettings.skateGuardWhistleEnabled ? 'AN' : 'AUS'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 3. HALLEN-SPIEL / EVENT */}
+                    <div className="pt-1 border-t border-slate-800">
+                      <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300 mb-1">
+                        3. HALLEN-SPIEL / EVENT (Ballspiel = Putzlicht)
+                      </h3>
+                      <div className="grid grid-cols-4 gap-1">
+                        {(
+                          [
+                            { id: 'free-skate', label: 'Frei' },
+                            { id: 'ballspiel', label: 'Ballspiel' },
+                            { id: 'slalom', label: 'Slalom' },
+                            { id: 'stuhlsprung', label: 'Stuhlsprung' },
+                          ] as { id: HallGameMode; label: string }[]
+                        ).map((g) => (
+                          <button
+                            key={g.id}
+                            type="button"
+                            onClick={() => setHallGameMode(g.id)}
+                            className={`py-1 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                              hallGameMode === g.id
+                                ? 'bg-fuchsia-500 text-white border-white'
+                                : 'bg-slate-800 text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            {g.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
 
-                  {/* 4. Wartungsmodus */}
+                  {/* 4. WARTUNGSMODUS */}
                   <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-                    <span className="font-mono text-xs text-amber-200">
-                      4. Wartungsmodus („Hier wird gebohnert“):
+                    <span className="font-mono text-xs font-bold text-amber-200">
+                      4. WARTUNGSMODUS („Hier wird gebohnert“):
                     </span>
                     <button
                       type="button"
@@ -2497,183 +3678,685 @@ export function App() {
                   </div>
                 </div>
 
-                {/* 5. Twitch-Stream Kanal & DJ-LED-Laufschrift */}
-                <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-700">
-                  <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300 mb-2">
-                    5. Twitch-Stream Kanal &amp; DJ-LED-Laufschrift
-                  </h3>
-                  <label className="block font-mono text-[11px] text-slate-300 mb-1">
-                    Twitch-Channel (Standard: Dj_Magic_Force):
-                  </label>
-                  <div className="flex gap-2 mb-3">
-                    <input
-                      type="text"
-                      value={adminSettings.twitchChannel}
-                      onChange={(e) =>
-                        setAdminSettings((s) => ({
-                          ...s,
-                          twitchChannel: e.target.value,
-                        }))
-                      }
-                      className="flex-1 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-xs font-mono text-white"
-                    />
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setAdminSettings((s) => ({
-                          ...s,
-                          twitchChannel: DEFAULT_TWITCH_CHANNEL,
-                        }))
-                      }
-                      className="px-2.5 py-1 rounded bg-slate-800 text-xs font-mono text-slate-300 cursor-pointer"
-                    >
-                      Standard
-                    </button>
-                  </div>
-
-                  <label className="block font-mono text-[11px] text-slate-300 mb-1">
-                    80er-LED-Matrix-Lauftext über dem DJ-Tower:
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={adminSettings.djTickerText}
-                    onChange={(e) =>
-                      setAdminSettings((s) => ({
-                        ...s,
-                        djTickerText: e.target.value,
-                      }))
-                    }
-                    className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-xs font-mono text-amber-300"
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setAdminSettings((s) => ({
-                        ...s,
-                        djTickerText: DEFAULT_DJ_TICKER,
-                      }))
-                    }
-                    className="mt-1 text-[11px] font-mono text-cyan-300 hover:underline cursor-pointer"
-                  >
-                    Original DJ Magic Force Lauftext wiederherstellen
-                  </button>
-                </div>
-
-                {/* 6. Geister-Skater Manager (SPECIAL_SKATERS) */}
-                <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-700">
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-mono font-bold text-xs uppercase text-cyan-300">
-                      6. Geister-Skater Manager (SPECIAL_SKATERS)
+                {/* ============================================================= */}
+                {/* SPALTE 3: 5. TWITCH-STREAM & DJ-PRESETS + 6. GEISTER-SKATER   */}
+                {/* ============================================================= */}
+                <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
+                  {/* 5. TWITCH-STREAM & DJ-PRESETS */}
+                  <div className="space-y-1.5">
+                    <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
+                      5. TWITCH-STREAM &amp; DJ-PRESETS
                     </h3>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setAdminSettings((s) => ({
-                          ...s,
-                          ghostSkatersEnabled: !s.ghostSkatersEnabled,
-                        }))
-                      }
-                      className={`px-2.5 py-0.5 rounded font-mono text-[11px] font-bold cursor-pointer ${
-                        adminSettings.ghostSkatersEnabled
-                          ? 'bg-cyan-400 text-slate-950'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      Geister-Skater: {adminSettings.ghostSkatersEnabled ? 'AN' : 'AUS'}
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mb-2">
-                    Halbtransparente 80er-Hologramm-Skater mit dezenter
-                    Doppel-Rollenspur (selektives No-Clip innerhalb der Bahn):
-                  </p>
-                  <div className="flex flex-wrap gap-1.5 mb-3">
-                    {specialSkaters.map((name) => (
-                      <span
-                        key={name}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-cyan-950/80 border border-cyan-400/50 font-mono text-xs text-cyan-200"
-                      >
-                        👻 {name}
+
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-fuchsia-500/35 space-y-1.5">
+                      <span className="block font-mono text-[10px] uppercase text-fuchsia-300 font-bold">
+                        Gespeicherte DJ-Presets (Twitch, Lauftext &amp; DJ-Pult):
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {guestDjPresets.map((dj) => {
+                          const isSelected =
+                            adminSettings.activeDjName === dj.name &&
+                            adminSettings.twitchChannel === dj.twitchChannel;
+                          return (
+                            <div
+                              key={dj.id}
+                              className={`inline-flex items-center rounded border text-[10px] font-mono transition ${
+                                isSelected
+                                  ? 'bg-fuchsia-600 border-white text-white font-bold shadow-[0_0_8px_rgba(232,121,249,0.4)]'
+                                  : 'bg-slate-800 border-slate-700 text-slate-200 hover:border-fuchsia-400/60'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    activeDjName: dj.name,
+                                    twitchChannel: dj.twitchChannel,
+                                    djTickerText: dj.tickerText,
+                                  }))
+                                }
+                                className="px-2 py-0.5 cursor-pointer"
+                              >
+                                🎧 {dj.name}
+                                {dj.isResident ? ' (Res.)' : ''}
+                              </button>
+                              {!dj.isResident && (
+                                <button
+                                  type="button"
+                                  title="Gast-DJ Preset löschen"
+                                  onClick={() => {
+                                    const next = guestDjPresets.filter(
+                                      (item) => item.id !== dj.id
+                                    );
+                                    setGuestDjPresets(next);
+                                    saveGuestDjPresets(next);
+                                    if (adminSettings.activeDjName === dj.name) {
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        activeDjName: DEFAULT_DJ_NAME,
+                                        twitchChannel: DEFAULT_TWITCH_CHANNEL,
+                                        djTickerText: DEFAULT_DJ_TICKER,
+                                      }));
+                                    }
+                                  }}
+                                  className="px-1.5 py-0.5 text-rose-300 hover:text-white border-l border-slate-700 cursor-pointer"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Kompaktes Formular "+ Gast-DJ hinzufügen" */}
+                      <div className="pt-1 border-t border-slate-800/90 space-y-1">
+                        <div className="grid grid-cols-2 gap-1">
+                          <input
+                            type="text"
+                            value={newGuestDjName}
+                            onChange={(e) => setNewGuestDjName(e.target.value)}
+                            placeholder="DJ-Name (z.B. DJ Sven)"
+                            className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-white"
+                          />
+                          <input
+                            type="text"
+                            value={newGuestDjChannel}
+                            onChange={(e) =>
+                              setNewGuestDjChannel(e.target.value)
+                            }
+                            placeholder="Twitch-Kanal (z.B. dj_sven)"
+                            className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-white"
+                          />
+                        </div>
+                        <div className="flex gap-1">
+                          <input
+                            type="text"
+                            value={newGuestDjTicker}
+                            onChange={(e) =>
+                              setNewGuestDjTicker(e.target.value)
+                            }
+                            placeholder="Optionaler eigener LED-Lauftext..."
+                            className="flex-1 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-amber-200"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nameClean = newGuestDjName.trim();
+                              const chanClean = newGuestDjChannel.trim();
+                              if (!nameClean || !chanClean) return;
+                              const tickerClean = newGuestDjTicker.trim()
+                                ? newGuestDjTicker.trim()
+                                : `+++ ON AIR: ${nameClean.toUpperCase()} +++ KLECKNIX TWIN-DECKS +++ LIVE IM PALLADIUM HANAU +++`;
+                              const newPreset: GuestDjPreset = {
+                                id: `guest_dj_${Date.now()}`,
+                                name: nameClean,
+                                twitchChannel: chanClean,
+                                tickerText: tickerClean,
+                                isResident: false,
+                              };
+                              const nextList = [...guestDjPresets, newPreset];
+                              setGuestDjPresets(nextList);
+                              saveGuestDjPresets(nextList);
+                              setAdminSettings((s) => ({
+                                ...s,
+                                activeDjName: newPreset.name,
+                                twitchChannel: newPreset.twitchChannel,
+                                djTickerText: newPreset.tickerText,
+                              }));
+                              setNewGuestDjName('');
+                              setNewGuestDjChannel('');
+                              setNewGuestDjTicker('');
+                            }}
+                            className="px-2 py-0.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap"
+                          >
+                            + Gast-DJ
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1">
+                      <input
+                        type="text"
+                        value={adminSettings.activeDjName || DEFAULT_DJ_NAME}
+                        onChange={(e) =>
+                          setAdminSettings((s) => ({
+                            ...s,
+                            activeDjName: e.target.value,
+                          }))
+                        }
+                        placeholder="DJ-Name am Pult..."
+                        className="px-2 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] font-mono text-cyan-300"
+                      />
+                      <div className="flex gap-1">
+                        <input
+                          type="text"
+                          value={adminSettings.twitchChannel}
+                          onChange={(e) =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              twitchChannel: e.target.value,
+                            }))
+                          }
+                          className="flex-1 px-2 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] font-mono text-white"
+                        />
                         <button
                           type="button"
-                          onClick={() => {
-                            const next = specialSkaters.filter(
-                              (n) => n !== name
-                            );
-                            setSpecialSkaters(next);
-                            saveSpecialSkaters(next);
-                          }}
-                          className="text-rose-400 hover:text-rose-300 font-bold cursor-pointer"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              activeDjName: DEFAULT_DJ_NAME,
+                              twitchChannel: DEFAULT_TWITCH_CHANNEL,
+                              djTickerText: DEFAULT_DJ_TICKER,
+                            }))
+                          }
+                          className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-mono text-slate-300 cursor-pointer"
                         >
-                          ×
+                          Resident
                         </button>
-                      </span>
-                    ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="font-mono text-[10px] text-slate-300">
+                          80er-LED-Matrix-Lauftext über dem DJ-Tower:
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              djTickerText: DEFAULT_DJ_TICKER,
+                            }))
+                          }
+                          className="text-[10px] font-mono text-cyan-300 hover:underline cursor-pointer"
+                        >
+                          Reset Lauftext
+                        </button>
+                      </div>
+                      <input
+                        type="text"
+                        value={adminSettings.djTickerText}
+                        onChange={(e) =>
+                          setAdminSettings((s) => ({
+                            ...s,
+                            djTickerText: e.target.value,
+                          }))
+                        }
+                        className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] font-mono text-amber-300"
+                      />
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={newGhostName}
-                      onChange={(e) => setNewGhostName(e.target.value)}
-                      placeholder="Neuer Geister-Skater Name..."
-                      className="flex-1 px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-xs font-mono text-white"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!newGhostName.trim()) return;
-                        const next = [...specialSkaters, newGhostName.trim()];
-                        setSpecialSkaters(next);
-                        saveSpecialSkaters(next);
-                        setNewGhostName('');
-                      }}
-                      className="px-3 py-1.5 rounded bg-cyan-500 text-slate-950 font-mono font-bold text-xs cursor-pointer"
-                    >
-                      + Hinzufügen
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSpecialSkaters([...DEFAULT_SPECIAL_SKATERS]);
-                        saveSpecialSkaters([...DEFAULT_SPECIAL_SKATERS]);
-                      }}
-                      className="px-2.5 py-1.5 rounded bg-slate-800 text-slate-300 font-mono text-xs cursor-pointer"
-                    >
-                      Reset
-                    </button>
+
+                  {/* 6. GEISTER-SKATER MANAGER & 🌐 MULTIPLAYER-SPASSRAUM */}
+                  <div className="pt-1.5 border-t border-slate-800 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-mono font-bold text-[11px] uppercase text-cyan-300">
+                        6. GEISTER-SKATER MANAGER
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAdminSettings((s) => ({
+                            ...s,
+                            ghostSkatersEnabled: !s.ghostSkatersEnabled,
+                          }))
+                        }
+                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold cursor-pointer ${
+                          adminSettings.ghostSkatersEnabled
+                            ? 'bg-cyan-400 text-slate-950'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        Geister-Skater:{' '}
+                        {adminSettings.ghostSkatersEnabled ? 'AN' : 'AUS'}
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {specialSkaters.map((name) => (
+                        <span
+                          key={name}
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-400/50 font-mono text-[10px] text-cyan-200"
+                        >
+                          👻 {name}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = specialSkaters.filter(
+                                (n) => n !== name
+                              );
+                              setSpecialSkaters(next);
+                              saveSpecialSkaters(next);
+                            }}
+                            className="text-rose-400 hover:text-rose-300 font-bold cursor-pointer"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        value={newGhostName}
+                        onChange={(e) => setNewGhostName(e.target.value)}
+                        placeholder="Neuer Geister-Skater..."
+                        className="flex-1 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] font-mono text-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!newGhostName.trim()) return;
+                          const next = [...specialSkaters, newGhostName.trim()];
+                          setSpecialSkaters(next);
+                          saveSpecialSkaters(next);
+                          setNewGhostName('');
+                        }}
+                        className="px-2 py-0.5 rounded bg-cyan-500 text-slate-950 font-mono font-bold text-[10px] cursor-pointer"
+                      >
+                        +
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSpecialSkaters([...DEFAULT_SPECIAL_SKATERS]);
+                          saveSpecialSkaters([...DEFAULT_SPECIAL_SKATERS]);
+                        }}
+                        className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[10px] cursor-pointer"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 🌐 MULTIPLAYER-SPASSRAUM (LIVE-SESSION PER PEERJS) */}
+                  <div className="p-2 rounded-lg bg-slate-950/95 border border-emerald-400/50 space-y-1.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <h3 className="font-mono font-bold text-[11px] uppercase text-emerald-300">
+                        🌐 MULTIPLAYER-SPASSRAUM (LIVE-SESSION)
+                      </h3>
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-400/50 font-mono text-[10px] font-bold text-emerald-200">
+                        {mpRole === 'host'
+                          ? `${remotePlayers.length + 1} Skater live in der Halle`
+                          : 'Solo-Modus (KI aktiv)'}
+                      </span>
+                    </div>
+
+                    {mpRole !== 'host' ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1">
+                          {MULTIPLAYER_OUTFIT_COLORS.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              title={`Outfit-Farbe: ${c.label}`}
+                              onClick={() => setPlayerShirtColor(c.hex)}
+                              style={{ backgroundColor: c.hex }}
+                              className={`w-4 h-4 rounded-full border cursor-pointer ${
+                                playerShirtColor === c.hex
+                                  ? 'border-2 border-white scale-110'
+                                  : 'border-slate-700 opacity-75'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenHostRoom('palladium-hanau-89')}
+                          className="flex-1 py-1 px-2.5 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-[11px] cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.4)]"
+                        >
+                          🚀 Multiplayer-Raum öffnen
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            readOnly
+                            value={inviteRoomUrl}
+                            className="flex-1 px-2 py-0.5 rounded bg-slate-900 border border-emerald-500/40 font-mono text-[10px] text-emerald-200"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (
+                                typeof navigator !== 'undefined' &&
+                                navigator.clipboard
+                              ) {
+                                navigator.clipboard.writeText(inviteRoomUrl);
+                                setInviteCopied(true);
+                                window.setTimeout(
+                                  () => setInviteCopied(false),
+                                  2500
+                                );
+                              }
+                            }}
+                            className="px-2 py-0.5 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap"
+                          >
+                            {inviteCopied
+                              ? '✅ Link kopiert!'
+                              : '📋 Einladungs-Link kopieren'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCloseHostRoom}
+                            className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap"
+                          >
+                            🛑 Raum schließen
+                          </button>
+                        </div>
+
+                        {/* Live Visitor List + Kick Button */}
+                        <div className="flex flex-wrap items-center gap-1 max-h-12 overflow-y-auto">
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-400/50 font-mono text-[10px] text-emerald-200">
+                            ★ {playerName || 'Host'} (Host)
+                          </span>
+                          {remotePlayers.map((rp) => (
+                            <span
+                              key={rp.peerId}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900 border border-cyan-400/50 font-mono text-[10px] text-cyan-100"
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full inline-block"
+                                style={{
+                                  backgroundColor: rp.shirtColor || '#00f0ff',
+                                }}
+                              />
+                              {rp.name}
+                              <button
+                                type="button"
+                                title="Besucher aus dem Raum werfen (Kick)"
+                                onClick={() => handleKickGuest(rp.peerId)}
+                                className="ml-0.5 px-1 rounded bg-rose-900 hover:bg-rose-700 text-rose-200 text-[9px] font-bold cursor-pointer"
+                              >
+                                Kick
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {mpNotice && (
+                      <div className="text-[9px] font-mono text-cyan-300 truncate">
+                        {mpNotice}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* 7. Besucher-Statistik Reset & 8. Intro-Reset */}
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-3">
-                <div className="text-xs font-mono text-slate-300">
-                  <strong>7. Statistik:</strong> Heute {visitsToday} • Gesamt{' '}
-                  {hallStats.totalSessions} • Peak {peakHourText}
+              {/* =============================================================== */}
+              {/* VOLLE BREITE DARUNTER: 🎨 BAHN-STYLES & EPOCHEN-LOOKS           */}
+              {/* =============================================================== */}
+              <div className="p-3 rounded-xl bg-slate-900/95 border-2 border-fuchsia-500/50 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
+                      🎨 BAHN-STYLES &amp; EPOCHEN-LOOKS (VORSCHAU &amp; FREISCHALTUNG)
+                    </h3>
+                    <span className="text-[11px] text-slate-400">
+                      Look auswählen – zuerst nur für dich testen oder dauerhaft
+                      für alle Besucher freischalten:
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] font-mono">
+                    <span className="px-2 py-0.5 rounded bg-slate-950 border border-emerald-400/50 text-emerald-300">
+                      Live für alle:{' '}
+                      <strong>
+                        {publishedStyle === 'palladium-1989'
+                          ? '📼 Palladium 1989'
+                          : publishedStyle === 'pixel-16bit'
+                          ? '👾 16-Bit Pixel-Art'
+                          : '🕹️ Classic Neon'}
+                      </strong>
+                    </span>
+                    {previewStyle && (
+                      <span className="px-2 py-0.5 rounded bg-amber-950 border border-amber-400 text-amber-200">
+                        👁️ Vorschau aktiv:{' '}
+                        <strong>
+                          {previewStyle === 'palladium-1989'
+                            ? 'Palladium 1989'
+                            : previewStyle === 'pixel-16bit'
+                            ? '16-Bit Pixel-Art'
+                            : 'Classic Neon'}
+                        </strong>
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setHallStats(resetHallStats())}
-                    className="px-3 py-1.5 rounded bg-rose-950 hover:bg-rose-900 border border-rose-500/50 text-rose-200 font-mono text-xs cursor-pointer"
-                  >
-                    📊 Besucher-Statistik zurücksetzen
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      saveHasEnteredBefore(false);
-                      saveHideChronik(false);
-                      setHideChronik(false);
-                      setHasEnteredBefore(false);
-                      setIsCurtainOpen(false);
-                      setShowChronicleModal(true);
-                      setShowAdminTerminal(false);
-                    }}
-                    className="px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-xs cursor-pointer"
-                  >
-                    🎭 8. First-Visit-Vorhang für Test zurücksetzen
-                  </button>
+
+                {/* 3 Wählbare Style-Kacheln */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                  {(
+                    [
+                      {
+                        id: 'classic-neon' as ArenaVisualStyle,
+                        title: '🕹️ Classic Neon (Bisheriger Look)',
+                        desc: 'Vertrauter 80er-Neon-Look mit klarem Farbschema, leuchtender Rückwand und geschmeidigen 2.5D-Figuren (Standard).',
+                      },
+                      {
+                        id: 'palladium-1989' as ArenaVisualStyle,
+                        title: '📼 Palladium 1989 (Original-Halle)',
+                        desc: 'Fensterlose dunkle Wände mit 80er-Neon/Chrom-Ornamenten, violette Blacklight-Deckenröhren, goldene Discokugel-Lichtpunkte & 1989-Mittelsäulen-Leinwand mit 80er-Projektor.',
+                      },
+                      {
+                        id: 'pixel-16bit' as ArenaVisualStyle,
+                        title: '👾 16-Bit Pixel-Art (Arcade-Look)',
+                        desc: 'Zeichnet Skater, NPCs und Hallenelemente im echten 16-Bit-Retro-Pixel-Stil (imageSmoothingEnabled = false, dunkle 1px-Outlines, Retro-Farbpalette).',
+                      },
+                    ]
+                  ).map((tile) => {
+                    const isSelected = selectedStyleTile === tile.id;
+                    const isLive = publishedStyle === tile.id;
+                    return (
+                      <button
+                        key={tile.id}
+                        type="button"
+                        onClick={() => setSelectedStyleTile(tile.id)}
+                        className={`p-2.5 rounded-lg border text-left transition cursor-pointer flex flex-col justify-between ${
+                          isSelected
+                            ? 'bg-fuchsia-950/90 border-2 border-fuchsia-400 shadow-[0_0_16px_rgba(232,121,249,0.35)]'
+                            : 'bg-slate-950/90 hover:bg-slate-900 border-slate-700'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center justify-between gap-1 mb-0.5">
+                            <span className="font-mono font-bold text-xs text-white">
+                              {tile.title}
+                            </span>
+                            {isLive && (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/60 text-emerald-300 font-mono text-[9px] font-bold">
+                                LIVE
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-300 leading-snug">
+                            {tile.desc}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
+
+                {/* Aktions-Buttons + 7. Statistik & Einlass / 8. Intro-Reset kompakt in einer Zeile */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-800">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAdminPreviewStyle(selectedStyleTile);
+                        setStyleFeedbackToast(
+                          `👁️ Admin-Vorschau aktiv: „${selectedStyleTile}“ ist jetzt live für deine Sitzung sichtbar!`
+                        );
+                        setShowAdminTerminal(false);
+                      }}
+                      className="px-3 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold text-xs cursor-pointer transition shadow-[0_0_12px_rgba(251,191,36,0.35)]"
+                    >
+                      👁️ Nur für mich testen (Admin-Vorschau)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAdminPreviewStyle(null);
+                        setAdminSettings((s) => ({
+                          ...s,
+                          liveArenaStyle: selectedStyleTile,
+                        }));
+                        setStyleFeedbackToast(
+                          `🚀 Style „${selectedStyleTile}“ wurde dauerhaft in localStorage für alle Besucher freigeschaltet!`
+                        );
+                        soundFX.playChallengeUnlocked();
+                      }}
+                      className="px-3 py-1 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-xs cursor-pointer transition shadow-[0_0_12px_rgba(16,185,129,0.4)]"
+                    >
+                      🚀 Ausgewählten Style für alle freischalten
+                    </button>
+                    {styleFeedbackToast && (
+                      <span className="text-[10px] font-mono text-cyan-300">
+                        {styleFeedbackToast}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* 7. Statistik & Einlass / 8. First-Visit-Vorhang kompakt integriert */}
+                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-slate-300">
+                    <span>
+                      <strong>7. Statistik:</strong> Heute {visitsToday} • Ges.{' '}
+                      {hallStats.totalSessions} • Stempel:{' '}
+                      <strong
+                        className={
+                          entryPass?.locked
+                            ? 'text-amber-300'
+                            : 'text-slate-400'
+                        }
+                      >
+                        {entryPass?.locked ? 'FIXIERT' : 'FREI'}
+                      </strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleResetEntryPassFromAdmin}
+                      className="px-2 py-1 rounded bg-cyan-950 hover:bg-cyan-900 border border-cyan-400/60 text-cyan-200 font-mono font-bold text-[10px] cursor-pointer"
+                    >
+                      🎟️ Stempel-Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHallStats(resetHallStats())}
+                      className="px-2 py-1 rounded bg-rose-950 hover:bg-rose-900 border border-rose-500/50 text-rose-200 font-mono text-[10px] cursor-pointer"
+                    >
+                      📊 Statistik-Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        resetEntryPass();
+                        setEntryPass(null);
+                        setHasRentedSkates(false);
+                        setDrinkChipAvailable(true);
+                        saveHasEnteredBefore(false);
+                        saveHideChronik(false);
+                        setHideChronik(false);
+                        setHasEnteredBefore(false);
+                        setIsCurtainOpen(false);
+                        setShowChronicleModal(true);
+                        setShowAdminTerminal(false);
+                      }}
+                      className="px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-[10px] cursor-pointer"
+                    >
+                      🎭 8. First-Visit-Vorhang Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 9. 80s MULTIPLAYER INVITATION WELCOME MODAL (?room=<RAUM_ID>)         */}
+        {/* ===================================================================== */}
+        {showGuestJoinModal && initialUrlRoomId && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-md">
+            <div className="w-full max-w-md rounded-2xl bg-[#120D20] border-2 border-cyan-400 shadow-[0_0_55px_rgba(0,240,255,0.45)] p-5 text-white space-y-4">
+              <div className="text-center space-y-1">
+                <span className="inline-block px-2.5 py-0.5 rounded-full bg-cyan-950 border border-cyan-400/60 font-mono text-[10px] text-cyan-300 uppercase">
+                  🌐 Live-Einladung • Raum: {initialUrlRoomId}
+                </span>
+                <h2 className="font-display font-black text-lg text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-amber-200 to-fuchsia-400">
+                  Willkommen im Palladium Hanau! Gib deinen Skater-Namen ein &amp;
+                  wähle deine Outfit-Farbe
+                </h2>
+                <p className="text-xs text-slate-300">
+                  Du betrittst die reine Menschen-Bahn ohne KI-Bots – rolle
+                  live mit deinen Freunden zur 80er-Show!
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block font-mono text-xs text-cyan-300 mb-1">
+                    Dein Skater-Name auf der Bahn:
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={22}
+                    value={guestJoinNameInput}
+                    onChange={(e) => setGuestJoinNameInput(e.target.value)}
+                    placeholder="z.B. Roller-Robby"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-cyan-400/60 font-mono text-sm text-white focus:outline-none focus:border-amber-300"
+                  />
+                </div>
+
+                <div>
+                  <span className="block font-mono text-xs text-fuchsia-300 mb-1.5">
+                    Deine 80er-Outfit-Farbe:
+                  </span>
+                  <div className="grid grid-cols-3 gap-2">
+                    {MULTIPLAYER_OUTFIT_COLORS.map((col) => {
+                      const active = playerShirtColor === col.hex;
+                      return (
+                        <button
+                          key={col.id}
+                          type="button"
+                          onClick={() => setPlayerShirtColor(col.hex)}
+                          className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border font-mono text-xs transition cursor-pointer ${
+                            active
+                              ? 'bg-slate-900 border-2 border-white text-white font-bold shadow-[0_0_12px_rgba(255,255,255,0.35)]'
+                              : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-slate-500'
+                          }`}
+                        >
+                          <span
+                            className="w-3.5 h-3.5 rounded-full border border-white/60 shrink-0"
+                            style={{ backgroundColor: col.hex }}
+                          />
+                          <span className="truncate">{col.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleConnectAsGuest(
+                      initialUrlRoomId,
+                      guestJoinNameInput,
+                      playerShirtColor
+                    )
+                  }
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-400 via-emerald-400 to-amber-300 text-slate-950 font-mono font-black text-sm cursor-pointer shadow-[0_0_20px_rgba(34,211,238,0.5)] hover:brightness-110 transition"
+                >
+                  🛼 Jetzt live in die Halle rollen!
+                </button>
               </div>
             </div>
           </div>

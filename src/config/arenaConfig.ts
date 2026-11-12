@@ -22,9 +22,18 @@ export const DEFAULT_SPECIAL_SKATERS: string[] = [
 ];
 
 export const DEFAULT_TWITCH_CHANNEL = 'Dj_Magic_Force';
+export const DEFAULT_DJ_NAME = 'DJ Magic Force';
 
 export const DEFAULT_DJ_TICKER =
   '+++ ON AIR: DJ MAGIC FORCE +++ KLECKNIX TWIN-DECKS +++ OLDSCHOOL • NEWSCHOOL • R&B • HIP HOP • MIAMI BASS • FREESTYLE +++';
+
+export interface GuestDjPreset {
+  id: string;
+  name: string;
+  twitchChannel: string;
+  tickerText: string;
+  isResident?: boolean;
+}
 
 export const PARODY_BANDS = [
   'LAMIO',
@@ -43,6 +52,10 @@ export type LightingMode =
   | 'putzlicht'
   | 'slow-skating';
 export type CenterStageMode = 'islands' | 'live-band' | 'cinema';
+export type ConcertLightingMode = 'auto' | 'on' | 'off';
+export type ArenaVisualStyle = 'classic-neon' | 'palladium-1989' | 'pixel-16bit';
+export type BandSkinToneMode = 'black' | 'white' | 'mixed';
+export type BandGenderMode = 'male' | 'female' | 'mixed';
 export type HallGameMode = 'free-skate' | 'ballspiel' | 'slalom' | 'stuhlsprung';
 export type CameraViewMode = 'top-down' | 'chase' | 'ego';
 export type PlayerCharacterMode = 'skater' | 'wheelchair';
@@ -298,13 +311,13 @@ export const ARENA_LAYOUT = {
     height: 98,
   },
 
-  // Rechte Hallenwand: Vier braune Holzlatten-Sitzbänke ganz nach hinten an die rechte Außenwand gerückt,
-  // mit Lücke in der Mitte (y = 385..555) für die breite Metall-Doppeltür ("TECHNIK & EQUIPMENT" + "NOTAUSGANG")!
+  // Rechte Hallenwand: Drei braune Holzlatten-Sitzbänke ganz nach hinten an die rechte Außenwand gerückt,
+  // mit Lücke in der Mitte (y = 385..545) für die breite Metall-Doppeltür ("TECHNIK & EQUIPMENT" + "NOTAUSGANG")
+  // und Platz darunter (ab y = 692) für das bündig & gerade an der rechten Wand platzierte Kassenhäuschen!
   rightWallBenches: [
     { id: 'right-bench-1', x: 1848, y: 132, width: 48, height: 112 },
     { id: 'right-bench-2', x: 1848, y: 262, width: 48, height: 112 },
-    { id: 'right-bench-3', x: 1848, y: 566, width: 48, height: 112 },
-    { id: 'right-bench-4', x: 1848, y: 696, width: 48, height: 112 },
+    { id: 'right-bench-3', x: 1848, y: 558, width: 48, height: 112 },
   ],
 
   rightWallTechDoor: {
@@ -315,19 +328,19 @@ export const ARENA_LAYOUT = {
   },
 
   // 3) Untere & rechte Hallenachse:
-  // A) 1) KASSE & EINGANG PALLADIUM: Gespiegelt & schräg angewinkelt in der unteren rechten Hallenecke
-  // an der rechten Außenwand mit Blickrichtung schräg nach links oben zur Hallenmitte!
+  // A) 1) KASSE & EINGANG PALLADIUM: Bündig und gerade (angleRad = 0) an der rechten Außenwand
+  // an der Stelle der entfernten untersten Bank platziert!
   bottomEntrance: {
     cashierBooth: {
-      x: 1675,
-      y: 895,
-      width: 236,
-      height: 144,
-      centerX: 1812,
-      centerY: 968,
-      angleRad: 0.58, // Schräg angewinkelt mit Blickrichtung schräg nach links oben zur Hallenmitte!
+      x: 1768,
+      y: 692,
+      width: 136,
+      height: 188,
+      centerX: 1836,
+      centerY: 786,
+      angleRad: 0, // Bündig und gerade an der rechten Wand!
     },
-    spinWarmupZone: { x: 1565, y: 842, radius: 52 },
+    spinWarmupZone: { x: 1658, y: 842, radius: 52 },
     woodenSlatBenches: [] as {
       id: string;
       x: number;

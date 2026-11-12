@@ -1,8 +1,12 @@
 import {
+  ArenaVisualStyle,
   ChallengeId,
+  ConcertLightingMode,
+  DEFAULT_DJ_NAME,
   DEFAULT_DJ_TICKER,
   DEFAULT_SPECIAL_SKATERS,
   DEFAULT_TWITCH_CHANNEL,
+  GuestDjPreset,
   PALLADIUM_CHALLENGES,
   ProShopUpgradesState,
 } from '../config/arenaConfig';
@@ -17,7 +21,21 @@ const KEYS = {
   SPECIAL_SKATERS: 'palladium_special_skaters_v1',
   ADMIN_SETTINGS: 'palladium_admin_settings_v1',
   ADMIN_SESSION: 'palladium_admin_session_v1',
+  ENTRY_PASS: 'palladium_entry_pass',
+  GUEST_DJS: 'palladium_guest_djs_v1',
 };
+
+export type SingleplayerDifficulty = 'beginner' | 'intermediate' | 'pro';
+
+export interface EntryPassData {
+  active?: boolean;
+  locked: boolean;
+  difficulty: SingleplayerDifficulty;
+  hasOwnSkates: boolean;
+  hasRentedSkates: boolean;
+  drinkChipAvailable: boolean;
+  stampedAt?: string;
+}
 
 export interface PlayerProfileStorage {
   name: string;
@@ -38,6 +56,7 @@ export interface HallStatsData {
 }
 
 export interface AdminPersistentSettings {
+  activeDjName: string;
   twitchChannel: string;
   djTickerText: string;
   isMaintenanceMode: boolean;
@@ -47,6 +66,11 @@ export interface AdminPersistentSettings {
   cinemaEndTime: string;
   autoBlacklightEnabled: boolean;
   ghostSkatersEnabled: boolean;
+  fogMachineEnabled: boolean;
+  npcVoicesEnabled: boolean;
+  skateGuardWhistleEnabled: boolean;
+  concertLightingMode: ConcertLightingMode;
+  liveArenaStyle: ArenaVisualStyle;
 }
 
 function getTodayDateString(): string {
@@ -291,6 +315,7 @@ export function saveSpecialSkaters(list: string[]): void {
 
 export function loadAdminSettings(): AdminPersistentSettings {
   const defaults: AdminPersistentSettings = {
+    activeDjName: DEFAULT_DJ_NAME,
     twitchChannel: DEFAULT_TWITCH_CHANNEL,
     djTickerText: DEFAULT_DJ_TICKER,
     isMaintenanceMode: false,
@@ -300,6 +325,11 @@ export function loadAdminSettings(): AdminPersistentSettings {
     cinemaEndTime: '22:00',
     autoBlacklightEnabled: false,
     ghostSkatersEnabled: true,
+    fogMachineEnabled: true,
+    npcVoicesEnabled: true,
+    skateGuardWhistleEnabled: false,
+    concertLightingMode: 'auto',
+    liveArenaStyle: 'classic-neon',
   };
   try {
     const raw = localStorage.getItem(KEYS.ADMIN_SETTINGS);
@@ -315,6 +345,109 @@ export function loadAdminSettings(): AdminPersistentSettings {
 export function saveAdminSettings(settings: AdminPersistentSettings): void {
   try {
     localStorage.setItem(KEYS.ADMIN_SETTINGS, JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+}
+
+export const RESIDENT_DJ_PRESET: GuestDjPreset = {
+  id: 'resident_dj_magic_force',
+  name: DEFAULT_DJ_NAME,
+  twitchChannel: DEFAULT_TWITCH_CHANNEL,
+  tickerText: DEFAULT_DJ_TICKER,
+  isResident: true,
+};
+
+export function loadGuestDjPresets(): GuestDjPreset[] {
+  try {
+    const raw = localStorage.getItem(KEYS.GUEST_DJS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const custom = parsed
+          .filter(
+            (item) =>
+              item &&
+              typeof item.name === 'string' &&
+              typeof item.twitchChannel === 'string' &&
+              item.id !== RESIDENT_DJ_PRESET.id
+          )
+          .map((item) => ({
+            id: String(item.id || `dj_${Date.now()}`),
+            name: String(item.name).trim(),
+            twitchChannel: String(item.twitchChannel).trim(),
+            tickerText:
+              typeof item.tickerText === 'string' && item.tickerText.trim()
+                ? item.tickerText.trim()
+                : `+++ ON AIR: ${String(item.name)
+                    .trim()
+                    .toUpperCase()} +++ KLECKNIX TWIN-DECKS +++ LIVE IM PALLADIUM HANAU +++`,
+            isResident: false,
+          }));
+        return [RESIDENT_DJ_PRESET, ...custom];
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return [RESIDENT_DJ_PRESET];
+}
+
+export function saveGuestDjPresets(presets: GuestDjPreset[]): void {
+  try {
+    const customOnly = presets.filter((p) => !p.isResident);
+    localStorage.setItem(KEYS.GUEST_DJS, JSON.stringify(customOnly));
+  } catch {
+    // ignore
+  }
+}
+
+export function loadEntryPass(): EntryPassData | null {
+  try {
+    const raw = localStorage.getItem(KEYS.ENTRY_PASS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && (parsed.locked === true || parsed.active === true)) {
+        const diff: SingleplayerDifficulty =
+          parsed.difficulty === 'beginner' ||
+          parsed.difficulty === 'intermediate' ||
+          parsed.difficulty === 'pro'
+            ? parsed.difficulty
+            : 'intermediate';
+        return {
+          active: true,
+          locked: true,
+          difficulty: diff,
+          hasOwnSkates: Boolean(parsed.hasOwnSkates),
+          hasRentedSkates: Boolean(parsed.hasRentedSkates),
+          drinkChipAvailable:
+            typeof parsed.drinkChipAvailable === 'boolean'
+              ? parsed.drinkChipAvailable
+              : true,
+          stampedAt:
+            typeof parsed.stampedAt === 'string'
+              ? parsed.stampedAt
+              : new Date().toISOString(),
+        };
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return null;
+}
+
+export function saveEntryPass(pass: EntryPassData): void {
+  try {
+    localStorage.setItem(KEYS.ENTRY_PASS, JSON.stringify(pass));
+  } catch {
+    // ignore
+  }
+}
+
+export function resetEntryPass(): void {
+  try {
+    localStorage.removeItem(KEYS.ENTRY_PASS);
   } catch {
     // ignore
   }
