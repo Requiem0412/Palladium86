@@ -1,0 +1,202 @@
+PALLADIUM ROLLER ARENA HANAU – VOLLSTÄNDIGER MASTER-PROMPT (STAND: ALPHA 0.1 – FINAL WIDESCREEN, CHRONIK, SPIEGELKUGEL, BLACKLIGHT, GUARDS, SPEED-SKATER, PRO-SHOP-UPGRADES, GARNET-SEATING, DJ MAGIC FORCE, HALLEN-SPIELE, CONTROLLER-SUPPORT, STATISTIK & ADMIN-TERMINAL)
+
+Erstelle einen interaktiven, flüssigen 2D/2.5D-Gameplay-Prototyp im Browser mit dem authentischen Hallen-Look der 80er-Jahre, präziser Tastatur- und Game-Controller-Steuerung, dynamischen NPCs (inkl. Speed-Skater-Zug mit Windschatten), Twitch-Stream-Integration (`Dj_Magic_Force`), Retro-Atmosphäre mit Schwarzlicht-Modus (Blacklight), modernem Breitbild-Layout, festem Personal ("Palladiumaner"), freischaltbaren Rollschuh-Upgrades im Pro-Shop, aktiven Skate Guards, klassischen Hallen-Spielen (Ballspiel, Slalom, Hindernis- & Stuhlsprung), Geister-Skatern, einer zusammenschiebbaren Mittelbühne mit 80er-Parodie-Bands, Mini-Aufgaben (Challenges), Hallen-Statistiken, einer zentralen Spiegelkugel und einem PIN-geschützten Admin-Terminal.
+
+1. BILDFORMAT, VIEWPORT & SKALIERUNG (BREITBILD-FOKUS):
+- ECHTES BREITBILD (16:9 / FULLSCREEN):
+  * Keine vertikal gestauchte Box mehr, keine engen Maximalbreiten (wie max-width: 800px / 900px).
+  * Das Spielfeld nutzt den Bildschirm dynamisch aus (width: 100vw, height: 100vh bzw. sauberes 16:9 via object-fit: contain ohne Verzerrung). Keine ungenutzten schwarzen Randbalken mehr.
+- GRÖSSERE FIGUREN & ASSETS (SPRITE SCALE):
+  * Figuren (Spieler, NPCs, Skater, Guards, Personal), Deko und Hindernisse proportional deutlich vergrößern (ca. 1,5x bis 2x größer darstellen).
+  * Kollisionskreise / Hitbox-Radien exakt an die vergrößerten Sprites anpassen, damit Drifts und Kurvenfahrten griffig und präzise bleiben.
+  * Bereinigung: Beseitige Textüberlagerungen (z. B. an der Slush-Station) und Textartefakte (wie lose Fragmente wie "/papi" auf dem Parkett).
+
+2. ATMOSPHÄRISCHER EINSTIEG, HALLEN-CHRONIK & REVEAL (NUR BEIM ERSTEN MAL):
+- FIRST-VISIT-SPANNUNG & GESCHICHTE (OHNE COOKIES):
+  * Nutze `localStorage` (rein lokaler Browserspeicher, absolut keine Cookies/Tracking).
+  * Beim allerersten Besuch ist das Spielfeld von einem atmosphärischen Eingangs-Screen verdeckt (dunkler 80er-Samtvorhang / Kassenbereich mit leuchtendem Palladium-Neon-Logo). Sound ist noch dumpf gedämpft.
+  * HISTORISCHE CHRONIK-TAFEL AUF DEM EINSTIEGSSCREEN:
+    - Direkt unter dem Logo wird eine stilvoll gestaltete, gut lesbare Retro-Chronik ("Die Geschichte hinter dem Parkett") angezeigt:
+      * **04. November 1981 – Alles beginnt als „Rollerland“:** Oben im damaligen Hanauer *Familyland*-Einkaufszentrum öffnet eine der kultigsten Rollschuhbahnen der Region mit großem versiegeltem Holzparkett, Pro-Shop und Slush-Theke.
+      * **August 1986 – Neueröffnung als „Palladium“:** Nach dem großen Umbau im Frühjahr 1986 startet im August 1986 die Ära des **Palladiums** – legendärer Treffpunkt einer ganzen Generation, mit zusammenschiebbbarer Mittelbühne für Live-Acts, Lichtshow und unvergesslichen Abenden auf acht Rollen.
+      * **Heute – Die digitale Zeitreise:** Ein liebevolles Retro-Tribut für alle ehemaligen „Palladiumaner“ und Gäste.
+  * Nach Klick auf "Halle betreten" (oder [Enter]/[Space] bzw. Start/A-Taste am Controller) öffnet sich der Vorhang, Sound wird voll ausgesteuert, Hallen-Spots gehen an und der Skater rollt auf die Bahn. Der Browser merkt sich: `hasEnteredBefore = true`.
+  * Bei jedem weiteren Aufruf wird das Intro automatisch übersprungen (direkter Start auf dem Holz). Über einen Button `[📜 Historie & Hilfe]` im HUD lässt sich diese Chronik-Tafel jederzeit wieder öffnen.
+
+3. STEUERUNG, GAME-CONTROLLER, ROLLSTUHL-FIX & GAME-LOOP (SOFORT REAKTIV):
+- TASTATUR-STEUERUNG:
+  * Globale Tastaturabfrage via `window.addEventListener('keydown', ...)` und `'keyup'` (inkl. `e.preventDefault()` für Pfeiltasten und Leertaste, damit die Seite nicht scrollt).
+  * WASD / Pfeiltasten: Fahren, sanftes Anschieben, spürbare Trägheit und Ausrollen auf glattem Parkett.
+  * [Space] oder [Q]: 360°-Drehung (Pirouette / Spin / Wheelie-Spin beim Rollstuhl) auf der Stelle.
+  * [J] oder [Shift]: Sprung (Jump) über Stühle, Rampen und Hindernisse (mit realistischer Sprunghöhe, Bodenschatten und sauberer Landung).
+  * [E] / [F] oder Maus-Linksklick (im Ballspiel): Neon-Softball werfen (bzw. an Pro-Shop/Bistro interagieren).
+  * [C]: Kamera durchschalten (Chase-Cam, Ego-Perspektive, Vogelperspektive).
+  * [V]: Umschalten zwischen klassischem Rollschuh-Skater und Rollstuhl-Skater.
+  * [N]: Schwebende Namensschilder über den Figuren an-/ausschalten.
+- SAUBERE KURVEN-ROTATION & ROLLSTUHL-FAHRER-FIX:
+  * Wichtig für Spieler und NPCs im Rollstuhl: Der Rollstuhl (große Hinterräder hinten, Fußstütze und Blickrichtung des Fahrers vorne) muss sich immer exakt entlang des Geschwindigkeitsvektors (`Math.atan2(vy, vx)`) ausrichten und darf beim Fahren gegen den Uhrzeigersinn (insbesondere auf der oberen Geraden nach links und in den Kurven) NIEMALS rückwärts fahren oder um 180° umspringen.
+  * Verwende für alle Drehungen in Kurven eine weiche Winkel-Interpolation über den kürzesten Winkelabstand (`normalizeAngle(targetAngle - currentAngle)`), sodass der Rollstuhl in jeder Kurve natürlich vorwärts einlenkt.
+- VOLLFUNKTIONSFÄHIGE GAME-CONTROLLER / GAMEPAD-UNTERSTÜTZUNG (HTML5 GAMEPAD API):
+  * Echtes Frame-by-Frame-Polling über `navigator.getGamepads()` direkt im `requestAnimationFrame`-Game-Loop (damit alle gängigen Controller wie Xbox, PlayStation DualSense/DualShock, 8BitDo und USB/Bluetooth-Gamepads ohne Verzögerung funktionieren) sowie Listener für `gamepadconnected` und `gamepaddisconnected`.
+  * Sauberer Deadzone-Filter (z. B. `0.15`) für die Analogsticks, damit der Skater bei leichtem Stick-Drift nicht von allein losrollt.
+  * Tastatur- und Controller-Eingaben überschreiben sich nicht gegenseitig, sondern arbeiten nahtlos parallel.
+  * Belegung (Standard-Gamepad-Layout):
+    - Linker Analogstick (`axes[0]`, `axes[1]`) oder Steuerkreuz/D-Pad (`buttons[12..15]`): Stufenloses Lenken und Fahren in alle Richtungen.
+    - Rechter Trigger `RT` / `R2` (`buttons[7]`): Zusätzliches stufenloses Gasgeben (optional zum Stick).
+    - Taste `A` / `Kreuz` (`buttons[0]`): Sprung (Jump über Stühle/Hindernisse).
+    - Taste `B` / `Kreis` (`buttons[1]`): 360°-Pirouette (Spin).
+    - Taste `X` / `Viereck` (`buttons[2]`) oder `RB` / `R1` (`buttons[5]`): Neon-Softball werfen (im Ballspiel).
+    - Taste `Y` / `Dreieck` (`buttons[3]`): Kamera-Perspektive umschalten (`[C]`).
+    - Taste `Select` / `Back` (`buttons[8]`): Namensschilder ein-/ausschalten (`[N]`).
+    - Taste `Start` / `Options` (`buttons[9]`): Halle betreten (auf dem Startscreen) bzw. Historie/Hilfe öffnen.
+  * Im HUD erscheint ein kleines Status-Badge `[🎮 Pad aktiv]`, sobald ein Controller erkannt wurde.
+
+4. KASSE, START & GAST-MODUS:
+- An der Kasse / beim Einstieg gibt es ein optionales Namensfeld sowie eine Checkbox "[ ] Anonym bleiben / Als Gast rollen".
+- Bleibt das Feld leer oder wird die Checkbox aktiviert, wird über der Spielfigur gar kein Namensschild gerendert.
+
+5. ARCHITEKTUR, HALLEN-LAYOUT, UNANGEKÜNDIGTE BOHNER-RUTSCHZONEN & MITTELBÜHNE:
+- BODEN, FAHRFLÄCHE & VERSTECKTE RUTSCH-AREAS:
+  * Einheitlich versiegelter, warmer, dunkler Holzparkettboden über das gesamte Oval.
+  * Keine störenden horizontalen Blockstreifen, Querstreifen oder harten Farbtrennungen mehr rendern.
+  * Außerhalb der Bahn: Gedeckter, dunkelgrauer Retro-Industrieboden / Teppich.
+  * **Unangekündigte Bohnerwachs-Rutschzonen (Glanz-Areas):** Auf der Bahn taucht in unregelmäßigen Abständen an wechselnden Stellen – völlig ohne Warnschild oder Vorankündigung – ein leicht glänzender Bohnerwachs-Fleck auf dem Parkett auf (nur am leichten Lichtschimmer erkennbar). Fährt ein Skater oder NPC darüber, sinkt die Bodenhaftung schlagartig ab: Er schlittert ungebremst in Fahrtrichtung weiter, dreht sich bei Spins rasend schnell und legt bei hektischem Gegenlenken einen überraschenden Hosenboden-Rutscher hin (samt kleiner Sprechblase wie *"Huch, frisch gebohnert!"*).
+- OBERE WAND (SPIEGELWAND & TÄNZER):
+  * An der oberen Wand (zwischen Bistro und DJ-Tower) befindet sich eine breite Retro-Spiegelwand mit leichter, abgedunkelter Spiegel-Reflektion der Figuren davor.
+  * Die Tänzer vor dem Spiegel wippen nicht nur monoton hin und her, sondern zeigen abwechslungsreiche Moves: Sie drehen regelmäßig flüssige 360°-Pirouetten (Spins), wechseln die Blickrichtung und machen kleine Tanzschritte im Takt der Musik.
+- RECHTE BANDE:
+  * Vertikaler Neon-Schriftzug "✦✦ PALLADIUM HANAU ✦✦" lesbar von oben nach unten ausrichten.
+- UNTERE WAND (EINGANGSBEREICH & BÄNKE):
+  * Kasse und Eingangsschleuse sitzen links unten.
+  * An der Wand rechts daneben: Einfache, rustikale Retro-Holzlattenbänke an der Wand (keine bunten Sofas).
+  * Der runde Einstiegsbereich fungiert als "Spin- & Warm-Up-Zone" (Drehungen mit [Q]/[Space] erzeugen hier bunte Funken/Partikel).
+- MITTLERE U-INSELN & EVENT-BÜHNE (NUR ÜBER ADMIN-TERMINAL STEUERBAR):
+  * Standard-Modus: Beide Inseln öffnen sich zueinander wie zwei Schalen (Oberes U: Öffnung nach UNTEN; Unteres U: Öffnung nach OBEN). Massive Füllung (dunkler Nadelfilzteppich oder Holzpodest mit gepolsterten Begrenzungen, keine leeren Drahtgitterlinien).
+  * Event-Modus (Bühne / Kino – nur für Admin schaltbar): Die beiden U-Hälften fahren animiert in der Mitte zusammen und bilden eine große, geschlossene Mittelbühne!
+  * Live-Band-Modus: Auf der Bühne spielt eine animierte 80er-Band (Sänger/Sängerin, Keyboarder mit Umhänge-Keytar, Gitarrist, Drummer mit Bühnenscheinwerfern und Nebeleffekt) unter einem leuchtenden Bühnenbanner mit wählbaren 80s-Parodienamen:
+    - "LAMIO"
+    - "THE NOTSIGNAL BAND"
+    - "KOOL & THE SKATES"
+    - "WINDS OF FREEDOM"
+    - sowie einem eigenen Freitext-Feld im Admin-Terminal für individuelle Bandnamen.
+  * Kino-Modus: Alternativ fährt auf der Bühne eine große Retro-Kino-Leinwand mit Visuals/Video-Feed aus. Die Kollisions-Hitbox passt sich dynamisch der geschlossenen Bühne an.
+
+6. LINKE SEITE: PRO-SHOP MIT ROLLSCHUH-UPGRADES, VERLEIH, BISTRO (SLUSH & BLOBA COLA), GARNET-SITZE & PERSONAL:
+- GETRENNTER PRO-SHOP & SKATE-VERLEIH (LINKS UNTEN):
+  * Baulich klar getrennt: Zwei separate Schalter/Räume mit Wand-/Thekentrennung.
+  * **Bereich 1 – Pro-Shop & Rollschuh-Tuning:** Glasvitrine/Auslage für Zubehör (Rollen, Schnürsenkel, Stopper, Kugellager, Neon-Leuchtsets). Dahinter steht ein NPC-Verkäufer im schwarzen T-Shirt mit Aufdruck "PALLADIUMANER".
+    - **Interaktives Upgrade-Menü am Pro-Shop:** Rollt der Spieler vor die Pro-Shop-Vitrine (oder klickt sie an), öffnet sich ein Retro-Tuning-Katalog, in dem durch **erfüllte Aufgaben (Challenges)** freigeschaltete Bauteile ausgerüstet und farblich angepasst werden können (gespeichert in `localStorage`):
+      1. **Kugellager (ABEC-5 / ABEC-9 Gold):** Erhöht spürbar die Endgeschwindigkeit und reduziert den Rollwiderstand.
+      2. **Spezial-Rollen (High-Grip Urethan):** Verbessert Kurvenlage und Bodenhaftung – besonders nützlich auf den unangekündigten Bohnerwachs-Rutschzonen.
+      3. **Alu-Platten & High-Top-Schuhe:** Sorgt für schnelleren Antritt und höhere, sauberere Sprünge beim *Stuhl- & Hindernissprung*.
+      4. **Neon-Unterbodenbeleuchtung (LED/Neon-Kit):** Montiert eine leuchtende Neon-Unterbodenbeleuchtung unter die bestehenden Rollschuhe (Farbe wählbar: Pink, Cyan, Neongrün oder Gold; per Taste `[L]` oder im Menü an-/ausschaltbar), die beim Fahren einen farbigen Lichtschein und eine feine Leuchtspur auf das Holzparkett wirft.
+  * Bereich 2 – Rollschuh-Verleih: Eigener Ausgabetresen mit hohen Regalen voller sortierter Rollschuhpaare. Dahinter steht ein eigener NPC-Ausleiher im schwarzen "PALLADIUMANER"-Shirt.
+  * Gegenüberliegende Sitzbänke: "Pause-Paul" und "Retro-Rita" sitzen vornübergebeugt auf den Bänken und ziehen sich Schuhe an (Straßenschuhe davor auf dem Boden).
+- BISTRO, THEKEN-BEDIENUNG (SLUSH-PUPPIE & BLOBA COLA) & GARNET-SITZGARNITUREN (LINKS OBEN):
+  * **Getränketheke:** Slush-Puppie-Automat und Kühltresen mit dem Kult-Getränk **„Bloba Cola“** (markantes 80er-Retro-Logo an der Zapfanlage / auf den Bechern).
+  * Feste Bedienung: Hinter der Theke steht ein NPC ("Theken-Crew") im schwarzen "PALLADIUMANER"-Shirt, der Slush-Puppies und Bloba Cola ausgibt.
+  * **Getränke-Effekt beim Abholen am Tresen:**
+    - **Slush-Puppie:** Langanhaltender Frische-Effekt (hält deutlich länger an – z. B. 60 bis 90 Sekunden mit sichtbarem Cool-Timer im HUD – und sorgt für konstanten Schwung und geschmeidiges Gleiten).
+    - **Bloba Cola:** Gibt einen spritzigen Koffein-/Zucker-Kick (kurzzeitig flinkere Beschleunigung und Extra-Energie für Pirouetten und Sprünge, mit kleinem Blubber-Partikeleffekt).
+  * Bistro-Lounge mit Seat-Garnituren in Garnet (Tiefrot / Bordeaux): Im Bistro-Bereich stehen authentische 80er-Polster-Sitzgarnituren / Booth-Seats im edlen dunklen Garnet-Rot (Bordeaux) mit kleinen Bistro-Tischen dazwischen. Gäste sitzen entspannt in diesen roten Garnet-Sitzgruppen, essen, trinken Slush-Drinks und Bloba Cola und unterhalten sich. (Saubere Hitboxen um Tische und Garnet-Sitze, damit Skater nicht darin hängen bleiben.)
+
+7. DJ-TOWER (MISCHPULT + 2 PLATTENSPIELER + LED-LAUFSCHRIFT "DJ MAGIC FORCE"), TWITCH-LIVESTREAM & EGO-VIEW:
+- DJ-KANZEL, HARDWARE-SETUP, LED-TICKER & CREW-SCHRIFTZUG (OBEN RECHTS):
+  * **80er-LED-Laufschrift über dem Discotower:** Direkt über dem DJ-Tower bzw. über den Equalizer-Balken verläuft ein breiter, leuchtender 80er-LED-Matrix-Lauftext (Ticker), auf dem kontinuierlich der DJ-Name und Style durchlaufen: **`+++ ON AIR: DJ MAGIC FORCE +++ OLDSCHOOL • NEWSCHOOL • R&B • HIP HOP • MIAMI BASS • FREESTYLE +++`** (im Admin-Terminal anpassbar).
+  * Direkt an der Rückwand hinter dem DJ-Pult leuchtet zusätzlich das 80er-Retro-Schild / Neon-Logo: **`>> DANGER RYTM CREW <<`** (genau in dieser Schreibweise!).
+  * Auf dem DJ-Pult stehen gut sichtbar zwei rotierende 80er-Vinyl-Plattenspieler (Turntables) links und rechts sowie genau dazwischen ein klassisches 80er-DJ-Mischpult mit Fadern, Drehreglern und blinkenden LED-Pegelanzeigen (VU-Meter).
+  * Der DJ (**„DJ Magic Force“**) steht mit Kopfhörern hinter dem Mischpult (vor dem `>> DANGER RYTM CREW <<`-Schriftzug), legt Platten auf, bewegt die Hände am Crossfader/Mixer und wippt im Takt.
+- TWITCH-LIVESTREAM & EGO-VIEW:
+  * Am DJ-Tower ist eine sichtbare Videoleinwand bzw. ein Screen verbaut (eingebetteter Twitch-Player mit Standard-Kanal `Dj_Magic_Force`, live wechselbar im Admin-Terminal).
+  * Rollt der Skater vor den DJ-Tower und schaltet per [C] in die Ego-Perspektive, blickt er aus Augenhöhe direkt auf das DJ-Pult mit Plattenspielern, Mischpult, **DJ Magic Force**, die LED-Laufschrift, den `>> DANGER RYTM CREW <<`-Schriftzug dahinter und den laufenden Twitch-Stream.
+  * Räumlicher Sound: Der Stream-Ton wird lauter, wenn man sich vor dem Tower befindet, und leiser, wenn man sich auf der Bahn entfernt.
+
+8. FAHRDYNAMIK, SPEED-SKATER MIT WINDSCHATTEN, GEISTER-SKATER, 2 SKATE GUARDS & HALLEN-SPIELE:
+- SPEED-SKATER-GRUPPE AN DER AUSSENBANDE (MIT SICHTBAREM WINDSCHATTEN):
+  * Eine kompakte Gruppe von 3 bis 4 sportlichen **Speed-Skatern** (erkennbar an aerodynamischer, leicht nach vorn gebeugter Haltung und sportlichen 80er-Stirnbändern/Outfits) zieht regelmäßig in einer sauberen Einerreihe (**Paceline / Schlange**) schnell ihre Runden außen entlang der Bande gegen den Uhrzeigersinn.
+  * **Sichtbarer Windschatten (Slipstream):** Hinter dem Speed-Skater-Zug wird ein dezenter, animierter Luftstrom / Windschatten-Schweif (feine halbtransparente Luftlinien / Strömungsstreifen) auf dem Parkett sichtbar.
+  * **Spieler-Interaktion:** Reiht sich der Spieler direkt hinter den Speed-Skatern in diesen sichtbaren Windschatten ein, verringert sich der Luftwiderstand spürbar, der Skater wird automatisch mitgezogen und erreicht eine höhere Reisegeschwindigkeit (inkl. kleinem HUD-Hinweis *"Windschatten aktiv!"*).
+- ZWEI AKTIVE SKATE GUARDS:
+  * Zwei feste NPCs patrouillieren auf Rollschuhen auf der Bahn (gegen den Uhrzeigersinn, versetzt zueinander).
+  * Outfit: Schwarzes T-Shirt mit markantem Aufdruck "SKATE GUARD" und sichtbarer Trillerpfeife um den Hals.
+  * Fahren Skater falsch herum (Geisterfahrer) oder kommt es zu Remplern in ihrer Nähe, ertönt ein Pfiff ("Trrriiiiieeeet!") samt kleiner Pfeifen-Sprechblase.
+  * AFK-Räumung / Stehenbleiber-Regel: Steht ein Skater (Spieler oder NPC) länger als 15 Sekunden regungslos mitten auf der Fahrfläche (außerhalb von Bistro, Bänken und Warm-Up-Zone), steuert der nächste Skate Guard ihn direkt an, pfeift kurz ("Trrriiiiieeeet! Nicht auf der Bahn stehen!") und schiebt ihn sanft an den Rand zu den Holzlattenbänken, damit die Fahrbahn frei bleibt.
+- KLASSISCHE 80ER-HALLEN-SPIELE (ÜBER `[🎮 Hallen-Spiele]` IM HUD ODER ADMIN-TERMINAL WÄHLBAR):
+  * Im regulären Betrieb läuft der freie Lauf. Über ein Auswahlmenü `[🎮 Hallen-Spiele]` kann der Spieler (oder der Admin als Hallen-Event) eines von drei Retro-Spielen aktivieren oder wieder auf *Freies Laufen* zurückschalten:
+  1. **„Ballspiel“ (Abwerfen mit den Skate Guards):**
+     - Der Spieler schlüpft in das schwarze "SKATE GUARD"-Shirt (mit Trillerpfeife) und bildet ein 2er-Team mit einem KI-Skate-Guard.
+     - Alle regulären Skater fahren weiter im Kreis gegen den Uhrzeigersinn und weichen aus. Die beiden Guards werfen leuchtende Neon-Softbälle (`[E]` / `[F]` / Mausklick oder Controller-X/RB; prallen 1x an Banden ab). Getroffene Skater rutschen kurz auf dem Hosenboden, rufen *"Getroffen!"* und rollen raus an die Holzlattenbänke.
+  2. **„Slalom“ (Pylonen-Parcours auf der Bahn):**
+     - Auf der unteren und oberen Geraden erscheinen leuchtende 80er-Slalom-Hütchen (Pylonen) in einer sauberen Slalom-Linie.
+     - Skater (inkl. KI-Skater) schlängeln sich abwechselnd links und rechts daran vorbei. Jedes fehlerfrei durchfahrene Tor gibt einen kleinen Combo-Sound und Punkte; beim Umfahren eines Hütchens wackelt es und richtet sich wieder auf.
+  3. **„Stuhl- & Hindernissprung“:**
+     - Auf der unteren Geraden werden klassische Retro-Klappstühle (einzeln, als 2er- und 3er-Reihe, wie bei den legendären 80er-Rollschuh-Shows) sowie flache Schaumstoff-Barrieren aufgestellt.
+     - Mit `[J]`, `[Shift]` oder Controller-Taste `A` springt der Skater ab (sichtbare Sprung-Animation mit kleiner werdendem Bodenschatten darunter) und segelt sauber über die Stühle hinweg! Wer zu spät abspringt und einen Stuhl berührt, kippt den Stuhl um und macht einen harmlosen Hosenboden-Rutscher.
+- SPEZIAL-SKATER IM RETRO-GEISTERSCHEMA (SELEKTIVES NO-CLIP):
+  * Oben im Code gibt es ein leicht editierbares Array `SPECIAL_SKATERS` (z. B. `["Name 1", "Name 2"]` zum selbst Eintragen).
+  * Optik: Leicht halbtransparent gerendert (ca. 60–70 % Deckkraft) mit einem feinen, kühlen Cyan-/Weiß-Schimmer (wie ein 80er-Hologramm) und einer dezenten Leuchtspur hinter den Rollen.
+  * Bewegung & Kollision:
+    - Sie bleiben strikt auf der Rollschuhbahn (gegen den Uhrzeigersinn) und fahren NICHT durch die äußeren Banden, Theken, Bistro-Tische oder Nebenräume.
+    - Innerhalb der Bahn sind sie jedoch körperlos: Sie gleiten völlig ungehindert durch andere Skater, durch den Spieler, durch die U-Inseln, durch Slalom-Hütchen/Stühle und durch die Mittelbühne hindurch, ohne anzustoßen oder zu stürzen (und werden beim Ballspiel nicht getroffen).
+- ALLGEMEINE FAHRDYNAMIK & CRASHES:
+  * Strikte Fahrtrichtung aller regulären fahrenden NPCs (inkl. Rollstuhl-NPCs): GEGEN DEN UHRZEIGERSINN, stets mit vorwärts ausgerichteter Blick-/Fahrtrichtung entlang der Bahnkurve.
+  * Slalom-Figuren auf der Bahn wippen locker im Takt der Musik und streuen gelegentlich Drehungen ein.
+  * Leichter Stoß = Federt ab mit kurzem Ausruf ("Ey!", "Uff!").
+  * Frontal-Crash = Hosenboden-Rutscher, 2 Sekunden Sternchen über dem Kopf, Sprechblase ("Hoppla!"), danach Aufstehen.
+  * Schwerer Sturz (oder 3 Stürze in Folge): DJ-Scratch, einer der Skate Guards eilt heran und sperrt die Spur ab, während zwei Sanitäterinnen mit Klapptrage aus der Schleuse kommen und den Gestürzten kurz an die Bande bringen.
+
+9. PALLADIUM-CHALLENGES & PRO-SHOP-FREISCHALTUNGEN:
+- KLEINE, MOTIVIERENDE 80ER-AUFGABEN (OHNE ZWANG):
+  * Im HUD gibt es eine kompakte, einklappbare Challenge-Box (`[🏆 Aufgaben]`) mit kleinen, lockeren Aufgaben, die beim normalen Rollen oder bei den Hallen-Spielen erledigt werden können. Jede erfüllte Aufgabe schaltet direkt ein Upgrade im Pro-Shop frei:
+    1. **„Warm-Up-Kreisel“:** Mache 3 saubere 360°-Pirouetten (`[Space]`/`[Q]`/Pad-B) in der Spin-Zone am Eingang. *(Schaltet frei: Neon-Rollenbeleuchtung Pink & Cyan)*
+    2. **„Dauerläufer“:** Fahre 20 Runden am Stück gegen den Uhrzeigersinn, ohne von einem Skate Guard angepfiffen zu werden. *(Schaltet frei: ABEC-9 Gold-Kugellager)*
+    3. **„Slush- & Bloba-Pause“:** Rolle ans Bistro links oben und hol dir einen Slush-Puppie oder eine Bloba Cola bei der Theken-Crew. *(Schaltet frei: High-Grip Urethan-Rollen)*
+    4. **„Windschatten-Surfer“:** Halte dich 10 Sekunden lang im sichtbaren Windschatten der Speed-Skater an der Außenbande. *(Schaltet frei: Leichte Alu-Platten)*
+    5. **„Spiegel-Tänzer“:** Fahre vor die Spiegelwand oben und drehe eine Pirouette im Takt mit den Tänzern. *(Schaltet frei: Neon-Rollenbeleuchtung Neongrün & Gold)*
+    6. **„VIP-Blick“:** Schalte vor dem DJ-Tower mit `[C]`/Pad-Y kurz in die Ego-Perspektive.
+    7. **„Ballspiel-Ass“:** Triff im Hallen-Spiel *Ballspiel* mindestens 5 Skater mit dem Neon-Softball.
+    8. **„Slalom-Künstler“:** Durchfahre im Hallen-Spiel *Slalom* 10 Tore am Stück, ohne ein Hütchen umzuwerfen.
+    9. **„Stuhl-Springer“:** Überspringe im Hallen-Spiel *Stuhl- & Hindernissprung* erfolgreich eine 3er-Stuhlreihe mit `[J]`/`[Shift]`/Pad-A. *(Schaltet frei: Pro-High-Top-Skates)*
+  * Fortschritt & Belohnung:
+    - Fortschritt und freigeschaltete Upgrades werden lokal in `localStorage` gespeichert.
+    - Beim Abschluss einer Aufgabe erscheint kurz ein dezentes 80er-Retro-Banner („★ Aufgabe erfüllt – Pro-Shop Upgrade freigeschaltet! ★“) mit kleinem Sound-Jingle.
+    - Wer alle Aufgaben schafft, schaltet für seinen Skater ein kleines optionales Gold-Sternchen / Abzeichen („Echter Palladiumaner“) frei.
+
+10. HALLEN-STATISTIK & BESUCHER-ANALYSE (LOKAL & LIVE):
+- DATENERFASSUNG (REIN LOKAL OHNE COOKIES VIA `localStorage` / SESSION-TRACKING):
+  * Das Spiel protokolliert anonymisierte Nutzungs- und Hallen-Statistiken lokal im Browser (sowie optional erweiterbar für Echtzeit-Mehrspieler-Zähler):
+    - **Besucher / Spieler heute & gesamt:** Anzahl der Besuche und aktiven Skater-Sessions pro Tag (gruppiert nach Datum).
+    - **Stoßzeiten / Peak-Analyse ("Wann waren die meisten Besucher da?"):** Stündliche Verteilung der Sessions (0–23 Uhr als kompaktes 80er-Retro-Balkendiagramm), inklusive automatischer Anzeige der Top-Stoßzeit (z. B. *"Peak-Zeit: 20:00 – 21:00 Uhr"*).
+    - **Durchschnittliche Spielzeit & Verweildauer:** Wie lange im Durchschnitt pro Besuch auf der Bahn gerollt wurde (in Minuten/Sekunden) sowie persönliche Gesamtzeit und Rundenrekord.
+  * Abrufbar über einen kompakten Button `[📊 Hallen-Statistik]` (oder im Admin-Terminal unter dem Reiter *Statistik & Besucher*), inklusive Reset-Option für Admins.
+
+11. PIN-GESCHÜTZTES ADMIN-TERMINAL ("HALLENLEITER-REGIE"):
+- VERSTECKTER ZUGANG (FÜR NORMALE BESUCHER UNSICHTBAR):
+  * Im regulären HUD gibt es keine Admin-Buttons und normale Spieler können Hallen-Zustände (Bühne, Lichtmodus, Wartung) NICHT verstellen.
+  * Öffnen des Terminals: Über die Tastenkombination `Ctrl + Shift + A` (bzw. `Cmd + Shift + A` auf Mac) oder durch 3-maliges schnelles Klicken auf das Palladium-Logo öffnet sich ein Retro-Login-Fenster.
+  * Schutz: Abfrage einer konfigurierbaren Admin-PIN (im Code oben als Konstante `const ADMIN_PIN = "1986";` definiert). Nach korrekter Eingabe bleibt der Admin-Status für die Browser-Sitzung (`sessionStorage`) aktiv.
+- FUNKTIONEN IM ADMIN-TERMINAL:
+  1. **Mittel-Arena & Live-Band-Booking:** Umschalten zwischen *Normal (2 U-Inseln)*, *Live-Band-Bühne* (Auswahl von "LAMIO", "THE NOTSIGNAL BAND", "KOOL & THE SKATES", "WINDS OF FREEDOM" oder Freitext-Eingabe) und *Kino-Leinwand*.
+  2. **Hallen-Spiel / Event starten:** Direktes Ausrufen von *Freies Laufen*, *Ballspiel*, *Slalom* oder *Stuhlsprung*.
+  3. **Hallenlicht / Blacklight / Putzlicht:** Umschalten zwischen *Disco-Atmosphäre*, *Schwarzlicht (Blacklight-Special)* und *hellem Arbeits-/Putzlicht*.
+  4. **Wartungsmodus ("Hier wird gebohnert"):** Ein-/Ausschalten des Baustellen-Screens für normale Besucher (Admins sehen die Bahn weiterhin).
+  5. **Twitch-Stream Kanal & Laufschrift:** Eingabefeld für den Twitch-Channel (Standard: `Dj_Magic_Force`) sowie Textfeld für die DJ-LED-Laufschrift.
+  6. **Geister-Skater Manager:** Übersicht und schnelle Bearbeitung der `SPECIAL_SKATERS`-Liste.
+  7. **Besucher-Statistik & Reset:** Detailansicht der Tagesbesucher, Stoßzeiten und Durchschnittsspielzeit + Reset-Button.
+  8. **Intro-Reset:** Button "First-Visit-Vorhang für Test zurücksetzen".
+
+12. LICHT, ZENTRALE SPIEGELKUGEL, BLACKLIGHT (SCHWARZLICHT), CREDITS & HUD:
+- ZENTRALE SPIEGELKUGEL & WAND-REFLEXE (ÜBER DEN U-INSELN):
+  * Genau mittig über den beiden U-Inseln (bzw. der zusammengeschobenen Mittelbühne) hängt eine langsam rotierende 80er-Spiegelkugel (leicht transparent/dezenter Decken-Layer, damit das Gameplay darunter klar sichtbar bleibt).
+  * Zwei Scheinwerfer-Spots strahlen die Kugel an, wodurch hunderte kleine, leuchtende Lichtpunkte (Spiegelreflexe) radial nach außen wandern und authentisch über das Parkett sowie entlang der Hallenwände, Banden und Spiegelwand gleiten.
+  * Dazu kreisen 3 bis 4 weiche, farbige Scheinwerferkegel dezent über der Bahn.
+- BLACKLIGHT / SCHWARZLICHT-MODUS (80ER-UV-ATMOSPHÄRE):
+  * Im Blacklight-Modus (über das Admin-Terminal oder als DJ-Lichteffekt aktivierbar) tauchen UV-Röhren an den Banden und über der Bahn die Halle in ein tiefes, atmosphärisches Schwarzlicht-Violett/Indigo (`#14082e` / UV-Glow).
+  * Alle weißen und neongelben/-pinken/-cyanfarbenen Details (weiße T-Shirts, Schnürsenkel, Socken, Neon-Streifen auf der Kleidung, die Pro-Shop-Rollenbeleuchtung, Slush-Becher und die Neon-Schriftzüge) beginnen intensiv UV-fluoreszierend zu leuchten, während die Spiegelkugel-Reflexe in kaltem UV-Blau/Violett/Pink über das Parkett wandern.
+  * Im Putzlicht-Modus (über das Admin-Terminal schaltbar) schalten sich alle Spots, Blacklight und Spiegelkugel-Reflexe sofort ab, und die Halle wird hell ausgeleuchtet.
+- HUD & ENTWICKLER-CREDIT:
+  * Schlankes Retro-HUD über die volle Bildschirmbreite mit Checkbox [X] "Namen anzeigen" (große, lesbare Retro-Schrift auf dunklem Kontrast-Badge), Button `[📜 Historie & Hilfe]`, Button `[🏆 Aufgaben]`, Button `[🎮 Hallen-Spiele]`, Button `[📊 Statistik]`, Controller-Statusanzeige (`[🎮 Pad aktiv]`), Runden-, Tempo- und Fehlerzähler sowie Tastenlegende für Besucher.
+  * Dezenter Retro-Credit im HUD/Startscreen (ohne Spenden-Buttons oder externe Tracker).
+
+13. TECHNISCHE LIEFERUNG:
+- Bitte liefere den vollständigen, direkt lauffähigen Code (z. B. src/App.jsx / zugehörige Dateien), damit das Projekt ohne Platzhalter direkt im lokalen Repository ersetzt und via GitHub Desktop gepusht werden kann.

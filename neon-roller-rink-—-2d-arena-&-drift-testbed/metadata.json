@@ -1,0 +1,6 @@
+{
+  "name": "Neon Roller Rink — 2D Arena & Drift Testbed",
+  "description": "Modulares 2D-Grundgerüst für ein Top-Down-Rollschuh-Spiel in Phaser.js 3 mit 1600x1000 Hallenlayout, U-Inseln, Funktionszonen und Trägheits-/Drift-Physik.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
