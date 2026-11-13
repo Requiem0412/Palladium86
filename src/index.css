@@ -22,4 +22,10 @@
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+
+  .pixel-crisp-canvas {
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+  }
 }

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ADMIN_PIN,
+  APP_VERSION_LABEL,
   ArenaVisualStyle,
   BandGenderMode,
   BandSkinToneMode,
@@ -9,18 +10,26 @@ import {
   ChallengeDefinition,
   ChallengeId,
   ConcertLightingMode,
+  CrewNamesConfig,
+  DEFAULT_80S_RADIO_PLAYLIST,
+  DEFAULT_CREW_NAMES,
+  DEFAULT_DJ_JINGLE_SLOTS,
   DEFAULT_DJ_NAME,
   DEFAULT_DJ_TICKER,
   DEFAULT_SPECIAL_SKATERS,
   DEFAULT_TWITCH_CHANNEL,
+  DjJingleSlot,
   GuestDjPreset,
   HallGameMode,
   LightingMode,
+  NeonUnderglowColor,
+  NeonWristbandColor,
   PALLADIUM_CHALLENGES,
   PARODY_BANDS,
   PlayerCharacterMode,
   ProShopUpgradesState,
-  NeonUnderglowColor,
+  RadioTrackItem,
+  TrickMoveId,
 } from './config/arenaConfig';
 import Peer, { DataConnection } from 'peerjs';
 import {
@@ -34,6 +43,7 @@ import {
   ChallengeProgressMap,
   computePeakHourLabel,
   EntryPassData,
+  FreeDrinkChoice,
   HallStatsData,
   loadAdminSettings,
   loadAdminUnlockedSession,
@@ -45,7 +55,9 @@ import {
   loadHideChronik,
   loadPlayerProfile,
   loadProShopUpgrades,
+  loadRadioPlaylist,
   loadSpecialSkaters,
+  loadVisitorVolume,
   recordSessionVisit,
   resetEntryPass,
   resetHallStats,
@@ -59,7 +71,9 @@ import {
   saveHideChronik,
   savePlayerProfile,
   saveProShopUpgrades,
+  saveRadioPlaylist,
   saveSpecialSkaters,
+  saveVisitorVolume,
   SingleplayerDifficulty,
 } from './utils/storageAndStats';
 
@@ -86,7 +100,18 @@ interface AdminSyncPayload {
   activeDjName: string;
   djTickerText: string;
   twitchChannel: string;
+  youtubeUrl?: string;
+  cinemaStreamSource?: 'twitch' | 'youtube' | 'visualizer';
+  cinemaCountdownEnabled?: boolean;
+  cinemaCountdownTitle?: string;
+  cinemaCountdownTargetIso?: string;
+  cinemaWeekdays?: string[];
+  cinemaStartTime?: string;
+  fullHallPutzlichtEnabled?: boolean;
+  pixel16BitFiguresEnabled?: boolean;
+  crewNames?: CrewNamesConfig;
   isMaintenanceMode: boolean;
+  maintenanceReopenText: string;
   liveArenaStyle: ArenaVisualStyle;
 }
 
@@ -94,6 +119,19 @@ type MultiplayerPacket =
   | {
       type: 'guest-hello';
       state: MultiplayerPlayerState;
+      freeDrinkChoice?: FreeDrinkChoice;
+    }
+  | {
+      type: 'join-accepted';
+      welcomeAnnouncement?: string;
+    }
+  | {
+      type: 'join-rejected';
+      reason: string;
+    }
+  | {
+      type: 'hall-radio';
+      message: string;
     }
   | {
       type: 'player-state';
@@ -120,7 +158,7 @@ export function App() {
   const [hideChronik, setHideChronik] = useState<boolean>(() =>
     loadHideChronik()
   );
-  const [hasEnteredBefore, setHasEnteredBefore] = useState<boolean>(() =>
+  const [, setHasEnteredBefore] = useState<boolean>(() =>
     loadHasEnteredBefore()
   );
   const [isCurtainOpen, setIsCurtainOpen] = useState<boolean>(
@@ -130,13 +168,16 @@ export function App() {
     () => !loadHasEnteredBefore() && !loadHideChronik()
   );
 
-  // Player Profile & Cashier Guest Mode
+  // Player Profile & Cashier Guest Mode (starts empty without pre-filled "Speedy 86")
   const initialProfile = useMemo(() => loadPlayerProfile(), []);
   const [playerName, setPlayerName] = useState<string>(initialProfile.name);
   const [isAnonymousGuest, setIsAnonymousGuest] = useState<boolean>(
     initialProfile.isAnonymousGuest
   );
   const [showNames, setShowNames] = useState<boolean>(true);
+  const [freeDrinkChoice, setFreeDrinkChoice] =
+    useState<FreeDrinkChoice>('combo');
+  const [hallRadioBanner, setHallRadioBanner] = useState<string | null>(null);
 
   // Core Gameplay Modes
   const [characterMode, setCharacterMode] =
@@ -169,7 +210,36 @@ export function App() {
   const [drinkChipAvailable, setDrinkChipAvailable] = useState<boolean>(
     initialEntryPass ? initialEntryPass.drinkChipAvailable : true
   );
+
+  // Public Visitor Volume & Mute Control
+  const [visitorVolume, setVisitorVolume] = useState<number>(() => {
+    const v = loadVisitorVolume();
+    soundFX.setVolume(v);
+    return v;
+  });
   const [isMuted, setIsMuted] = useState<boolean>(false);
+
+  // 80s Webradio & Mix-Manager State
+  const [radioPlaylist, setRadioPlaylist] = useState<RadioTrackItem[]>(() =>
+    loadRadioPlaylist()
+  );
+  const [currentTrackIdx, setCurrentTrackIdx] = useState<number>(0);
+  const [isRadioPlaying, setIsRadioPlaying] = useState<boolean>(false);
+  const [radioStreamStatus, setRadioStreamStatus] = useState<
+    'stopped' | 'streaming' | 'synth-fallback'
+  >('stopped');
+  const [radioShuffle, setRadioShuffle] = useState<boolean>(false);
+  const [radioRepeat, setRadioRepeat] = useState<boolean>(true);
+  const [newTrackTitle, setNewTrackTitle] = useState<string>('');
+  const [newTrackUrl, setNewTrackUrl] = useState<string>('');
+  const [newTrackStyle, setNewTrackStyle] =
+    useState<RadioTrackItem['synthStyle']>('electro-boogie');
+
+  // External Trick Trigger for HUD Clickable Move Badges
+  const [externalTrickTrigger, setExternalTrickTrigger] = useState<{
+    move: TrickMoveId;
+    seq: number;
+  } | null>(null);
 
   // Admin & Persistent Settings
   const initialAdminSettings = useMemo(() => loadAdminSettings(), []);
@@ -198,11 +268,21 @@ export function App() {
     null
   );
 
+  // DJ-Jingle & Sprachmemo-Pult State (No speechSynthesis!)
+  const [externalDjJingleBubble, setExternalDjJingleBubble] = useState<{
+    text: string;
+    seq: number;
+  } | null>(null);
+  const [activeJingleSlotId, setActiveJingleSlotId] = useState<string | null>(
+    null
+  );
+  const [editingJingleSlotId, setEditingJingleSlotId] = useState<string | null>(
+    null
+  );
+
   // Lighting & Schedule Automation States
   const [blacklightTimerSec, setBlacklightTimerSec] = useState<number>(0);
   const preBlacklightModeRef = useRef<LightingMode>('disco');
-  const preBallspielModeRef = useRef<LightingMode>('disco');
-  const wasBallspielRef = useRef<boolean>(false);
   const wasCinemaScheduledRef = useRef<boolean>(false);
 
   // URL parameter bypass for Maintenance mode (?access=palladium) & Multiplayer Room (?room=<RAUM_ID>)
@@ -248,11 +328,11 @@ export function App() {
   const [showGuestJoinModal, setShowGuestJoinModal] = useState<boolean>(() =>
     Boolean(initialUrlRoomId)
   );
-  const [guestJoinNameInput, setGuestJoinNameInput] = useState<string>(() =>
-    initialProfile.name && initialProfile.name !== 'Gast'
-      ? initialProfile.name
-      : ''
-  );
+  // Start name field completely empty (no pre-filled "Speedy 86")
+  const [guestJoinNameInput, setGuestJoinNameInput] = useState<string>('');
+  const [guestJoinError, setGuestJoinError] = useState<string | null>(null);
+  const [guestFreeDrinkChoice, setGuestFreeDrinkChoice] =
+    useState<FreeDrinkChoice>('combo');
 
   const peerInstanceRef = useRef<Peer | null>(null);
   const hostConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
@@ -260,6 +340,11 @@ export function App() {
     new Map()
   );
   const guestConnRef = useRef<DataConnection | null>(null);
+  const playerNameRef = useRef<string>(playerName);
+  useEffect(() => {
+    playerNameRef.current = playerName;
+  }, [playerName]);
+
   const localSkaterSnapshotRef = useRef<MultiplayerPlayerState>({
     peerId: 'local',
     name: playerName || 'Skater',
@@ -277,6 +362,8 @@ export function App() {
     kengolHat: false,
     crashTimer: 0,
     speechBubble: null,
+    activeTrickMove: null,
+    wristbandColor: undefined,
   });
 
   const isMultiplayerActive = mpRole === 'host' || mpRole === 'guest';
@@ -295,21 +382,17 @@ export function App() {
     useState<boolean>(false);
   const [showProShopModal, setShowProShopModal] = useState<boolean>(false);
   const [showHallGamesModal, setShowHallGamesModal] = useState<boolean>(false);
-  const [showStatsModal, setShowStatsModal] = useState<boolean>(false);
-  const [showTwitchWidget, setShowTwitchWidget] = useState<boolean>(false);
   const [isTwitchOnline, setIsTwitchOnline] = useState<boolean>(false);
-  const [isCinemaScheduleActive, setIsCinemaScheduleActive] =
-    useState<boolean>(false);
+  const [, setIsCinemaScheduleActive] = useState<boolean>(false);
   const [twitchMuted, setTwitchMuted] = useState<boolean>(false);
   const [fogBurstCount, setFogBurstCount] = useState<number>(0);
   const [isBottomBarCollapsed, setIsBottomBarCollapsed] =
     useState<boolean>(false);
 
-  // Hall Statistics
+  // Hall Statistics (localStorage)
   const [hallStats, setHallStats] = useState<HallStatsData>(() =>
     recordSessionVisit()
   );
-  const [sessionSeconds, setSessionSeconds] = useState<number>(0);
 
   // Live Telemetry from Canvas Engine
   const [telemetry, setTelemetry] = useState<ArenaLiveTelemetry>({
@@ -335,8 +418,41 @@ export function App() {
     gamepadName: '',
     activeSpeech: null,
     ballspielScore: 0,
+    ballspielRemaining: 15,
+    ballspielTotal: 15,
     slalomCombo: 0,
   });
+
+  // Clean Audio Autoplay Unlock on First User Interaction
+  useEffect(() => {
+    const unlock = () => {
+      soundFX.unlockAudioContext();
+    };
+    window.addEventListener('pointerdown', unlock, { passive: true });
+    window.addEventListener('keydown', unlock, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
+
+  // Subscribe to Webradio / Mix-Player status updates
+  useEffect(() => {
+    const syncRadio = () => {
+      const st = soundFX.getRadioState();
+      setIsRadioPlaying(st.isPlaying);
+      setRadioStreamStatus(st.streamStatus);
+    };
+    syncRadio();
+    return soundFX.onStatusChange(syncRadio);
+  }, []);
+
+  const showHallAnnouncement = useCallback((msg: string) => {
+    setHallRadioBanner(msg);
+    window.setTimeout(() => {
+      setHallRadioBanner((curr) => (curr === msg ? null : curr));
+    }, 6000);
+  }, []);
 
   // Save profile whenever changed
   useEffect(() => {
@@ -353,21 +469,10 @@ export function App() {
     saveAdminSettings(adminSettings);
   }, [adminSettings]);
 
-  // Automatic coupling: Ballspiel <-> Putzlicht (bright hall lighting during Ballspiel)
+  // Save radio playlist whenever changed
   useEffect(() => {
-    if (hallGameMode === 'ballspiel' && !wasBallspielRef.current) {
-      wasBallspielRef.current = true;
-      setLightingMode((currentLight) => {
-        if (currentLight !== 'putzlicht') {
-          preBallspielModeRef.current = currentLight;
-        }
-        return 'putzlicht';
-      });
-    } else if (hallGameMode !== 'ballspiel' && wasBallspielRef.current) {
-      wasBallspielRef.current = false;
-      setLightingMode(preBallspielModeRef.current || 'disco');
-    }
-  }, [hallGameMode]);
+    saveRadioPlaylist(radioPlaylist);
+  }, [radioPlaylist]);
 
   // 15-Minute Blacklight UV Countdown Timer
   const handleStart15MinBlacklight = useCallback(() => {
@@ -385,18 +490,14 @@ export function App() {
     const timer = window.setInterval(() => {
       setBlacklightTimerSec((prev) => {
         if (prev <= 1) {
-          setLightingMode(
-            hallGameMode === 'ballspiel'
-              ? 'putzlicht'
-              : preBlacklightModeRef.current || 'disco'
-          );
+          setLightingMode(preBlacklightModeRef.current || 'disco');
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [blacklightTimerSec, hallGameMode]);
+  }, [blacklightTimerSec]);
 
   // Auto-Blacklight-Timer (15 Min.): automatically starts a 15-min Blacklight session when enabled
   useEffect(() => {
@@ -414,8 +515,7 @@ export function App() {
     handleStart15MinBlacklight,
   ]);
 
-  // Check whether the configured Twitch channel is actually LIVE / online
-  // Keeps the top-right Twitch dock and center Cinema screen hidden when offline so the white "offline" screen never blocks the playfield!
+  // Check whether the configured Twitch channel is LIVE / online
   useEffect(() => {
     const channel = (adminSettings.twitchChannel || '').trim();
     if (!channel) {
@@ -453,7 +553,7 @@ export function App() {
     };
   }, [adminSettings.twitchChannel]);
 
-  // Automatic Kino-Zeitplan (Weekday + Start/End Time -> switches to 'cinema' and back to 'islands')
+  // Automatic Kino-Zeitplan (Multi-Weekdays Mo-So + Start/End Time -> switches to 'cinema' and back to 'islands')
   useEffect(() => {
     if (!adminSettings.cinemaScheduleEnabled) {
       setIsCinemaScheduleActive(false);
@@ -466,19 +566,14 @@ export function App() {
 
     const checkSchedule = () => {
       const now = new Date();
-      const dayNames = [
-        'Sonntag',
-        'Montag',
-        'Dienstag',
-        'Mittwoch',
-        'Donnerstag',
-        'Freitag',
-        'Samstag',
-      ];
-      const todayName = dayNames[now.getDay()];
-      const dayMatches =
-        adminSettings.cinemaWeekday === 'Täglich' ||
-        adminSettings.cinemaWeekday === todayName;
+      const shortDays = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+      const todayShort = shortDays[now.getDay()];
+      const activeWeekdays =
+        Array.isArray(adminSettings.cinemaWeekdays) &&
+        adminSettings.cinemaWeekdays.length > 0
+          ? adminSettings.cinemaWeekdays
+          : ['Mi', 'Sa'];
+      const dayMatches = activeWeekdays.includes(todayShort);
 
       const [startH, startM] = (adminSettings.cinemaStartTime || '20:00')
         .split(':')
@@ -515,16 +610,39 @@ export function App() {
     return () => window.clearInterval(interval);
   }, [
     adminSettings.cinemaScheduleEnabled,
-    adminSettings.cinemaWeekday,
+    adminSettings.cinemaWeekdays,
     adminSettings.cinemaStartTime,
     adminSettings.cinemaEndTime,
+  ]);
+
+  // Automatic Audio-Ducking (0% Hall Radio) whenever a live Twitch or YouTube stream is playing with sound on the Cinema Screen
+  useEffect(() => {
+    const src = adminSettings.cinemaStreamSource || 'twitch';
+    const hasYoutube = Boolean((adminSettings.youtubeUrl || '').trim());
+    const isStreamActiveOnCinema =
+      centerStageMode === 'cinema' &&
+      !adminSettings.cinemaCountdownEnabled &&
+      !twitchMuted &&
+      ((src === 'twitch' && isTwitchOnline) ||
+        (src === 'youtube' && hasYoutube));
+
+    soundFX.setCinemaStreamActiveWithAudio(isStreamActiveOnCinema);
+    return () => {
+      soundFX.setCinemaStreamActiveWithAudio(false);
+    };
+  }, [
+    centerStageMode,
+    adminSettings.cinemaStreamSource,
+    adminSettings.youtubeUrl,
+    adminSettings.cinemaCountdownEnabled,
+    twitchMuted,
+    isTwitchOnline,
   ]);
 
   // Increment session play time & persist to Hall Stats every 5 seconds
   useEffect(() => {
     if (!isCurtainOpen) return;
     const interval = window.setInterval(() => {
-      setSessionSeconds((prev) => prev + 5);
       setHallStats((prev) => {
         const updated: HallStatsData = {
           ...prev,
@@ -538,8 +656,64 @@ export function App() {
     return () => window.clearInterval(interval);
   }, [isCurtainOpen, telemetry.laps]);
 
+  const canEnterSingleplayerHall =
+    isAnonymousGuest || playerName.trim().length >= 2;
+
+  const handleEnterHall = useCallback(() => {
+    if (!isAnonymousGuest && playerName.trim().length < 2) {
+      return;
+    }
+    soundFX.unlockAudioContext();
+    soundFX.playCurtainReveal();
+    saveHasEnteredBefore(true);
+    setHasEnteredBefore(true);
+    setIsCurtainOpen(true);
+    setShowChronicleModal(false);
+
+    const drinkLabel =
+      freeDrinkChoice === 'slush'
+        ? '1x Slush Puppy'
+        : freeDrinkChoice === 'bloba'
+        ? '1x Bloba Cola'
+        : '1x Slush Puppy & 1x Bloba Cola';
+    const displayName = isAnonymousGuest
+      ? 'Ein Gast-Skater'
+      : playerName.trim();
+    showHallAnnouncement(
+      `📻 Hallenfunk: ${displayName} hat die Halle betreten (Freigetränk: ${drinkLabel})!`
+    );
+
+    // Lock Singleplayer Entry Stamp (palladium_entry_pass) for this visit if not already locked
+    setEntryPass((prev) => {
+      if (prev?.locked) return prev;
+      const lockedPass: EntryPassData = {
+        locked: true,
+        difficulty,
+        hasOwnSkates,
+        hasRentedSkates: false,
+        drinkChipAvailable: true,
+        freeDrinkChoice,
+        stampedAt: new Date().toISOString(),
+      };
+      saveEntryPass(lockedPass);
+      setHasRentedSkates(false);
+      setDrinkChipAvailable(true);
+      return lockedPass;
+    });
+
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  }, [
+    difficulty,
+    freeDrinkChoice,
+    hasOwnSkates,
+    isAnonymousGuest,
+    playerName,
+    showHallAnnouncement,
+  ]);
+
   // Global keyboard shortcut for Admin Terminal: Ctrl + Shift + A (or Cmd + Shift + A)
-  // Also Enter / Space to open the First-Visit Curtain when visible
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
@@ -564,7 +738,11 @@ export function App() {
         return;
       }
 
-      if (!isCurtainOpen && (e.key === 'Enter' || e.key === ' ')) {
+      if (
+        !isCurtainOpen &&
+        (e.key === 'Enter' || e.key === ' ') &&
+        canEnterSingleplayerHall
+      ) {
         if (!isInput) {
           e.preventDefault();
           handleEnterHall();
@@ -573,36 +751,12 @@ export function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isAdminUnlocked, isCurtainOpen]);
-
-  const handleEnterHall = useCallback(() => {
-    soundFX.playCurtainReveal();
-    saveHasEnteredBefore(true);
-    setHasEnteredBefore(true);
-    setIsCurtainOpen(true);
-    setShowChronicleModal(false);
-
-    // Lock Singleplayer Entry Stamp (palladium_entry_pass) for this visit if not already locked
-    setEntryPass((prev) => {
-      if (prev?.locked) return prev;
-      const lockedPass: EntryPassData = {
-        locked: true,
-        difficulty,
-        hasOwnSkates,
-        hasRentedSkates: false,
-        drinkChipAvailable: true,
-        stampedAt: new Date().toISOString(),
-      };
-      saveEntryPass(lockedPass);
-      setHasRentedSkates(false);
-      setDrinkChipAvailable(true);
-      return lockedPass;
-    });
-
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
-  }, [difficulty, hasOwnSkates]);
+  }, [
+    canEnterSingleplayerHall,
+    handleEnterHall,
+    isAdminUnlocked,
+    isCurtainOpen,
+  ]);
 
   const handleRedeemDrinkChipAtRental = useCallback(() => {
     setHasRentedSkates(true);
@@ -670,7 +824,7 @@ export function App() {
       setShowAdminTerminal(true);
       setPinError(null);
     } else {
-      setPinError('Falsche Hallenleiter-PIN! (Tipp: Eröffnungsjahr 1986)');
+      setPinError('Falsche Hallenleiter-PIN! Bitte erneut versuchen.');
     }
   };
 
@@ -701,8 +855,49 @@ export function App() {
     setKengolHatEnabled((prev) => !prev);
   }, []);
 
+  const handleTriggerTrickFromHud = useCallback((moveId: TrickMoveId) => {
+    setExternalTrickTrigger((prev) => ({
+      move: moveId,
+      seq: (prev?.seq || 0) + 1,
+    }));
+  }, []);
+
   // ============================================================================
-  // PEERJS MULTIPLAYER HANDLERS (OPEN ROOM, JOIN ROOM, KICK, CLOSE & ADMIN SYNC)
+  // 80s WEBRADIO / MIX-MANAGER HANDLERS
+  // ============================================================================
+  const handlePlayTrackAtIndex = useCallback(
+    (idx: number) => {
+      if (radioPlaylist.length === 0) return;
+      const safeIdx =
+        ((idx % radioPlaylist.length) + radioPlaylist.length) %
+        radioPlaylist.length;
+      setCurrentTrackIdx(safeIdx);
+      soundFX.unlockAudioContext();
+      soundFX.startRadioTrack(radioPlaylist[safeIdx]);
+    },
+    [radioPlaylist]
+  );
+
+  const handleNextTrack = useCallback(() => {
+    if (radioPlaylist.length === 0) return;
+    if (radioShuffle && radioPlaylist.length > 1) {
+      let nextIdx = currentTrackIdx;
+      while (nextIdx === currentTrackIdx) {
+        nextIdx = Math.floor(Math.random() * radioPlaylist.length);
+      }
+      handlePlayTrackAtIndex(nextIdx);
+    } else {
+      handlePlayTrackAtIndex(currentTrackIdx + 1);
+    }
+  }, [currentTrackIdx, handlePlayTrackAtIndex, radioPlaylist.length, radioShuffle]);
+
+  const handlePrevTrack = useCallback(() => {
+    if (radioPlaylist.length === 0) return;
+    handlePlayTrackAtIndex(currentTrackIdx - 1);
+  }, [currentTrackIdx, handlePlayTrackAtIndex, radioPlaylist.length]);
+
+  // ============================================================================
+  // MULTI-MONITOR BROADCASTCHANNEL & PEERJS MULTIPLAYER HANDLERS
   // ============================================================================
 
   const buildCurrentAdminSyncPayload = useCallback((): AdminSyncPayload => {
@@ -720,7 +915,19 @@ export function App() {
       activeDjName: adminSettings.activeDjName || DEFAULT_DJ_NAME,
       djTickerText: adminSettings.djTickerText,
       twitchChannel: adminSettings.twitchChannel,
+      youtubeUrl: adminSettings.youtubeUrl,
+      cinemaStreamSource: adminSettings.cinemaStreamSource,
+      cinemaCountdownEnabled: adminSettings.cinemaCountdownEnabled,
+      cinemaCountdownTitle: adminSettings.cinemaCountdownTitle,
+      cinemaCountdownTargetIso: adminSettings.cinemaCountdownTargetIso,
+      cinemaWeekdays: adminSettings.cinemaWeekdays,
+      cinemaStartTime: adminSettings.cinemaStartTime,
+      fullHallPutzlichtEnabled: adminSettings.fullHallPutzlichtEnabled,
+      pixel16BitFiguresEnabled: adminSettings.pixel16BitFiguresEnabled,
+      crewNames: adminSettings.crewNames,
       isMaintenanceMode: adminSettings.isMaintenanceMode,
+      maintenanceReopenText:
+        adminSettings.maintenanceReopenText || '🚀 ALPHA STARTING SOON',
       liveArenaStyle: adminSettings.liveArenaStyle || 'classic-neon',
     };
   }, [
@@ -737,9 +944,60 @@ export function App() {
     adminSettings.activeDjName,
     adminSettings.djTickerText,
     adminSettings.twitchChannel,
+    adminSettings.youtubeUrl,
+    adminSettings.cinemaStreamSource,
+    adminSettings.cinemaCountdownEnabled,
+    adminSettings.cinemaCountdownTitle,
+    adminSettings.cinemaCountdownTargetIso,
+    adminSettings.cinemaWeekdays,
+    adminSettings.cinemaStartTime,
+    adminSettings.fullHallPutzlichtEnabled,
+    adminSettings.pixel16BitFiguresEnabled,
+    adminSettings.crewNames,
     adminSettings.isMaintenanceMode,
+    adminSettings.maintenanceReopenText,
     adminSettings.liveArenaStyle,
   ]);
+
+  const applyIncomingAdminSync = useCallback((s: AdminSyncPayload) => {
+    setLightingMode(s.lightingMode);
+    setCenterStageMode(
+      (s.centerStageMode as string) === 'live-band' ? 'band' : s.centerStageMode
+    );
+    setActiveBandName(s.activeBandName);
+    setCustomBandInput(s.customBandInput);
+    setBandSkinTone(s.bandSkinTone);
+    setBandGender(s.bandGender);
+    setHallGameMode(s.hallGameMode);
+    setFogBurstCount(s.fogBurstCount);
+    setAdminPreviewStyle(null);
+    setAdminSettings((prev) => ({
+      ...prev,
+      concertLightingMode: s.concertLightingMode,
+      fogMachineEnabled: s.fogMachineEnabled,
+      activeDjName: s.activeDjName,
+      djTickerText: s.djTickerText,
+      twitchChannel: s.twitchChannel,
+      youtubeUrl: s.youtubeUrl ?? prev.youtubeUrl,
+      cinemaStreamSource: s.cinemaStreamSource ?? prev.cinemaStreamSource,
+      cinemaCountdownEnabled:
+        s.cinemaCountdownEnabled ?? prev.cinemaCountdownEnabled,
+      cinemaCountdownTitle: s.cinemaCountdownTitle ?? prev.cinemaCountdownTitle,
+      cinemaCountdownTargetIso:
+        s.cinemaCountdownTargetIso ?? prev.cinemaCountdownTargetIso,
+      cinemaWeekdays: s.cinemaWeekdays ?? prev.cinemaWeekdays,
+      cinemaStartTime: s.cinemaStartTime ?? prev.cinemaStartTime,
+      fullHallPutzlichtEnabled:
+        s.fullHallPutzlichtEnabled ?? prev.fullHallPutzlichtEnabled,
+      pixel16BitFiguresEnabled:
+        s.pixel16BitFiguresEnabled ?? prev.pixel16BitFiguresEnabled,
+      crewNames: s.crewNames ?? prev.crewNames,
+      isMaintenanceMode: s.isMaintenanceMode,
+      maintenanceReopenText:
+        s.maintenanceReopenText || prev.maintenanceReopenText,
+      liveArenaStyle: s.liveArenaStyle,
+    }));
+  }, []);
 
   const adminSyncPayloadRef = useRef<AdminSyncPayload>(
     buildCurrentAdminSyncPayload()
@@ -748,12 +1006,49 @@ export function App() {
     adminSyncPayloadRef.current = buildCurrentAdminSyncPayload();
   }, [buildCurrentAdminSyncPayload]);
 
-  // Broadcast Hallenleiter-Sync from Host to all connected Guests whenever any Admin setting changes!
+  // Multi-Window / Dual-Screen BroadcastChannel Sync
+  const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
+  const isApplyingBroadcastRef = useRef<boolean>(false);
+
   useEffect(() => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) {
+      return;
+    }
+    const ch = new BroadcastChannel('palladium_hanau_sync_v1');
+    broadcastChannelRef.current = ch;
+    ch.onmessage = (ev) => {
+      const data = ev.data;
+      if (data && data.type === 'admin-sync' && data.payload) {
+        isApplyingBroadcastRef.current = true;
+        applyIncomingAdminSync(data.payload as AdminSyncPayload);
+        window.setTimeout(() => {
+          isApplyingBroadcastRef.current = false;
+        }, 40);
+      }
+    };
+    return () => {
+      ch.close();
+      broadcastChannelRef.current = null;
+    };
+  }, [applyIncomingAdminSync]);
+
+  // Broadcast Hallenleiter-Sync to other tabs (BroadcastChannel) & connected PeerJS Guests
+  useEffect(() => {
+    const payload = buildCurrentAdminSyncPayload();
+    if (!isApplyingBroadcastRef.current && broadcastChannelRef.current) {
+      try {
+        broadcastChannelRef.current.postMessage({
+          type: 'admin-sync',
+          payload,
+        });
+      } catch {
+        // ignore
+      }
+    }
     if (mpRole !== 'host') return;
     const pkt: MultiplayerPacket = {
       type: 'admin-sync',
-      payload: buildCurrentAdminSyncPayload(),
+      payload,
     };
     hostConnectionsRef.current.forEach((conn) => {
       if (conn.open) {
@@ -824,38 +1119,114 @@ export function App() {
       });
 
       peer.on('connection', (conn) => {
-        hostConnectionsRef.current.set(conn.peer, conn);
-
-        conn.on('open', () => {
-          // Immediately send current Hallenleiter-Sync state & world players to the joining guest
-          try {
-            const syncPkt: MultiplayerPacket = {
-              type: 'admin-sync',
-              payload: adminSyncPayloadRef.current,
-            };
-            conn.send(syncPkt);
-
-            const allPlayers: MultiplayerPlayerState[] = [
-              {
-                ...localSkaterSnapshotRef.current,
-                peerId: peer.id || targetId,
-              },
-              ...Array.from(hostGuestsStateRef.current.values()),
-            ];
-            const worldPkt: MultiplayerPacket = {
-              type: 'world-players',
-              players: allPlayers,
-            };
-            conn.send(worldPkt);
-          } catch {
-            // ignore
-          }
-        });
-
         conn.on('data', (raw) => {
           const pkt = raw as MultiplayerPacket;
           if (!pkt || typeof pkt !== 'object') return;
-          if (pkt.type === 'guest-hello' || pkt.type === 'player-state') {
+
+          if (pkt.type === 'guest-hello') {
+            const requestedName = (pkt.state.name || '').trim();
+            const requestedNorm = requestedName.toLowerCase();
+            const hostNameNorm = (
+              playerNameRef.current ||
+              localSkaterSnapshotRef.current.name ||
+              'Host'
+            )
+              .trim()
+              .toLowerCase();
+
+            // Check duplicate name against Host and all other connected guests
+            let isDuplicate =
+              requestedNorm.length < 2 || requestedNorm === hostNameNorm;
+            if (!isDuplicate) {
+              hostGuestsStateRef.current.forEach((existingGuest, peerKey) => {
+                if (
+                  peerKey !== conn.peer &&
+                  (existingGuest.name || '').trim().toLowerCase() ===
+                    requestedNorm
+                ) {
+                  isDuplicate = true;
+                }
+              });
+            }
+
+            if (isDuplicate) {
+              const rejectPkt: MultiplayerPacket = {
+                type: 'join-rejected',
+                reason:
+                  'Dieser Skater-Name ist in der Halle bereits vergeben – bitte wähle einen anderen!',
+              };
+              try {
+                conn.send(rejectPkt);
+              } catch {
+                // ignore
+              }
+              return;
+            }
+
+            // Accept Guest Join!
+            const isNewPeer = !hostGuestsStateRef.current.has(conn.peer);
+            hostConnectionsRef.current.set(conn.peer, conn);
+            const updatedGuest: MultiplayerPlayerState = {
+              ...pkt.state,
+              name: requestedName,
+              peerId: conn.peer,
+            };
+            hostGuestsStateRef.current.set(conn.peer, updatedGuest);
+            setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
+            if (isNewPeer) {
+              setHallStats(recordSessionVisit());
+            }
+
+            const drinkText =
+              pkt.freeDrinkChoice === 'slush'
+                ? 'Slush Puppy'
+                : pkt.freeDrinkChoice === 'bloba'
+                ? 'Bloba Cola'
+                : 'Slush Puppy & Bloba Cola';
+            const radioMsg = `📻 Hallenfunk: ${requestedName} hat die Halle betreten (Freigetränk: ${drinkText})!`;
+            showHallAnnouncement(radioMsg);
+
+            try {
+              conn.send({
+                type: 'join-accepted',
+                welcomeAnnouncement: radioMsg,
+              } as MultiplayerPacket);
+              conn.send({
+                type: 'admin-sync',
+                payload: adminSyncPayloadRef.current,
+              } as MultiplayerPacket);
+
+              const allPlayers: MultiplayerPlayerState[] = [
+                {
+                  ...localSkaterSnapshotRef.current,
+                  peerId: peer.id || targetId,
+                },
+                ...Array.from(hostGuestsStateRef.current.values()),
+              ];
+              const worldPkt: MultiplayerPacket = {
+                type: 'world-players',
+                players: allPlayers,
+              };
+              hostConnectionsRef.current.forEach((c) => {
+                if (c.open) {
+                  try {
+                    c.send(worldPkt);
+                    if (c.peer !== conn.peer) {
+                      c.send({
+                        type: 'hall-radio',
+                        message: radioMsg,
+                      } as MultiplayerPacket);
+                    }
+                  } catch {
+                    // ignore
+                  }
+                }
+              });
+            } catch {
+              // ignore
+            }
+          } else if (pkt.type === 'player-state') {
+            if (!hostConnectionsRef.current.has(conn.peer)) return;
             const updatedGuest: MultiplayerPlayerState = {
               ...pkt.state,
               peerId: conn.peer,
@@ -886,7 +1257,7 @@ export function App() {
         setMpNotice('Verbindungsfehler beim Erstellen des Multiplayer-Raums.');
       });
     },
-    [cleanupPeerSession]
+    [cleanupPeerSession, showHallAnnouncement]
   );
 
   const handleCloseHostRoom = useCallback(() => {
@@ -935,18 +1306,23 @@ export function App() {
   }, []);
 
   const handleConnectAsGuest = useCallback(
-    (roomIdToJoin: string, chosenName: string, chosenColor: string) => {
+    (
+      roomIdToJoin: string,
+      chosenName: string,
+      chosenColor: string,
+      chosenDrink: FreeDrinkChoice
+    ) => {
+      const cleanName = chosenName.trim();
+      if (cleanName.length < 2) {
+        setGuestJoinError(
+          'Bitte gib mindestens 2 Zeichen für deinen Skater-Namen ein!'
+        );
+        return;
+      }
+      setGuestJoinError(null);
       cleanupPeerSession();
-      const cleanName = chosenName.trim() || 'Gast-Skater';
-      setPlayerName(cleanName);
-      setIsAnonymousGuest(false);
-      setPlayerShirtColor(chosenColor);
-      setHasOwnSkates(true);
-      setIsCurtainOpen(true);
-      setShowChronicleModal(false);
-      setShowGuestJoinModal(false);
       setMpStatus('connecting');
-      setMpNotice(`Verbinde mit Palladium-Raum „${roomIdToJoin}“...`);
+      setMpNotice(`Prüfe Skater-Namen & verbinde mit Raum „${roomIdToJoin}“...`);
 
       const peer = new Peer();
       peerInstanceRef.current = peer;
@@ -960,13 +1336,9 @@ export function App() {
         guestConnRef.current = conn;
 
         conn.on('open', () => {
-          setMpRole('guest');
-          setMpRoomId(roomIdToJoin);
-          setMpStatus('connected');
-          setMpNotice(`🌐 Live verbunden mit Raum „${roomIdToJoin}“!`);
-
           const helloPkt: MultiplayerPacket = {
             type: 'guest-hello',
+            freeDrinkChoice: chosenDrink,
             state: {
               ...localSkaterSnapshotRef.current,
               peerId: myPeerId,
@@ -985,32 +1357,51 @@ export function App() {
           const pkt = raw as MultiplayerPacket;
           if (!pkt || typeof pkt !== 'object') return;
 
+          if (pkt.type === 'join-rejected') {
+            setGuestJoinError(
+              pkt.reason ||
+                'Dieser Skater-Name ist in der Halle bereits vergeben – bitte wähle einen anderen!'
+            );
+            setMpStatus('error');
+            setMpRole('solo');
+            cleanupPeerSession();
+            return;
+          }
+
+          if (pkt.type === 'join-accepted') {
+            soundFX.unlockAudioContext();
+            soundFX.playCurtainReveal();
+            setPlayerName(cleanName);
+            setIsAnonymousGuest(false);
+            setPlayerShirtColor(chosenColor);
+            setFreeDrinkChoice(chosenDrink);
+            setHasOwnSkates(true);
+            setIsCurtainOpen(true);
+            setShowChronicleModal(false);
+            setShowGuestJoinModal(false);
+            setGuestJoinError(null);
+            setMpRole('guest');
+            setMpRoomId(roomIdToJoin);
+            setMpStatus('connected');
+            setMpNotice(`🌐 Live verbunden mit Raum „${roomIdToJoin}“!`);
+            if (pkt.welcomeAnnouncement) {
+              showHallAnnouncement(pkt.welcomeAnnouncement);
+            }
+            return;
+          }
+
+          if (pkt.type === 'hall-radio' && pkt.message) {
+            showHallAnnouncement(pkt.message);
+            return;
+          }
+
           if (pkt.type === 'world-players') {
             const others = (pkt.players || []).filter(
               (pl) => pl.peerId !== myPeerId
             );
             setRemotePlayers(others);
           } else if (pkt.type === 'admin-sync') {
-            const s = pkt.payload;
-            setLightingMode(s.lightingMode);
-            setCenterStageMode(s.centerStageMode);
-            setActiveBandName(s.activeBandName);
-            setCustomBandInput(s.customBandInput);
-            setBandSkinTone(s.bandSkinTone);
-            setBandGender(s.bandGender);
-            setHallGameMode(s.hallGameMode);
-            setFogBurstCount(s.fogBurstCount);
-            setAdminPreviewStyle(null);
-            setAdminSettings((prev) => ({
-              ...prev,
-              concertLightingMode: s.concertLightingMode,
-              fogMachineEnabled: s.fogMachineEnabled,
-              activeDjName: s.activeDjName,
-              djTickerText: s.djTickerText,
-              twitchChannel: s.twitchChannel,
-              isMaintenanceMode: s.isMaintenanceMode,
-              liveArenaStyle: s.liveArenaStyle,
-            }));
+            applyIncomingAdminSync(pkt.payload);
           } else if (pkt.type === 'kicked') {
             cleanupPeerSession();
             setMpRole('solo');
@@ -1036,8 +1427,8 @@ export function App() {
 
         conn.on('error', () => {
           setMpStatus('error');
-          setMpNotice(
-            `Raum „${roomIdToJoin}“ ist aktuell nicht erreichbar (Solo-Modus aktiv).`
+          setGuestJoinError(
+            `Raum „${roomIdToJoin}“ ist aktuell nicht erreichbar.`
           );
           setMpRole('solo');
         });
@@ -1045,13 +1436,13 @@ export function App() {
 
       peer.on('error', () => {
         setMpStatus('error');
-        setMpNotice(
-          `Raum „${roomIdToJoin}“ konnte nicht erreicht werden (Solo-Modus aktiv).`
+        setGuestJoinError(
+          `Raum „${roomIdToJoin}“ konnte nicht erreicht werden.`
         );
         setMpRole('solo');
       });
     },
-    [cleanupPeerSession]
+    [applyIncomingAdminSync, cleanupPeerSession, showHallAnnouncement]
   );
 
   // Called ~18x per second (every 55ms) by RollerArenaEngine when in Multiplayer
@@ -1133,21 +1524,34 @@ export function App() {
             setUnlockedToast((curr) => (curr?.id === def.id ? null : curr));
           }, 5500);
 
-          // Automatically activate unlocked upgrade in Pro-Shop
+          // Automatically activate unlocked upgrade & 80s trick move in Pro-Shop
           setUpgrades((uPrev) => {
-            const nextU = { ...uPrev };
+            const nextU: ProShopUpgradesState = {
+              ...uPrev,
+              unlockedMoves: { ...uPrev.unlockedMoves },
+            };
             if (id === 'warmup_spins') {
               nextU.underglowEnabled = true;
               nextU.underglowColor = 'cyan';
+              nextU.wristbandsEnabled = true;
+              nextU.wristbandColor = 'cyan';
             } else if (id === 'endurance_20_laps') {
               nextU.bearingsAbec9 = true;
+              nextU.unlockedMoves.spin360 = true;
             } else if (id === 'bistro_drink') {
               nextU.highGripWheels = true;
-            } else if (id === 'slipstream_10s' || id === 'chair_jump_3') {
+              nextU.unlockedMoves.backward = true;
+            } else if (id === 'slipstream_10s') {
               nextU.aluPlatesHighTop = true;
+              nextU.unlockedMoves.flamingo = true;
+            } else if (id === 'chair_jump_3') {
+              nextU.aluPlatesHighTop = true;
+              nextU.unlockedMoves.starjump = true;
             } else if (id === 'mirror_spin') {
               nextU.underglowEnabled = true;
               nextU.underglowColor = 'gold';
+              nextU.wristbandsEnabled = true;
+              nextU.wristbandColor = 'gold';
             }
             return nextU;
           });
@@ -1168,7 +1572,7 @@ export function App() {
   const isTruePalladiumaner =
     completedChallengesCount === PALLADIUM_CHALLENGES.length;
 
-  // Check if individual Pro-Shop upgrades are unlocked via challenges
+  // Check if individual Pro-Shop upgrades & 80s Trick Moves are unlocked
   const isPinkCyanUnlocked = Boolean(
     challengesProgress['warmup_spins']?.completed
   );
@@ -1186,6 +1590,17 @@ export function App() {
       challengesProgress['chair_jump_3']?.completed
   );
 
+  const isMoveSpin360Unlocked =
+    Boolean(upgrades.unlockedMoves?.spin360) || isAbec9Unlocked;
+  const isMoveBackwardUnlocked =
+    Boolean(upgrades.unlockedMoves?.backward) || isHighGripUnlocked;
+  const isMoveFlamingoUnlocked =
+    Boolean(upgrades.unlockedMoves?.flamingo) ||
+    Boolean(challengesProgress['slipstream_10s']?.completed);
+  const isMoveStarjumpUnlocked =
+    Boolean(upgrades.unlockedMoves?.starjump) ||
+    Boolean(challengesProgress['chair_jump_3']?.completed);
+
   const handleUnlockAllProShopForTesting = () => {
     const allDone = {} as ChallengeProgressMap;
     for (const ch of PALLADIUM_CHALLENGES) {
@@ -1199,6 +1614,14 @@ export function App() {
       aluPlatesHighTop: true,
       underglowEnabled: true,
       underglowColor: 'pink',
+      wristbandsEnabled: true,
+      wristbandColor: 'pink',
+      unlockedMoves: {
+        spin360: true,
+        backward: true,
+        flamingo: true,
+        starjump: true,
+      },
     });
     soundFX.playChallengeUnlocked();
   };
@@ -1216,15 +1639,7 @@ export function App() {
     () => computePeakHourLabel(hallStats.hourlyHistogram),
     [hallStats.hourlyHistogram]
   );
-  const avgSessionMin = useMemo(() => {
-    const avgSec =
-      hallStats.totalSessions > 0
-        ? Math.round(hallStats.totalPlaySeconds / hallStats.totalSessions)
-        : 0;
-    const m = Math.floor(avgSec / 60);
-    const s = avgSec % 60;
-    return `${m}m ${String(s).padStart(2, '0')}s`;
-  }, [hallStats]);
+  const activePlayersOnRink = remotePlayers.length + 1;
 
   const twitchParentHost =
     typeof window !== 'undefined' && window.location.hostname
@@ -1241,12 +1656,76 @@ export function App() {
   const previewStyle = adminPreviewStyle;
   const activeStyle: ArenaVisualStyle = previewStyle || publishedStyle;
 
+  // Build YouTube embed URL if a YouTube video or playlist URL is configured
+  const youtubeEmbedUrl = useMemo(() => {
+    const raw = (adminSettings.youtubeUrl || '').trim();
+    if (!raw) return null;
+    try {
+      const url = new URL(raw);
+      const listId = url.searchParams.get('list');
+      let videoId = url.searchParams.get('v');
+      if (!videoId && url.hostname.includes('youtu.be')) {
+        videoId = url.pathname.replace('/', '').trim();
+      }
+      if (!videoId && url.pathname.includes('/embed/')) {
+        videoId = url.pathname.split('/embed/')[1]?.split('/')[0] || null;
+      }
+      const muteParam = twitchMuted ? '1' : '0';
+      if (listId && !videoId) {
+        return `https://www.youtube.com/embed/videoseries?list=${encodeURIComponent(
+          listId
+        )}&autoplay=1&mute=${muteParam}`;
+      }
+      if (videoId) {
+        const listQuery = listId ? `&list=${encodeURIComponent(listId)}` : '';
+        return `https://www.youtube.com/embed/${encodeURIComponent(
+          videoId
+        )}?autoplay=1&mute=${muteParam}${listQuery}`;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, [adminSettings.youtubeUrl, twitchMuted]);
+
+  const handleTriggerDjJingle = useCallback((slot: DjJingleSlot) => {
+    soundFX.unlockAudioContext();
+    setActiveJingleSlotId(slot.id);
+    setExternalDjJingleBubble((prev) => ({
+      text: slot.bubbleText,
+      seq: (prev?.seq || 0) + 1,
+    }));
+    soundFX.playDjJingleOrVoiceMemo(slot, () => {
+      setActiveJingleSlotId((curr) => (curr === slot.id ? null : curr));
+    });
+  }, []);
+
+  // Keep unlockedMoves in upgrades synced when challenge states unlock them
+  const effectiveUpgrades = useMemo<ProShopUpgradesState>(
+    () => ({
+      ...upgrades,
+      unlockedMoves: {
+        spin360: isMoveSpin360Unlocked,
+        backward: isMoveBackwardUnlocked,
+        flamingo: isMoveFlamingoUnlocked,
+        starjump: isMoveStarjumpUnlocked,
+      },
+    }),
+    [
+      upgrades,
+      isMoveSpin360Unlocked,
+      isMoveBackwardUnlocked,
+      isMoveFlamingoUnlocked,
+      isMoveStarjumpUnlocked,
+    ]
+  );
+
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#070A12] text-[#FFF8E7] select-none flex flex-col">
       {/* TOP RETRO HUD BAR (Full Widescreen Width) */}
       <header className="z-30 flex items-center justify-between gap-2 px-3 py-1.5 bg-[#0B0E17]/95 border-b border-fuchsia-500/35 shadow-[0_4px_20px_rgba(0,0,0,0.65)] text-xs">
-        {/* Left: Logo (3x click for Admin) + Active Mode Badges */}
-        <div className="flex items-center gap-2.5 flex-wrap">
+        {/* Left: Logo (3x click for Admin) + Version + Active Mode Badges */}
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
             onClick={handleLogoClick}
@@ -1257,7 +1736,7 @@ export function App() {
               ✦ PALLADIUM HANAU &apos;86
             </span>
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-200 border border-fuchsia-400/30">
-              ALPHA 0.1
+              {APP_VERSION_LABEL}
             </span>
           </button>
 
@@ -1273,7 +1752,7 @@ export function App() {
               className="accent-cyan-400 rounded cursor-pointer"
             />
             <span className="font-medium text-slate-200">
-              Namen anzeigen <span className="text-slate-400 font-mono">[N]</span>
+              Namen <span className="text-slate-400 font-mono">[N]</span>
             </span>
           </label>
 
@@ -1348,18 +1827,18 @@ export function App() {
           {/* Gratis Welcome Gift Vouchers in Inventory */}
           {(telemetry.freeSlushCount > 0 || telemetry.freeBlobaCount > 0) && (
             <span
-              title="Willkommensgeschenk an der Kasse – einlösbar an der Bistro-Theke [E] oder direkt per Taste [1] / [2]"
+              title="Willkommensgeschenk an der Kasse – einlösbar an der Bistro-Theke [E]"
               className="px-2 py-0.5 rounded bg-fuchsia-950/90 border border-amber-300/70 text-amber-200 font-mono text-[11px] shadow-[0_0_10px_rgba(251,191,36,0.25)]"
             >
               🎁 Gratis:{' '}
               {telemetry.freeSlushCount > 0 && (
                 <span className="text-cyan-300 font-bold mr-1.5">
-                  {telemetry.freeSlushCount}x Slush [1]
+                  {telemetry.freeSlushCount}x Slush
                 </span>
               )}
               {telemetry.freeBlobaCount > 0 && (
                 <span className="text-amber-300 font-bold">
-                  {telemetry.freeBlobaCount}x Bloba [2]
+                  {telemetry.freeBlobaCount}x Bloba
                 </span>
               )}
             </span>
@@ -1406,6 +1885,11 @@ export function App() {
           {hallGameMode === 'ballspiel' && (
             <>
               <span className="text-slate-700">|</span>
+              <div className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/80 text-amber-200 font-bold shadow-[0_0_10px_rgba(251,191,36,0.3)]">
+                🏐 IM SPIEL: {telemetry.ballspielRemaining} /{' '}
+                {telemetry.ballspielTotal}
+              </div>
+              <span className="text-slate-700">|</span>
               <div>
                 <span className="text-amber-300 mr-1">TREFFER:</span>
                 <span className="text-amber-200 font-bold">
@@ -1427,7 +1911,7 @@ export function App() {
           )}
         </div>
 
-        {/* Right: Quick Action Buttons (Chronik, Aufgaben, Hallen-Spiele, Pro-Shop, Statistik) */}
+        {/* Right: Quick Action Buttons + Public Visitor Volume Slider */}
         <div className="flex items-center gap-1.5 flex-wrap">
           <button
             type="button"
@@ -1470,44 +1954,52 @@ export function App() {
             🛠️ Pro-Shop
           </button>
 
-          <button
-            type="button"
-            onClick={() => setShowStatsModal(true)}
-            className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-cyan-400/50 text-slate-200 font-medium transition cursor-pointer"
+          {/* Public Visitor Volume Slider + Mute Toggle */}
+          <div
+            title="Persönliche Hallen-Lautstärke (wird lokal für deinen Browser gespeichert)"
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-900 border border-slate-700"
           >
-            📊 Hallen-Statistik
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              const nextMuted = !isMuted;
-              setIsMuted(nextMuted);
-              soundFX.setMuted(nextMuted);
-              if (
-                nextMuted &&
-                typeof window !== 'undefined' &&
-                'speechSynthesis' in window
-              ) {
-                window.speechSynthesis.cancel();
-              }
-            }}
-            title="Spiel-Sound & Sprachausgabe stummschalten / aktivieren"
-            className={`px-2 py-1 rounded border font-mono text-[11px] transition cursor-pointer ${
-              isMuted
-                ? 'bg-rose-950/90 border-rose-400/70 text-rose-200'
-                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-emerald-300'
-            }`}
-          >
-            {isMuted ? '🔇 Stumm' : '🔊 Ton'}
-          </button>
+            <button
+              type="button"
+              onClick={() => {
+                const nextMuted = !isMuted;
+                setIsMuted(nextMuted);
+                soundFX.setMuted(nextMuted);
+              }}
+              className={`font-mono text-[11px] cursor-pointer ${
+                isMuted ? 'text-rose-300' : 'text-emerald-300'
+              }`}
+            >
+              {isMuted || visitorVolume === 0 ? '🔇' : '🔊'}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={isMuted ? 0 : Math.round(visitorVolume * 100)}
+              onChange={(e) => {
+                const pct = Number(e.target.value);
+                const norm = Math.max(0, Math.min(1, pct / 100));
+                setVisitorVolume(norm);
+                saveVisitorVolume(norm);
+                soundFX.setVolume(norm);
+                if (norm > 0 && isMuted) {
+                  setIsMuted(false);
+                  soundFX.setMuted(false);
+                }
+              }}
+              className="w-16 h-1.5 accent-cyan-400 cursor-pointer"
+            />
+            <span className="font-mono text-[10px] text-slate-300 w-7 text-right">
+              {isMuted ? '0%' : `${Math.round(visitorVolume * 100)}%`}
+            </span>
+          </div>
 
           {/* Live Multiplayer Status Badge in Top HUD */}
           {isMultiplayerActive && (
             <span className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-cyan-950/90 border border-cyan-400 text-cyan-200 font-mono font-bold text-[11px] shadow-[0_0_12px_rgba(34,211,238,0.4)]">
-              <span>
-                🌐 LIVE ({remotePlayers.length + 1} Skater)
-              </span>
+              <span>🌐 LIVE ({remotePlayers.length + 1} Skater)</span>
               {mpRole === 'guest' && (
                 <button
                   type="button"
@@ -1538,9 +2030,16 @@ export function App() {
 
       {/* MAIN 16:9 WIDESCREEN ARENA CONTAINER */}
       <main className="relative flex-1 w-full h-full overflow-hidden flex items-center justify-center bg-[#070A12]">
+        {/* HALL RADIO JOIN / EVENT ANNOUNCEMENT BANNER */}
+        {hallRadioBanner && (
+          <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-40 px-5 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 text-cyan-200 font-mono text-xs font-bold shadow-[0_0_24px_rgba(34,211,238,0.5)]">
+            {hallRadioBanner}
+          </div>
+        )}
+
         {/* COMPACT TOP STATUS BAR FOR ACTIVE ADMIN PREVIEW */}
         {previewStyle && (
-          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-1.5 rounded-full bg-amber-950/95 border-2 border-amber-400 text-amber-100 font-mono text-xs font-bold shadow-[0_0_24px_rgba(251,191,36,0.55)] backdrop-blur-md">
+          <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-1.5 rounded-full bg-amber-950/95 border-2 border-amber-400 text-amber-100 font-mono text-xs font-bold shadow-[0_0_24px_rgba(251,191,36,0.55)] backdrop-blur-md">
             <span>
               👁️ ADMIN-VORSCHAU:{' '}
               <strong className="text-amber-300">
@@ -1549,10 +2048,7 @@ export function App() {
                   : previewStyle === 'pixel-16bit'
                   ? '16-BIT'
                   : 'CLASSIC NEON'}
-              </strong>{' '}
-              <span className="text-amber-200/80 font-normal">
-                (PALLADIUM 1989 / 16-BIT)
-              </span>
+              </strong>
             </span>
             <button
               type="button"
@@ -1579,14 +2075,7 @@ export function App() {
           characterMode={characterMode}
           cameraMode={cameraMode}
           lightingMode={lightingMode}
-          centerStageMode={
-            centerStageMode === 'cinema' &&
-            !isTwitchOnline &&
-            !isCinemaScheduleActive &&
-            activeStyle !== 'palladium-1989'
-              ? 'live-band'
-              : centerStageMode
-          }
+          centerStageMode={centerStageMode}
           activeBandName={
             customBandInput.trim() ? customBandInput.trim() : activeBandName
           }
@@ -1601,7 +2090,8 @@ export function App() {
           specialSkaters={specialSkaters}
           ghostSkatersEnabled={adminSettings.ghostSkatersEnabled}
           kengolHatEnabled={kengolHatEnabled}
-          upgrades={upgrades}
+          upgrades={effectiveUpgrades}
+          externalTrickTrigger={externalTrickTrigger}
           fogMachineEnabled={adminSettings.fogMachineEnabled}
           fogBurstCount={fogBurstCount}
           difficulty={difficulty}
@@ -1612,7 +2102,21 @@ export function App() {
           skateGuardWhistleEnabled={adminSettings.skateGuardWhistleEnabled}
           concertLightingMode={adminSettings.concertLightingMode}
           arenaStyle={activeStyle}
-          activeDjName={adminSettings.activeDjName || DEFAULT_DJ_NAME}
+          monitorPreviewStyle={showAdminTerminal ? selectedStyleTile : null}
+          fullHallPutzlichtEnabled={adminSettings.fullHallPutzlichtEnabled}
+          pixel16BitFiguresEnabled={adminSettings.pixel16BitFiguresEnabled}
+          cinemaCountdownEnabled={adminSettings.cinemaCountdownEnabled}
+          cinemaCountdownTitle={adminSettings.cinemaCountdownTitle}
+          cinemaCountdownTargetIso={adminSettings.cinemaCountdownTargetIso}
+          cinemaWeekdays={adminSettings.cinemaWeekdays}
+          cinemaStartTime={adminSettings.cinemaStartTime}
+          crewNames={adminSettings.crewNames}
+          externalDjJingleBubble={externalDjJingleBubble}
+          activeDjName={
+            adminSettings.crewNames?.dj ||
+            adminSettings.activeDjName ||
+            DEFAULT_DJ_NAME
+          }
           isMuted={isMuted}
           isCurtainOpen={isCurtainOpen && !isBlockedByMaintenance}
           isMultiplayerActive={isMultiplayerActive}
@@ -1633,11 +2137,10 @@ export function App() {
           onTelemetry={setTelemetry}
         />
 
-        {/* LIVE TWITCH VIDEO OVERLAY DIRECTLY ON THE CENTER PALLADIUM KINO-LEINWAND (Only when stream is live or Auto-Kino-Zeitplan is active!) */}
+        {/* LIVE KINO-LEINWAND OVERLAY (TWITCH / YOUTUBE / 80s VISUALIZER & COUNTDOWN FALLBACK) */}
         {isCurtainOpen &&
           !isBlockedByMaintenance &&
           centerStageMode === 'cinema' &&
-          (isTwitchOnline || isCinemaScheduleActive) &&
           cameraMode === 'top-down' && (
             <div
               style={{
@@ -1646,30 +2149,66 @@ export function App() {
                 width: `${(350 / 1920) * 100}%`,
                 height: `${(256 / 1080) * 100}%`,
               }}
-              className="z-20 absolute rounded border-2 border-cyan-400/90 shadow-[0_0_30px_rgba(34,211,238,0.55)] overflow-hidden bg-black flex flex-col"
+              className="z-20 absolute rounded border-2 border-cyan-400/90 shadow-[0_0_30px_rgba(34,211,238,0.55)] overflow-hidden flex flex-col pointer-events-auto"
             >
-              <div className="flex items-center justify-between px-2 py-0.5 bg-slate-950/95 border-b border-cyan-500/40 text-[10px] font-mono">
+              <div className="flex items-center justify-between px-2 py-0.5 bg-slate-950/95 border-b border-cyan-500/40 text-[9.5px] font-mono">
                 <span className="text-cyan-300 font-bold truncate">
-                  🎬 KINO-LEINWAND LIVE: {adminSettings.twitchChannel}
+                  {adminSettings.cinemaCountdownEnabled
+                    ? `⏳ ${adminSettings.cinemaCountdownTitle || 'COUNTDOWN'}`
+                    : adminSettings.cinemaStreamSource === 'youtube' &&
+                      youtubeEmbedUrl
+                    ? '🎬 YOUTUBE LIVE / PLAYLIST'
+                    : adminSettings.cinemaStreamSource === 'twitch' &&
+                      isTwitchOnline
+                    ? `🎬 TWITCH LIVE: ${adminSettings.twitchChannel}`
+                    : '🎹 PALLADIUM LIVE VISUALIZER'}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setTwitchMuted((m) => !m)}
-                  className="text-amber-300 hover:underline cursor-pointer ml-2"
-                >
-                  {twitchMuted ? '🔇 Ton an' : '🔊 Stumm'}
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setTwitchMuted((m) => !m)}
+                    className="text-amber-300 hover:underline cursor-pointer"
+                  >
+                    {twitchMuted ? '🔇 Ton an' : '🔊 Stumm'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCenterStageMode('islands')}
+                    title="Kino-Leinwand schließen"
+                    className="text-rose-300 hover:text-white cursor-pointer font-bold"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
-              <iframe
-                title="Palladium Kino-Leinwand Live Twitch Stream"
-                src={`https://player.twitch.tv/?channel=${encodeURIComponent(
-                  adminSettings.twitchChannel
-                )}&parent=${encodeURIComponent(twitchParentHost)}&muted=${
-                  twitchMuted ? 'true' : 'false'
-                }`}
-                className="w-full flex-1 border-0 bg-black"
-                allowFullScreen
-              />
+
+              {!adminSettings.cinemaCountdownEnabled &&
+              adminSettings.cinemaStreamSource === 'youtube' &&
+              youtubeEmbedUrl ? (
+                <iframe
+                  title="Palladium Kino-Leinwand YouTube Stream"
+                  src={youtubeEmbedUrl}
+                  className="w-full flex-1 border-0 bg-black"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              ) : !adminSettings.cinemaCountdownEnabled &&
+                adminSettings.cinemaStreamSource === 'twitch' &&
+                isTwitchOnline ? (
+                <iframe
+                  title="Palladium Kino-Leinwand Live Twitch Stream"
+                  src={`https://player.twitch.tv/?channel=${encodeURIComponent(
+                    adminSettings.twitchChannel
+                  )}&parent=${encodeURIComponent(twitchParentHost)}&muted=${
+                    twitchMuted ? 'true' : 'false'
+                  }`}
+                  className="w-full flex-1 border-0 bg-black"
+                  allowFullScreen
+                />
+              ) : (
+                /* Transparent pass-through so the Canvas 80s Equalizer / PALLADIUM LIVE / 7-Segment Countdown Clock shines through cleanly! */
+                <div className="w-full flex-1 bg-transparent pointer-events-none" />
+              )}
             </div>
           )}
 
@@ -1686,7 +2225,7 @@ export function App() {
           </div>
         )}
 
-        {/* CONTEXTUAL INTERACTION PROMPTS NEAR PRO-SHOP / SKATE RENTAL / BISTRO / DJ TOWER */}
+        {/* CONTEXTUAL INTERACTION PROMPTS NEAR PRO-SHOP / SKATE RENTAL */}
         {isCurtainOpen && telemetry.nearProShop && !showProShopModal && (
           <div className="absolute bottom-14 left-6 z-30 flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-950/95 border border-cyan-400 shadow-lg text-xs">
             <span className="text-cyan-300 font-bold">
@@ -1694,7 +2233,7 @@ export function App() {
             </span>
             <span className="text-slate-200">
               Drücke <kbd className="px-1.5 py-0.5 bg-slate-800 rounded">[E]</kbd>{' '}
-              oder klicke für Rollschuh-Tuning
+              oder klicke für Rollschuh-Tuning &amp; 80er-Moves
             </span>
             <button
               type="button"
@@ -1732,7 +2271,7 @@ export function App() {
             </div>
           )}
 
-        {/* COLLAPSIBLE BOTTOM CONTROL LEGEND & RETRO DEVELOPER CREDIT BAR (TOGGLE VIA BUTTON OR KEY [I]) */}
+        {/* COLLAPSIBLE BOTTOM CONTROL LEGEND, 80s TRICK-MOVES BAR & RETRO CREDIT */}
         {isBottomBarCollapsed ? (
           <button
             type="button"
@@ -1740,7 +2279,7 @@ export function App() {
             title="Steuerungs- & Info-Leiste wieder ausklappen [I]"
             className="z-20 absolute bottom-2 right-3 px-2.5 py-1 rounded-md bg-[#080B12]/90 hover:bg-slate-900 border border-slate-700/80 hover:border-cyan-400/60 text-[11px] font-mono text-cyan-300 shadow-lg cursor-pointer transition"
           >
-            ▲ Steuerung &amp; Info [I]
+            ▲ Steuerung &amp; 80er-Moves [I]
           </button>
         ) : (
           <div className="z-20 absolute bottom-0 inset-x-0 px-3 py-1 bg-[#080B12]/90 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-300">
@@ -1767,18 +2306,69 @@ export function App() {
               </span>
               <span>•</span>
               <span>
-                <strong className="text-emerald-300">
-                  [E / F / Klick / Pad-X]
-                </strong>{' '}
-                Ball / Shop / Bistro
+                <strong className="text-emerald-300">[E / F]</strong> Interaktion
               </span>
+              <span>•</span>
+              {/* 80s Trick-Moves Quick Bar ([1]-[4]) */}
+              <div className="inline-flex items-center gap-1 bg-slate-950/90 px-2 py-0.5 rounded border border-fuchsia-500/40">
+                <span className="text-fuchsia-300 font-bold text-[10px]">
+                  Moves:
+                </span>
+                {(
+                  [
+                    {
+                      id: 'spin360' as TrickMoveId,
+                      key: '1',
+                      label: '🌀 Spin',
+                      unlocked: isMoveSpin360Unlocked,
+                    },
+                    {
+                      id: 'backward' as TrickMoveId,
+                      key: '2',
+                      label: '🔙 Backward',
+                      unlocked: isMoveBackwardUnlocked,
+                    },
+                    {
+                      id: 'flamingo' as TrickMoveId,
+                      key: '3',
+                      label: '🦩 Flamingo',
+                      unlocked: isMoveFlamingoUnlocked,
+                    },
+                    {
+                      id: 'starjump' as TrickMoveId,
+                      key: '4',
+                      label: '⚡ Star-Jump',
+                      unlocked: isMoveStarjumpUnlocked,
+                    },
+                  ] as const
+                ).map((mv) => (
+                  <button
+                    key={mv.id}
+                    type="button"
+                    disabled={!mv.unlocked}
+                    onClick={() => handleTriggerTrickFromHud(mv.id)}
+                    title={
+                      mv.unlocked
+                        ? `Taste [${mv.key}] oder Klick für ${mv.label}`
+                        : `Im Pro-Shop über Palladium-Aufgaben freischaltbar`
+                    }
+                    className={`px-1.5 py-0.5 rounded text-[10px] border transition ${
+                      mv.unlocked
+                        ? 'bg-fuchsia-950/90 hover:bg-fuchsia-800 border-fuchsia-400/70 text-fuchsia-100 cursor-pointer'
+                        : 'bg-slate-900/60 border-slate-800 text-slate-600 cursor-not-allowed'
+                    }`}
+                  >
+                    [{mv.key}] {mv.unlocked ? mv.label : `🔒 ${mv.label}`}
+                  </button>
+                ))}
+              </div>
               <span>•</span>
               <button
                 type="button"
                 onClick={handleToggleUnderglow}
                 className="hover:text-cyan-300 cursor-pointer"
               >
-                <strong className="text-pink-400">[L]</strong> Unterboden-Neon:{' '}
+                <strong className="text-pink-400">[L]</strong> Neon:{' '}
                 {upgrades.underglowEnabled ? 'AN' : 'AUS'}
               </button>
               <span>•</span>
@@ -1787,7 +2377,7 @@ export function App() {
                 onClick={handleToggleCamera}
                 className="hover:text-cyan-300 cursor-pointer"
               >
-                <strong className="text-cyan-300">[C / Pad-Y]</strong> Kamera:{' '}
+                <strong className="text-cyan-300">[C]</strong> Kamera:{' '}
                 {cameraMode.toUpperCase()}
               </button>
               <span>•</span>
@@ -1796,7 +2386,7 @@ export function App() {
                 onClick={handleToggleCharacterMode}
                 className="hover:text-cyan-300 cursor-pointer"
               >
-                <strong className="text-amber-300">[V]</strong> Modus:{' '}
+                <strong className="text-amber-300">[V]</strong>{' '}
                 {characterMode === 'skater' ? 'Rollschuh' : 'Rollstuhl'}
               </button>
               <span>•</span>
@@ -1805,15 +2395,14 @@ export function App() {
                 onClick={handleToggleKengolHat}
                 className="hover:text-cyan-300 cursor-pointer"
               >
-                <strong className="text-fuchsia-300">[H]</strong> Kengol-Look:{' '}
+                <strong className="text-fuchsia-300">[H]</strong> Kengol:{' '}
                 {kengolHatEnabled ? 'AN' : 'AUS'}
               </button>
             </div>
 
             <div className="flex items-center gap-2">
-              <span className="text-[10px] text-slate-400 hidden lg:inline">
-                Retro-Tribut für alle Hanauer „Palladiumaner“ (1981 Rollerland •
-                1986 Palladium) • 100% lokal ohne Cookies
+              <span className="text-[10px] text-slate-400 hidden 2xl:inline">
+                {APP_VERSION_LABEL} • 100% lokal ohne Cookies
               </span>
               <button
                 type="button"
@@ -1836,7 +2425,7 @@ export function App() {
               {/* Top Neon Emblem */}
               <div className="text-center border-b border-fuchsia-500/30 pb-4">
                 <div className="inline-block px-3 py-0.5 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/40 font-mono text-xs text-fuchsia-300 mb-2">
-                  ✦ HANAUER ROLLSCHUH-CHRONIK • FAMILYLAND &amp; PALLADIUM ✦
+                  ✦ HANAUER ROLLSCHUH-CHRONIK • {APP_VERSION_LABEL} ✦
                 </div>
                 <h1 className="font-display font-black text-3xl md:text-5xl tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 via-amber-200 to-cyan-300 drop-shadow-[0_0_20px_rgba(232,121,249,0.5)]">
                   PALLADIUM ROLLER ARENA HANAU
@@ -1851,7 +2440,6 @@ export function App() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-5 mb-3">
                 {/* CARD 1: 04. November 1981 — ROLLERLAND HANAU STICKER */}
                 <div className="p-4 rounded-xl bg-[#191229] border border-amber-400/40 flex flex-col">
-                  {/* 80s Sticker 1: ROLLERLAND HANAU */}
                   <div className="h-28 mb-3 flex items-center justify-center">
                     <div className="w-full h-full rounded-lg bg-[#0d1633] border-[2.5px] border-white/95 shadow-[0_6px_18px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center p-1">
                       <svg
@@ -1867,7 +2455,6 @@ export function App() {
                           rx="6"
                           fill="#0b1536"
                         />
-                        {/* Curved sweeping rink track lines */}
                         <path
                           d="M -10 56 Q 95 26 230 50"
                           fill="none"
@@ -1889,32 +2476,26 @@ export function App() {
                           strokeWidth="2"
                           opacity="0.65"
                         />
-                        {/* White Winged Roller Skate with Red Laces & Bright Red Wheels */}
                         <g transform="translate(110, 32)">
-                          {/* White/Red Wing */}
                           <polygon
                             points="-12,-5 -44,-16 -34,-6 -46,-1 -32,3 -12,4"
                             fill="#ffffff"
                             stroke="#ef4444"
                             strokeWidth="1.5"
                           />
-                          {/* Crisp White Roller Skate Boot */}
                           <path
                             d="M -14 -16 L 3 -16 L 6 -2 L 19 2 Q 24 6 18 10 L -14 10 Z"
                             fill="#ffffff"
                             stroke="#0f172a"
                             strokeWidth="1.8"
                           />
-                          {/* Red Laces */}
                           <path
                             d="M 1 -12 L 6 -10 M 2 -8 L 7 -6 M 4 -4 L 10 -2"
                             stroke="#ef4444"
                             strokeWidth="2"
                             strokeLinecap="round"
                           />
-                          {/* Red Toe-Stop */}
                           <circle cx="21" cy="11" r="3.8" fill="#ef4444" />
-                          {/* 4 Bright Red Wheels */}
                           <circle
                             cx="-10"
                             cy="15"
@@ -1948,7 +2529,6 @@ export function App() {
                             strokeWidth="1.2"
                           />
                         </g>
-                        {/* Red ROLLERLAND & HANAU Text */}
                         <text
                           x="110"
                           y="69"
@@ -1995,7 +2575,6 @@ export function App() {
 
                 {/* CARD 2: August 1986 — PALLADIUM HANAU STICKER */}
                 <div className="p-4 rounded-xl bg-[#191229] border border-fuchsia-400/50 flex flex-col">
-                  {/* 80s Sticker 2: PALLADIUM HANAU */}
                   <div className="h-28 mb-3 flex items-center justify-center">
                     <div className="w-full h-full rounded-lg bg-[#bae6fd] border-[2.5px] border-white/95 shadow-[0_6px_18px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center p-1">
                       <svg
@@ -2024,7 +2603,6 @@ export function App() {
                           rx="6"
                           fill="url(#palladiumSky)"
                         />
-                        {/* Fluffy 80s Clouds */}
                         <circle
                           cx="36"
                           cy="24"
@@ -2053,7 +2631,6 @@ export function App() {
                           fill="#ffffff"
                           opacity="0.88"
                         />
-                        {/* Red-Yellow Glass Roof Arch */}
                         <path
                           d="M 22 46 A 90 42 0 0 1 198 46"
                           fill="none"
@@ -2066,7 +2643,6 @@ export function App() {
                           stroke="#facc15"
                           strokeWidth="3"
                         />
-                        {/* Yellow Perspective Colonnade Pillars */}
                         <rect
                           x="16"
                           y="26"
@@ -2115,9 +2691,7 @@ export function App() {
                           fill="#eab308"
                           stroke="#ca8a04"
                         />
-                        {/* Green Winged Roller Skate with Yellow Laces, Pink Wheels & Violet Toe-Stop */}
                         <g transform="translate(110, 30)">
-                          {/* Yellow Wings */}
                           <polygon
                             points="-11,-4 -40,-15 -31,-7 -42,-3 -29,2 -11,4"
                             fill="#fde047"
@@ -2130,21 +2704,18 @@ export function App() {
                             stroke="#ca8a04"
                             strokeWidth="1.4"
                           />
-                          {/* Green Boot */}
                           <path
                             d="M -13 -15 L 3 -15 L 6 -2 L 18 2 Q 23 6 17 10 L -13 10 Z"
                             fill="#16a34a"
                             stroke="#052e16"
                             strokeWidth="1.8"
                           />
-                          {/* Yellow Laces */}
                           <path
                             d="M 1 -11 L 6 -9 M 2 -7 L 7 -5 M 4 -3 L 10 -1"
                             stroke="#fde047"
                             strokeWidth="2"
                             strokeLinecap="round"
                           />
-                          {/* Violet Toe-Stop */}
                           <circle
                             cx="21"
                             cy="11"
@@ -2153,7 +2724,6 @@ export function App() {
                             stroke="#ffffff"
                             strokeWidth="1"
                           />
-                          {/* 4 Bright Pink Wheels */}
                           <circle
                             cx="-10"
                             cy="14"
@@ -2187,7 +2757,6 @@ export function App() {
                             strokeWidth="1.2"
                           />
                         </g>
-                        {/* Angled Blue PALLADIUM + Line + HANAU */}
                         <g transform="translate(110, 68) rotate(-3)">
                           <text
                             x="0"
@@ -2246,7 +2815,6 @@ export function App() {
 
                 {/* CARD 3: Heute — OVAL-EMBLEM ROLLER DISCO PALLADIUM HANAU-GRIMM CENTER */}
                 <div className="p-4 rounded-xl bg-[#191229] border border-cyan-400/50 flex flex-col">
-                  {/* 80s Sticker 3: ROLLER DISCO Palladium – HANAU-Grimm Center Oval Emblem */}
                   <div className="h-28 mb-3 flex items-center justify-center">
                     <div className="w-full h-full rounded-lg bg-[#090d1f] border-[2.5px] border-white/95 shadow-[0_6px_18px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center p-1">
                       <svg
@@ -2262,7 +2830,6 @@ export function App() {
                           rx="6"
                           fill="#080c1d"
                         />
-                        {/* Dark-Blue Oval with Double Gold Rim */}
                         <ellipse
                           cx="110"
                           cy="46"
@@ -2282,7 +2849,6 @@ export function App() {
                           strokeWidth="1.1"
                           opacity="0.65"
                         />
-                        {/* White Arched Text ROLLER DISCO */}
                         <text
                           x="110"
                           y="27"
@@ -2295,7 +2861,6 @@ export function App() {
                         >
                           ★ ROLLER DISCO ★
                         </text>
-                        {/* Sweeping Red Retro Script Palladium */}
                         <text
                           x="110"
                           y="52"
@@ -2310,7 +2875,6 @@ export function App() {
                         >
                           Palladium
                         </text>
-                        {/* Bottom Text HANAU-Grimm Center */}
                         <text
                           x="110"
                           y="70"
@@ -2342,7 +2906,7 @@ export function App() {
                 </div>
               </div>
 
-              {/* "Nicht mehr anzeigen" Checkbox (persisted in localStorage under palladium_hide_chronik) */}
+              {/* "Nicht mehr anzeigen" Checkbox */}
               <div className="mb-3 flex items-center justify-between px-3.5 py-2 rounded-lg bg-[#161026] border border-fuchsia-500/30 text-xs">
                 <label className="flex items-center gap-2.5 text-amber-100 font-mono cursor-pointer select-none">
                   <input
@@ -2365,9 +2929,8 @@ export function App() {
                 </label>
               </div>
 
-              {/* Cashier Entry & Guest Mode Configuration + Singleplayer Experience Levels + Own Skates vs. Rental + Anti-Cheat Stamp */}
+              {/* Cashier Entry & Guest Mode Configuration + Experience Levels + Free Drink Choice */}
               <div className="p-4 rounded-xl bg-slate-950/90 border border-slate-700/80 flex flex-col gap-3.5">
-                {/* Anti-Cheat Entry Stamp Active Notice (when palladium_entry_pass is locked in localStorage) */}
                 {entryPass?.locked && (
                   <div className="px-3.5 py-2 rounded-lg bg-amber-950/90 border border-amber-400/80 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-amber-200 shadow-[0_0_15px_rgba(251,191,36,0.25)]">
                     <span className="font-bold">
@@ -2379,7 +2942,7 @@ export function App() {
                   </div>
                 )}
 
-                {/* Singleplayer Experience Levels (Anfänger, Fortgeschrittener, Profi) */}
+                {/* Singleplayer Experience Levels */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="font-mono text-xs text-fuchsia-300 uppercase font-bold">
@@ -2460,7 +3023,7 @@ export function App() {
                   </div>
                 </div>
 
-                {/* Checkbox "🛼 Ich habe eigene Rollschuhe" vs. Rollschuh-Verleih über Freigetränk-Chip */}
+                {/* Checkbox "🛼 Ich habe eigene Rollschuhe" vs. Rollschuh-Verleih */}
                 <div className="p-3 rounded-xl bg-[#141024] border border-cyan-500/40 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
                   <label
                     className={`flex items-start md:items-center gap-2.5 select-none ${
@@ -2514,10 +3077,55 @@ export function App() {
                   </span>
                 </div>
 
+                {/* Interactive Welcome Free-Drink Selection */}
+                <div className="p-3 rounded-xl bg-gradient-to-r from-amber-950/60 via-fuchsia-950/60 to-cyan-950/60 border border-dashed border-amber-300/80 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono text-xs md:text-sm font-bold text-amber-200">
+                      🎁 WILLKOMMENSGESCHENK AN DER KASSE: 1x Slush Puppy &amp; 1x
+                      Bloba Cola gratis beim Eintritt!
+                    </span>
+                    <span className="font-mono text-[10px] text-cyan-300">
+                      Wähle dein Start-Gedeck fürs Bistro:
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {(
+                      [
+                        {
+                          id: 'combo' as FreeDrinkChoice,
+                          label: '🎁 Kombi-Bon: 1x Slush + 1x Bloba Cola',
+                        },
+                        {
+                          id: 'slush' as FreeDrinkChoice,
+                          label: '🍧 Fokus: Eiskalter Slush Puppy',
+                        },
+                        {
+                          id: 'bloba' as FreeDrinkChoice,
+                          label: '🥤 Fokus: Prickelnde Bloba Cola',
+                        },
+                      ] as const
+                    ).map((dr) => (
+                      <button
+                        key={dr.id}
+                        type="button"
+                        onClick={() => setFreeDrinkChoice(dr.id)}
+                        className={`py-1.5 px-2.5 rounded-lg font-mono text-xs font-bold border transition cursor-pointer ${
+                          freeDrinkChoice === dr.id
+                            ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.45)]'
+                            : 'bg-slate-900/90 text-slate-200 border-slate-700 hover:border-amber-300/60'
+                        }`}
+                      >
+                        {dr.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 <div className="flex flex-col md:flex-row items-center justify-between gap-4 pt-1 border-t border-slate-800">
                   <div className="flex-1 w-full">
                     <label className="block font-mono text-xs text-cyan-300 uppercase mb-1">
-                      🎟️ Kasse &amp; Einstieg — Dein Skater-Name (Optional):
+                      🎟️ Kasse &amp; Einstieg — Dein Skater-Name (Pflichtfeld ab 2
+                      Zeichen oder Anonym-Gast):
                     </label>
                     <div className="flex flex-wrap items-center gap-3">
                       <input
@@ -2525,7 +3133,7 @@ export function App() {
                         value={playerName}
                         disabled={isAnonymousGuest}
                         onChange={(e) => setPlayerName(e.target.value)}
-                        placeholder="Leer lassen = Kein Namensschild"
+                        placeholder="Dein Name oder Spitzname..."
                         maxLength={22}
                         className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none disabled:opacity-50"
                       />
@@ -2542,36 +3150,34 @@ export function App() {
                       </label>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1">
-                      Bleibt das Feld leer oder ist „Als Gast rollen“ aktiv,
-                      wird über deiner Spielfigur gar kein Namensschild
-                      gerendert.
+                      Bitte mindestens 2 Zeichen eingeben (oder „Als Gast rollen“
+                      aktivieren), um durch den Samtvorhang in die Halle zu
+                      rollen.
                     </p>
                   </div>
 
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
+                      disabled={!canEnterSingleplayerHall}
                       onClick={handleEnterHall}
-                      className="px-6 py-3.5 rounded-xl bg-gradient-to-r from-fuchsia-600 via-pink-500 to-cyan-500 hover:from-fuchsia-500 hover:to-cyan-400 text-white font-display font-black text-base tracking-wider shadow-[0_0_25px_rgba(232,121,249,0.6)] transition cursor-pointer"
+                      className={`px-6 py-3.5 rounded-xl font-display font-black text-base tracking-wider transition ${
+                        canEnterSingleplayerHall
+                          ? 'bg-gradient-to-r from-fuchsia-600 via-pink-500 to-cyan-500 hover:from-fuchsia-500 hover:to-cyan-400 text-white shadow-[0_0_25px_rgba(232,121,249,0.6)] cursor-pointer'
+                          : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                      }`}
                     >
                       🛼 HALLE BETRETEN [ENTER]
                     </button>
                   </div>
                 </div>
-
-                {/* Retro-styled Welcome Gift Ticket Badge below HALLE BETRETEN [ENTER] */}
-                <div className="px-3.5 py-2 rounded-lg bg-gradient-to-r from-amber-950/80 via-fuchsia-950/80 to-cyan-950/80 border border-dashed border-amber-300/80 shadow-[0_0_18px_rgba(251,191,36,0.2)] flex items-center justify-center text-center">
-                  <span className="font-mono text-xs md:text-sm font-bold tracking-wide text-amber-200">
-                    🎁 WILLKOMMENSGESCHENK AN DER KASSE: 1x Slush Puppy &amp; 1x
-                    Bloba Cola gratis beim Eintritt!
-                  </span>
-                </div>
               </div>
 
-              {/* Creator Signature & Dedication in the Bottom Footer of the Start Frame */}
+              {/* Creator Signature & Dedication */}
               <div className="mt-4 pt-3 border-t border-fuchsia-500/30 text-center">
                 <p className="font-mono text-xs md:text-sm font-semibold tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-fuchsia-200 to-indigo-300 drop-shadow-[0_0_10px_rgba(34,211,238,0.35)]">
-                  created by Jürgen Becker (JR) • Ein Tribut an unsere Ära
+                  created by Jürgen Becker (JR) • Ein Tribut an unsere Ära •{' '}
+                  {APP_VERSION_LABEL}
                 </p>
               </div>
             </div>
@@ -2579,15 +3185,15 @@ export function App() {
         )}
 
         {/* ===================================================================== */}
-        {/* 2. PRO-SHOP ROLLSCHUH-UPGRADES MODAL                                  */}
+        {/* 2. PRO-SHOP ROLLSCHUH-UPGRADES, NEON-ARMBÄNDER & 80s TRICK-MOVES      */}
         {/* ===================================================================== */}
         {showProShopModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
-            <div className="w-full max-w-2xl rounded-2xl bg-[#101424] border-2 border-cyan-400/70 shadow-2xl p-6 text-white">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 overflow-y-auto backdrop-blur-sm">
+            <div className="w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-2xl bg-[#101424] border-2 border-cyan-400/70 shadow-2xl p-5 md:p-6 text-white">
               <div className="flex items-center justify-between border-b border-slate-700 pb-3">
                 <div>
                   <span className="font-mono text-xs text-cyan-300 uppercase">
-                    Bereich 1 • Glasvitrine &amp; PALLADIUMANER-Crew
+                    Bereich 1 • Glasvitrine, Neon-Armbänder &amp; 80er-Trick-Moves
                   </span>
                   <h2 className="font-display font-extrabold text-2xl text-white">
                     🛠️ PRO-SHOP &amp; ROLLSCHUH-TUNING
@@ -2603,13 +3209,14 @@ export function App() {
               </div>
 
               <p className="text-xs text-slate-300 mt-3">
-                Rüste deine Rollschuhe mit Original-80er-Bauteilen aus. Neue
-                Bauteile schaltest du durch erledigte{' '}
-                <strong className="text-amber-300">Palladium-Aufgaben</strong>{' '}
-                frei!
+                Rüste deine Rollschuhe mit Original-80er-Bauteilen, leuchtenden
+                Neon-Schweißbändern und authentischen{' '}
+                <strong className="text-fuchsia-300">80er-Skater-Moves</strong>{' '}
+                aus. Freischaltung über erledigte{' '}
+                <strong className="text-amber-300">Palladium-Aufgaben</strong>!
               </p>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 my-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 my-4">
                 {/* 1. ABEC-9 Bearings */}
                 <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-700 flex flex-col justify-between">
                   <div>
@@ -2644,7 +3251,7 @@ export function App() {
                     }`}
                   >
                     {!isAbec9Unlocked
-                      ? '🔒 Durch „Dauerläufer“ (20 Runden) freischalten'
+                      ? '🔒 Durch „Dauerläufer“ (20 Runden)'
                       : upgrades.bearingsAbec9
                       ? '✓ ABEC-9 Gold montiert'
                       : 'Montieren'}
@@ -2656,7 +3263,7 @@ export function App() {
                   <div>
                     <div className="flex items-center justify-between">
                       <h3 className="font-bold text-sm text-cyan-300">
-                        2. Spezial-Rollen (High-Grip Urethan)
+                        2. Spezial-Rollen (High-Grip)
                       </h3>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
                         {isHighGripUnlocked ? 'Freigeschaltet' : 'Aufgabe #3'}
@@ -2664,7 +3271,7 @@ export function App() {
                     </div>
                     <p className="text-xs text-slate-400 mt-1">
                       Verbessert Kurvenlage und Bodenhaftung – schützt vor
-                      Stürzen auf den unangekündigten Bohnerwachs-Rutschzonen!
+                      Stürzen auf Bohnerwachs-Rutschzonen!
                     </p>
                   </div>
                   <button
@@ -2685,7 +3292,7 @@ export function App() {
                     }`}
                   >
                     {!isHighGripUnlocked
-                      ? '🔒 Durch „Slush- & Bloba-Pause“ freischalten'
+                      ? '🔒 Durch „Slush- & Bloba-Pause“'
                       : upgrades.highGripWheels
                       ? '✓ High-Grip Urethan montiert'
                       : 'Montieren'}
@@ -2697,7 +3304,7 @@ export function App() {
                   <div>
                     <div className="flex items-center justify-between">
                       <h3 className="font-bold text-sm text-emerald-300">
-                        3. Alu-Platten &amp; High-Top-Schuhe
+                        3. Alu-Platten &amp; High-Tops
                       </h3>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
                         {isAluPlatesUnlocked
@@ -2728,7 +3335,7 @@ export function App() {
                     }`}
                   >
                     {!isAluPlatesUnlocked
-                      ? '🔒 Durch „Windschatten“ oder „Stuhl-Springer“'
+                      ? '🔒 Durch „Windschatten“ / „Stuhl-Springer“'
                       : upgrades.aluPlatesHighTop
                       ? '✓ Alu-Platten & High-Tops montiert'
                       : 'Montieren'}
@@ -2814,17 +3421,180 @@ export function App() {
                     ))}
                   </div>
                 </div>
+
+                {/* 5. 80er-Neon-Schweißbänder & Knicklicht-Armbänder */}
+                <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-700 flex flex-col justify-between md:col-span-2">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-sm text-cyan-300">
+                        5. 80er-Neon-Schweißbänder &amp; Knicklicht-Armbänder
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setUpgrades((u) => ({
+                            ...u,
+                            wristbandsEnabled: !u.wristbandsEnabled,
+                          }))
+                        }
+                        className={`px-2.5 py-0.5 rounded font-mono text-[10px] font-bold cursor-pointer ${
+                          upgrades.wristbandsEnabled
+                            ? 'bg-cyan-400 text-slate-950'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {upgrades.wristbandsEnabled ? 'ANGELEGT' : 'AUS'}
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Leuchtende 80er-Handgelenkbänder an beiden animierten
+                      Skater-Armen – strahlen besonders intensiv im Blacklight
+                      UV und ziehen bei schnellen Spins dezente Lichtspuren!
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-2 mt-3">
+                    {(
+                      [
+                        { id: 'pink', label: 'Neon-Pink' },
+                        { id: 'cyan', label: 'Cyber-Cyan' },
+                        { id: 'green', label: 'Laser-Grün' },
+                        { id: 'gold', label: 'Gold-Gelb' },
+                      ] as { id: NeonWristbandColor; label: string }[]
+                    ).map((wb) => (
+                      <button
+                        key={wb.id}
+                        type="button"
+                        onClick={() =>
+                          setUpgrades((u) => ({
+                            ...u,
+                            wristbandsEnabled: true,
+                            wristbandColor: wb.id,
+                          }))
+                        }
+                        className={`py-1.5 rounded font-mono text-xs font-bold border transition cursor-pointer ${
+                          upgrades.wristbandsEnabled &&
+                          upgrades.wristbandColor === wb.id
+                            ? 'bg-cyan-500 border-white text-slate-950 shadow-[0_0_10px_rgba(34,211,238,0.45)]'
+                            : 'bg-slate-800 border-slate-600 text-slate-200 hover:border-cyan-400'
+                        }`}
+                      >
+                        {wb.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
-              <div className="flex items-center justify-between pt-3 border-t border-slate-800 text-xs">
+              {/* 🕺 80er-Trick-Moves Section */}
+              <div className="p-4 rounded-xl bg-slate-950/90 border border-fuchsia-500/50 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="font-mono font-bold text-xs md:text-sm uppercase text-fuchsia-300">
+                    🕺 80er-Trick-Moves (Freischaltbar über Palladium-Aufgaben •
+                    Steuerbar per Taste [1]–[4] oder HUD-Klick)
+                  </h3>
+                  <span className="font-mono text-[11px] text-amber-300">
+                    Sichtbar für alle Spieler im Multiplayer!
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                  {[
+                    {
+                      id: 'spin360' as TrickMoveId,
+                      key: 'Taste 1',
+                      title: '🌀 360° Spin (Pirouette)',
+                      unlockHint: 'Aufgabe #2 „Dauerläufer“ (20 Runden)',
+                      unlocked: isMoveSpin360Unlocked,
+                      desc: 'Schnelle 360°-Drehung aus der Fahrt mit ausgebreiteten Armen.',
+                    },
+                    {
+                      id: 'backward' as TrickMoveId,
+                      key: 'Taste 2',
+                      title: '🔙 Backward Glide',
+                      unlockHint: 'Aufgabe #3 „Slush- & Bloba-Pause“',
+                      unlocked: isMoveBackwardUnlocked,
+                      desc: 'Lässiges Rückwärts-Rollen im 80s-Boogie-Rhythmus mit Schulterblick.',
+                    },
+                    {
+                      id: 'flamingo' as TrickMoveId,
+                      key: 'Taste 3',
+                      title: '🦩 Flamingo-Slide',
+                      unlockHint: 'Aufgabe #4 „Windschatten“ (10 Sek.)',
+                      unlocked: isMoveFlamingoUnlocked,
+                      desc: 'Elegantes Einbein-Gleiten mit ausgestreckten Balance-Armen.',
+                    },
+                    {
+                      id: 'starjump' as TrickMoveId,
+                      key: 'Taste 4',
+                      title: '⚡ Palladium Star-Jump',
+                      unlockHint: 'Aufgabe #9 „Stuhl-Springer“ (3 Sprünge)',
+                      unlocked: isMoveStarjumpUnlocked,
+                      desc: 'Hoher Show-Sprung mit hochgerissenen Armen & Funken-Landung!',
+                    },
+                  ].map((mv) => (
+                    <div
+                      key={mv.id}
+                      className={`p-3 rounded-xl border flex flex-col justify-between ${
+                        mv.unlocked
+                          ? 'bg-fuchsia-950/35 border-fuchsia-400/70'
+                          : 'bg-slate-900/80 border-slate-800'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="px-1.5 py-0.5 rounded bg-slate-800 font-mono text-[10px] text-cyan-300 font-bold">
+                            [{mv.key}]
+                          </span>
+                          <span
+                            className={`font-mono text-[10px] font-bold ${
+                              mv.unlocked
+                                ? 'text-emerald-300'
+                                : 'text-amber-300/80'
+                            }`}
+                          >
+                            {mv.unlocked ? '✓ FREIGESCHALTET' : '🔒 GESPERRT'}
+                          </span>
+                        </div>
+                        <div className="font-bold text-xs text-white mt-1.5">
+                          {mv.title}
+                        </div>
+                        <p className="text-[11px] text-slate-300 mt-1">
+                          {mv.desc}
+                        </p>
+                      </div>
+                      <div className="mt-2.5 pt-2 border-t border-slate-800/80">
+                        {mv.unlocked ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              handleTriggerTrickFromHud(mv.id);
+                              setShowProShopModal(false);
+                            }}
+                            className="w-full py-1 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-mono text-[11px] font-bold cursor-pointer"
+                          >
+                            🕺 Jetzt auf der Bahn ausführen [{mv.key}]
+                          </button>
+                        ) : (
+                          <span className="block text-[10px] font-mono text-slate-400">
+                            Freischaltung: {mv.unlockHint}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 mt-3 border-t border-slate-800 text-xs">
                 <span className="text-slate-400">
-                  Tipp: Alle Bauteile bleiben lokal in deinem Browser
-                  gespeichert.
+                  Tipp: Alle Bauteile &amp; 80er-Moves bleiben lokal in deinem
+                  Browser gespeichert.
                 </span>
                 <button
                   type="button"
                   onClick={handleUnlockAllProShopForTesting}
-                  className="px-3 py-1 rounded bg-fuchsia-950 hover:bg-fuchsia-900 border border-fuchsia-400/50 text-fuchsia-200 font-mono text-xs cursor-pointer"
+                  className="px-3 py-1.5 rounded bg-fuchsia-950 hover:bg-fuchsia-900 border border-fuchsia-400/50 text-fuchsia-200 font-mono text-xs font-bold cursor-pointer"
                 >
                   ⚡ Alle Pro-Shop Bauteile sofort freischalten (Test-Modus)
                 </button>
@@ -2842,7 +3612,7 @@ export function App() {
               <div className="flex items-center justify-between border-b border-slate-700 pb-3">
                 <div>
                   <span className="font-mono text-xs text-amber-300 uppercase">
-                    Kleine 80er-Aufgaben ohne Zwang • Pro-Shop Freischaltungen
+                    Kleine 80er-Aufgaben ohne Zwang • Pro-Shop &amp; Trick-Moves
                   </span>
                   <h2 className="font-display font-extrabold text-2xl text-white">
                     🏆 PALLADIUM-CHALLENGES ({completedChallengesCount}/
@@ -2985,147 +3755,104 @@ export function App() {
         )}
 
         {/* ===================================================================== */}
-        {/* 5. HALLEN-STATISTIK & BESUCHER-ANALYSE MODAL                          */}
-        {/* ===================================================================== */}
-        {showStatsModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
-            <div className="w-full max-w-2xl rounded-2xl bg-[#0D1322] border-2 border-cyan-400/70 shadow-2xl p-6 text-white">
-              <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-                <div>
-                  <span className="font-mono text-xs text-cyan-300 uppercase">
-                    Rein lokal ohne Cookies • Anonymisierte Hallen-Analyse
-                  </span>
-                  <h2 className="font-display font-extrabold text-2xl text-white">
-                    📊 HALLEN-STATISTIK &amp; STOSSZEITEN
-                  </h2>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowStatsModal(false)}
-                  className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
-                >
-                  Schließen
-                </button>
-              </div>
-
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 my-4">
-                <div className="p-3 rounded-xl bg-slate-900 border border-slate-700">
-                  <div className="text-[11px] font-mono text-slate-400">
-                    Besucher heute
-                  </div>
-                  <div className="font-display font-black text-2xl text-cyan-300">
-                    {visitsToday}
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-900 border border-slate-700">
-                  <div className="text-[11px] font-mono text-slate-400">
-                    Besuche gesamt
-                  </div>
-                  <div className="font-display font-black text-2xl text-fuchsia-300">
-                    {hallStats.totalSessions}
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-900 border border-slate-700">
-                  <div className="text-[11px] font-mono text-slate-400">
-                    Ø Verweildauer
-                  </div>
-                  <div className="font-display font-black text-xl text-amber-300">
-                    {avgSessionMin}
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-900 border border-slate-700">
-                  <div className="text-[11px] font-mono text-slate-400">
-                    Rundenrekord
-                  </div>
-                  <div className="font-display font-black text-2xl text-emerald-300">
-                    {Math.max(hallStats.bestLapRecord, telemetry.laps)}
-                  </div>
-                </div>
-              </div>
-
-              {/* 24-Hour Peak Bar Chart */}
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="font-mono text-xs text-slate-300 font-bold">
-                    Stündliche Verteilung (00–23 Uhr)
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-300 font-mono text-xs font-bold">
-                    Peak-Zeit: {peakHourText}
-                  </span>
-                </div>
-                <div className="flex items-end justify-between gap-1 h-28 pt-4">
-                  {hallStats.hourlyHistogram.map((count, hour) => {
-                    const maxCount = Math.max(
-                      1,
-                      ...hallStats.hourlyHistogram
-                    );
-                    const heightPct = Math.max(
-                      8,
-                      Math.round((count / maxCount) * 100)
-                    );
-                    return (
-                      <div
-                        key={hour}
-                        className="flex-1 flex flex-col items-center gap-1"
-                      >
-                        <div className="w-full h-20 flex items-end">
-                          <div
-                            title={`${hour}:00 Uhr: ${count} Sessions`}
-                            style={{ height: `${heightPct}%` }}
-                            className={`w-full rounded-t ${
-                              count === maxCount
-                                ? 'bg-gradient-to-t from-fuchsia-500 to-amber-300'
-                                : 'bg-cyan-500/70'
-                            }`}
-                          />
-                        </div>
-                        <span className="text-[9px] font-mono text-slate-500">
-                          {String(hour).padStart(2, '0')}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="mt-3 flex items-center justify-between text-xs text-slate-400 font-mono">
-                <span>
-                  Aktuelle Sitzung: {Math.floor(sessionSeconds / 60)}m{' '}
-                  {sessionSeconds % 60}s
-                </span>
-                <span>100% localStorage (Keine Cookies)</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ===================================================================== */}
-        {/* 6. MAINTENANCE MODE OVERLAY ("HIER WIRD GEBOHNERT")                   */}
+        {/* 6. 80s GLASS ENTRANCE DOOR WITH DRAWN CURTAINS (MAINTENANCE MODE)     */}
         {/* ===================================================================== */}
         {isBlockedByMaintenance && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#090812]/95 p-6 text-center">
-            <div className="max-w-lg w-full p-8 rounded-2xl bg-[#161224] border-2 border-amber-400 shadow-[0_0_60px_rgba(251,191,36,0.3)]">
-              <div className="text-4xl mb-2">🧹🛼✨</div>
-              <h2 className="font-display font-black text-2xl text-amber-300">
-                HIER WIRD GEBOHNERT!
-              </h2>
-              <p className="text-sm text-slate-300 mt-2">
-                Das Holzparkett der Palladium Roller Arena Hanau erhält gerade
-                eine frische Schicht Bohnerwachs. Zutritt aktuell nur mit
-                Backstage-Pass oder Hallenleiter-PIN.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setPinInput('');
-                  setPinError(null);
-                  setShowAdminPinModal(true);
-                }}
-                className="mt-5 px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold text-xs cursor-pointer"
-              >
-                🔑 Backstage-PIN eingeben
-              </button>
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-[#070510] via-[#0e081a] to-[#05040a] p-4 overflow-hidden">
+            {/* Ambient Neon Glow Shimmering Behind the Glass Doors */}
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-50">
+              <div className="w-[540px] h-[540px] rounded-full bg-fuchsia-600/20 blur-3xl animate-pulse" />
+              <div className="w-[420px] h-[420px] rounded-full bg-cyan-500/15 blur-3xl -ml-32" />
             </div>
+
+            {/* 80s Metal-Framed Double Glass Entrance Door Assembly */}
+            <div className="relative w-full max-w-2xl rounded-2xl bg-[#12101b] border-4 border-slate-500/80 shadow-[0_0_90px_rgba(0,0,0,0.95)] overflow-hidden">
+              {/* Top Illuminated Foyer Header above the Glass Door */}
+              <div className="px-6 py-3 bg-gradient-to-r from-slate-900 via-[#1b112c] to-slate-900 border-b-4 border-slate-600 flex items-center justify-between">
+                <span className="font-mono text-xs text-cyan-300 tracking-widest uppercase">
+                  ✦ EINGANG FOYER • HANAU-GRIMM CENTER ✦
+                </span>
+                <span className="font-mono text-[11px] text-amber-300">
+                  {APP_VERSION_LABEL}
+                </span>
+              </div>
+
+              {/* Double Glass Door Frame with Drawn Velvet Curtains Behind Glass */}
+              <div className="relative grid grid-cols-2 min-h-[380px] bg-[#0b0714]">
+                {/* Left Glass Door Wing + Drawn Crimson/Purple Velvet Curtain */}
+                <div className="relative border-r-2 border-slate-500/80 overflow-hidden p-4 flex flex-col justify-between">
+                  <div
+                    className="absolute inset-0 opacity-90"
+                    style={{
+                      backgroundImage:
+                        'repeating-linear-gradient(90deg, #3b0728 0px, #58103d 18px, #29041b 36px)',
+                    }}
+                  />
+                  {/* Diagonal 80s Glass Reflection */}
+                  <div className="pointer-events-none absolute -inset-10 bg-gradient-to-tr from-transparent via-white/8 to-transparent rotate-12" />
+                  {/* Brass Door Handle Left */}
+                  <div className="relative z-10 my-auto ml-auto mr-2 w-2.5 h-24 rounded-full bg-gradient-to-b from-amber-200 via-amber-400 to-amber-600 border border-amber-100 shadow-lg" />
+                </div>
+
+                {/* Right Glass Door Wing + Drawn Crimson/Purple Velvet Curtain */}
+                <div className="relative border-l-2 border-slate-500/80 overflow-hidden p-4 flex flex-col justify-between">
+                  <div
+                    className="absolute inset-0 opacity-90"
+                    style={{
+                      backgroundImage:
+                        'repeating-linear-gradient(90deg, #29041b 0px, #58103d 18px, #3b0728 36px)',
+                    }}
+                  />
+                  {/* Diagonal 80s Glass Reflection */}
+                  <div className="pointer-events-none absolute -inset-10 bg-gradient-to-tr from-transparent via-white/8 to-transparent rotate-12" />
+                  {/* Brass Door Handle Right */}
+                  <div className="relative z-10 my-auto mr-auto ml-2 w-2.5 h-24 rounded-full bg-gradient-to-b from-amber-200 via-amber-400 to-amber-600 border border-amber-100 shadow-lg" />
+                </div>
+
+                {/* Hanging Neon Door Sign Mounted Across the Glass Door Center */}
+                <div className="absolute inset-0 z-20 flex items-center justify-center p-6">
+                  <div
+                    onDoubleClick={() => {
+                      setPinInput('');
+                      setPinError(null);
+                      setShowAdminPinModal(true);
+                    }}
+                    title="Doppelklick oder Geheimtaste für Hallenleitung"
+                    className="max-w-lg w-full rounded-2xl bg-[#100c1c]/95 border-2 border-amber-400 shadow-[0_0_50px_rgba(251,191,36,0.45)] p-6 text-center backdrop-blur-md"
+                  >
+                    <div className="inline-block px-3 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 font-mono text-[11px] text-amber-300 font-bold mb-2">
+                      🧹🛼 PALLADIUM ROLLER ARENA HANAU • TÜRSCHILD
+                    </div>
+                    <h2 className="font-display font-black text-xl md:text-2xl text-white tracking-wide">
+                      🚧 Wegen Putz- &amp; Renovierungsarbeiten vorübergehend
+                      geschlossen
+                    </h2>
+                    <p className="text-xs md:text-sm text-slate-300 mt-2 leading-relaxed">
+                      Hinter den zugezogenen Vorhängen wird das Holzparkett
+                      gerade frisch gebohnert und die 80er-Lichtanlage gewartet.
+                    </p>
+                    <div className="mt-4 px-4 py-2.5 rounded-xl bg-fuchsia-950/80 border border-fuchsia-400/70 font-mono text-sm md:text-base font-bold tracking-wider text-amber-200 shadow-[0_0_16px_rgba(232,121,249,0.3)]">
+                      {adminSettings.maintenanceReopenText ||
+                        '🚀 ALPHA STARTING SOON'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Subtle, inconspicuous Admin backdoor trigger in the bottom-right corner */}
+            <button
+              type="button"
+              onClick={() => {
+                setPinInput('');
+                setPinError(null);
+                setShowAdminPinModal(true);
+              }}
+              title="Hallenleitung (Ctrl+Shift+A)"
+              className="fixed bottom-2.5 right-3 z-50 px-2 py-1 rounded bg-slate-950/40 hover:bg-slate-900/90 border border-slate-700/30 hover:border-amber-400/50 text-slate-500 hover:text-amber-200 font-mono text-[10px] opacity-35 hover:opacity-100 transition cursor-pointer"
+            >
+              🔑 Admin-Hintereingang
+            </button>
           </div>
         )}
 
@@ -3136,6 +3863,7 @@ export function App() {
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
             <form
               onSubmit={handleVerifyAdminPin}
+              autoComplete="off"
               className="w-full max-w-sm rounded-2xl bg-[#140F23] border-2 border-rose-500/80 shadow-2xl p-6 text-white"
             >
               <div className="font-mono text-xs text-rose-400 uppercase">
@@ -3145,14 +3873,15 @@ export function App() {
                 🔐 ADMIN-TERMINAL LOGIN
               </h2>
               <p className="text-xs text-slate-300 mt-1">
-                Bitte Hallenleiter-PIN eingeben (Standard-PIN im Code:{' '}
-                <code className="text-amber-300">1986</code>):
+                Bitte persönliche Hallenleiter-PIN eingeben:
               </p>
               <input
                 type="password"
+                name="palladium_admin_pin_field"
+                autoComplete="off"
                 value={pinInput}
                 onChange={(e) => setPinInput(e.target.value)}
-                placeholder="PIN (1986)"
+                placeholder="••••"
                 autoFocus
                 className="mt-3 w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 font-mono text-center text-lg tracking-widest text-white focus:border-rose-400 focus:outline-none"
               />
@@ -3181,19 +3910,22 @@ export function App() {
         )}
 
         {/* ===================================================================== */}
-        {/* 8. PIN-PROTECTED ADMIN TERMINAL ("HALLENLEITER-REGIE")                */}
+        {/* 8. PIN-PROTECTED ADMIN TERMINAL ("HALLENLEITER-REGIE" - IPAD & DESKTOP)*/}
         {/* ===================================================================== */}
         {showAdminTerminal && isAdminUnlocked && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-2 overflow-y-auto backdrop-blur-sm">
-            <div className="w-full max-w-[96vw] xl:max-w-[1720px] rounded-2xl bg-[#120D20] border-2 border-rose-500 shadow-[0_0_60px_rgba(244,63,94,0.4)] p-3 text-white space-y-2.5">
-              {/* Compact Header */}
-              <div className="flex items-center justify-between border-b border-rose-500/40 pb-2">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <h2 className="font-display font-black text-lg xl:text-xl text-white">
+            <div className="w-full max-w-[96vw] xl:max-w-[1720px] max-h-[96vh] overflow-y-auto rounded-2xl bg-[#120D20] border-2 border-rose-500 shadow-[0_0_60px_rgba(244,63,94,0.4)] p-3 text-white space-y-2.5">
+              {/* Cleanly Fitted Header (flex-wrap, no clipping) */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rose-500/40 pb-2">
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <h2 className="font-display font-black text-base sm:text-lg xl:text-xl text-white">
                     🎛️ HALLENLEITER-REGIE — PALLADIUM HANAU
                   </h2>
                   <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-rose-950/90 border border-rose-500/40 text-rose-300 uppercase">
-                    PIN-geschütztes Admin-Terminal (3-Spalten-Regie)
+                    PIN-GESCHÜTZT • 3-SPALTEN-REGIE
+                  </span>
+                  <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-slate-900 border border-cyan-500/40 text-cyan-300">
+                    {APP_VERSION_LABEL}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -3204,14 +3936,14 @@ export function App() {
                       saveAdminUnlockedSession(false);
                       setShowAdminTerminal(false);
                     }}
-                    className="px-2.5 py-1 rounded bg-rose-950 border border-rose-500/50 text-rose-200 font-mono text-xs cursor-pointer"
+                    className="min-h-[34px] px-3 py-1 rounded bg-rose-950 border border-rose-500/50 text-rose-200 font-mono text-xs cursor-pointer"
                   >
                     Abmelden
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowAdminTerminal(false)}
-                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
+                    className="min-h-[34px] px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs font-bold cursor-pointer"
                   >
                     Schließen
                   </button>
@@ -3221,18 +3953,18 @@ export function App() {
               {/* 3-COLUMN WIDESCREEN GRID */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-stretch">
                 {/* ============================================================= */}
-                {/* SPALTE 1: 1. MITTEL-ARENA & LIVE-BAND-BOOKING                 */}
+                {/* SPALTE 1: 1. MITTEL-ARENA & LIVE-BAND + 80s WEBRADIO/PLAYLIST */}
                 {/* ============================================================= */}
                 <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
                   <div className="space-y-2">
                     <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
                       1. MITTEL-ARENA &amp; LIVE-BAND-BOOKING
                     </h3>
-                    <div className="flex gap-1.5">
+                    <div className="grid grid-cols-3 gap-1.5">
                       {(
                         [
-                          { id: 'islands', label: '2 U-Inseln (Standard)' },
-                          { id: 'live-band', label: '🎸 Live-Band-Bühne' },
+                          { id: 'islands', label: '2 U-Inseln' },
+                          { id: 'band', label: '🎸 Live-Band-Bühne' },
                           { id: 'cinema', label: '🎬 Kino-Leinwand' },
                         ] as { id: CenterStageMode; label: string }[]
                       ).map((m) => (
@@ -3240,10 +3972,10 @@ export function App() {
                           key={m.id}
                           type="button"
                           onClick={() => setCenterStageMode(m.id)}
-                          className={`flex-1 py-1 px-1.5 rounded font-mono text-[11px] font-bold border cursor-pointer ${
+                          className={`min-h-[34px] py-1 px-1.5 rounded font-mono text-[11px] font-bold border cursor-pointer transition ${
                             centerStageMode === m.id
-                              ? 'bg-amber-400 text-slate-950 border-white'
-                              : 'bg-slate-800 text-slate-200 border-slate-600'
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_10px_rgba(251,191,36,0.45)]'
+                              : 'bg-slate-800 text-slate-200 border-slate-600 hover:border-amber-400/60'
                           }`}
                         >
                           {m.label}
@@ -3263,12 +3995,12 @@ export function App() {
                             onClick={() => {
                               setActiveBandName(band);
                               setCustomBandInput('');
-                              setCenterStageMode('live-band');
+                              setCenterStageMode('band');
                               if (band === 'LAMIO') {
                                 setBandSkinTone('black');
                               }
                             }}
-                            className={`py-1 px-2 rounded font-mono text-[11px] border truncate cursor-pointer ${
+                            className={`min-h-[32px] py-1 px-2 rounded font-mono text-[11px] border truncate cursor-pointer ${
                               activeBandName === band && !customBandInput
                                 ? 'bg-fuchsia-600 border-white text-white font-bold'
                                 : 'bg-slate-800 border-slate-700 text-slate-300'
@@ -3289,70 +4021,72 @@ export function App() {
 
                     {/* Band-Besetzung (Hautfarbe & Geschlecht) + Konzertbeleuchtung */}
                     <div className="p-2 rounded-lg bg-slate-950/90 border border-fuchsia-500/35 space-y-1.5">
-                      <div>
-                        <span className="block font-mono text-[10px] uppercase text-fuchsia-300 font-bold mb-0.5">
-                          Band-Besetzung (Hautfarbe):
-                        </span>
-                        <div className="grid grid-cols-3 gap-1">
-                          {(
-                            [
-                              { id: 'black', label: 'Schwarz' },
-                              { id: 'white', label: 'Weiß' },
-                              { id: 'mixed', label: 'Gemischt' },
-                            ] as { id: BandSkinToneMode; label: string }[]
-                          ).map((opt) => (
-                            <button
-                              key={opt.id}
-                              type="button"
-                              onClick={() => setBandSkinTone(opt.id)}
-                              className={`py-0.5 px-1.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
-                                bandSkinTone === opt.id
-                                  ? 'bg-fuchsia-600 border-white text-white shadow-[0_0_8px_rgba(232,121,249,0.4)]'
-                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-500'
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          ))}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="block font-mono text-[10px] uppercase text-fuchsia-300 font-bold mb-0.5">
+                            Hautfarbe:
+                          </span>
+                          <div className="grid grid-cols-3 gap-1">
+                            {(
+                              [
+                                { id: 'black', label: 'Schw.' },
+                                { id: 'white', label: 'Weiß' },
+                                { id: 'mixed', label: 'Mix' },
+                              ] as { id: BandSkinToneMode; label: string }[]
+                            ).map((opt) => (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => setBandSkinTone(opt.id)}
+                                className={`py-1 px-1 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                                  bandSkinTone === opt.id
+                                    ? 'bg-fuchsia-600 border-white text-white'
+                                    : 'bg-slate-800 border-slate-700 text-slate-300'
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <span className="block font-mono text-[10px] uppercase text-cyan-300 font-bold mb-0.5">
+                            Geschlecht:
+                          </span>
+                          <div className="grid grid-cols-3 gap-1">
+                            {(
+                              [
+                                { id: 'male', label: 'Männl.' },
+                                { id: 'female', label: 'Weibl.' },
+                                { id: 'mixed', label: 'Mix' },
+                              ] as { id: BandGenderMode; label: string }[]
+                            ).map((opt) => (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => setBandGender(opt.id)}
+                                className={`py-1 px-1 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                                  bandGender === opt.id
+                                    ? 'bg-cyan-500 border-white text-slate-950'
+                                    : 'bg-slate-800 border-slate-700 text-slate-300'
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       </div>
 
-                      <div>
-                        <span className="block font-mono text-[10px] uppercase text-cyan-300 font-bold mb-0.5">
-                          Band-Besetzung (Geschlecht):
+                      <div className="pt-1 border-t border-slate-800/90 flex items-center justify-between gap-2">
+                        <span className="font-mono text-[10px] uppercase text-amber-300 font-bold">
+                          🔦 Konzertlicht:
                         </span>
-                        <div className="grid grid-cols-3 gap-1">
+                        <div className="grid grid-cols-3 gap-1 flex-1">
                           {(
                             [
-                              { id: 'male', label: 'Männlich' },
-                              { id: 'female', label: 'Weiblich' },
-                              { id: 'mixed', label: 'Gemischt' },
-                            ] as { id: BandGenderMode; label: string }[]
-                          ).map((opt) => (
-                            <button
-                              key={opt.id}
-                              type="button"
-                              onClick={() => setBandGender(opt.id)}
-                              className={`py-0.5 px-1.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
-                                bandGender === opt.id
-                                  ? 'bg-cyan-500 border-white text-slate-950 shadow-[0_0_8px_rgba(6,182,212,0.4)]'
-                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-500'
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="pt-1 border-t border-slate-800/90">
-                        <span className="block font-mono text-[10px] uppercase text-amber-300 font-bold mb-0.5">
-                          🔦 KONZERTBELEUCHTUNG:
-                        </span>
-                        <div className="grid grid-cols-3 gap-1">
-                          {(
-                            [
-                              { id: 'auto', label: 'Automatik' },
+                              { id: 'auto', label: 'Auto' },
                               { id: 'on', label: 'Immer An' },
                               { id: 'off', label: 'Aus' },
                             ] as { id: ConcertLightingMode; label: string }[]
@@ -3368,8 +4102,8 @@ export function App() {
                               }
                               className={`py-0.5 px-1.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
                                 adminSettings.concertLightingMode === opt.id
-                                  ? 'bg-amber-400 border-white text-slate-950 shadow-[0_0_8px_rgba(251,191,36,0.45)]'
-                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-slate-500'
+                                  ? 'bg-amber-400 border-white text-slate-950'
+                                  : 'bg-slate-800 border-slate-700 text-slate-300'
                               }`}
                             >
                               {opt.label}
@@ -3378,92 +4112,344 @@ export function App() {
                         </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Auto-Kino-Zeitplan */}
-                  <div className="pt-2 border-t border-slate-800">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-mono text-[10px] font-bold text-cyan-300">
-                        🎬 Auto-Kino-Zeitplan (Twitch auf Kino-Leinwand):
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setAdminSettings((s) => ({
-                            ...s,
-                            cinemaScheduleEnabled: !s.cinemaScheduleEnabled,
-                          }))
-                        }
-                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold cursor-pointer ${
-                          adminSettings.cinemaScheduleEnabled
-                            ? 'bg-cyan-400 text-slate-950'
-                            : 'bg-slate-800 text-slate-300'
-                        }`}
-                      >
-                        {adminSettings.cinemaScheduleEnabled ? 'AN' : 'AUS'}
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-3 gap-1 text-[10px] font-mono">
-                      <div>
-                        <label className="block text-[9px] text-slate-400">
-                          Wochentag
-                        </label>
-                        <select
-                          value={adminSettings.cinemaWeekday}
-                          onChange={(e) =>
-                            setAdminSettings((s) => ({
-                              ...s,
-                              cinemaWeekday: e.target.value,
-                            }))
-                          }
-                          className="w-full px-1 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-white"
+                    {/* 📻 80er-WEBRADIO / MIX-MANAGER & PLAYLIST-UI */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/95 border border-cyan-400/50 space-y-1.5">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-[11px] font-bold uppercase text-cyan-300">
+                          📻 80er-Webradio &amp; Mix-Playlist
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold ${
+                            radioStreamStatus === 'streaming'
+                              ? 'bg-emerald-500/20 border border-emerald-400 text-emerald-300'
+                              : radioStreamStatus === 'synth-fallback'
+                              ? 'bg-fuchsia-500/20 border border-fuchsia-400 text-fuchsia-200'
+                              : 'bg-slate-800 text-slate-400'
+                          }`}
                         >
-                          {[
-                            'Montag',
-                            'Dienstag',
-                            'Mittwoch',
-                            'Donnerstag',
-                            'Freitag',
-                            'Samstag',
-                            'Sonntag',
-                            'Täglich',
-                          ].map((day) => (
-                            <option key={day} value={day}>
-                              {day}
-                            </option>
-                          ))}
-                        </select>
+                          {radioStreamStatus === 'streaming'
+                            ? '📡 WEBRADIO LIVE'
+                            : radioStreamStatus === 'synth-fallback'
+                            ? '🎹 80s SYNTH-MIX AKTIV'
+                            : '⏹️ BEREIT'}
+                        </span>
                       </div>
-                      <div>
-                        <label className="block text-[9px] text-slate-400">
-                          Von (Start)
-                        </label>
+
+                      {/* Transport Controls */}
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={handlePrevTrack}
+                          className="min-h-[30px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 font-mono text-[10px] cursor-pointer"
+                        >
+                          ⏮️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isRadioPlaying) {
+                              soundFX.stopRadio();
+                            } else {
+                              handlePlayTrackAtIndex(currentTrackIdx);
+                            }
+                          }}
+                          className={`min-h-[30px] flex-1 py-0.5 px-2 rounded font-mono text-[11px] font-bold border cursor-pointer ${
+                            isRadioPlaying
+                              ? 'bg-rose-600 hover:bg-rose-500 border-white text-white'
+                              : 'bg-emerald-400 hover:bg-emerald-300 border-white text-slate-950'
+                          }`}
+                        >
+                          {isRadioPlaying ? '⏹️ Stop Mix' : '▶️ 80s Mix starten'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleNextTrack}
+                          className="min-h-[30px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 font-mono text-[10px] cursor-pointer"
+                        >
+                          ⏭️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRadioShuffle((s) => !s)}
+                          title="Shuffle"
+                          className={`min-h-[30px] px-2 py-0.5 rounded font-mono text-[10px] border cursor-pointer ${
+                            radioShuffle
+                              ? 'bg-fuchsia-600 border-white text-white'
+                              : 'bg-slate-800 border-slate-700 text-slate-400'
+                          }`}
+                        >
+                          🔀
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRadioRepeat((r) => !r)}
+                          title="Repeat"
+                          className={`min-h-[30px] px-2 py-0.5 rounded font-mono text-[10px] border cursor-pointer ${
+                            radioRepeat
+                              ? 'bg-cyan-500 border-white text-slate-950 font-bold'
+                              : 'bg-slate-800 border-slate-700 text-slate-400'
+                          }`}
+                        >
+                          🔁
+                        </button>
+                      </div>
+
+                      {/* Track List */}
+                      <div className="max-h-24 overflow-y-auto space-y-1 pr-0.5">
+                        {radioPlaylist.map((tr, idx) => {
+                          const isCurrent = idx === currentTrackIdx;
+                          return (
+                            <div
+                              key={tr.id}
+                              className={`flex items-center justify-between gap-1 px-2 py-1 rounded border text-[10px] font-mono ${
+                                isCurrent
+                                  ? 'bg-cyan-950/90 border-cyan-400 text-cyan-100 font-bold'
+                                  : 'bg-slate-900/90 border-slate-800 text-slate-300'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => handlePlayTrackAtIndex(idx)}
+                                className="flex-1 text-left truncate cursor-pointer"
+                              >
+                                {isCurrent && isRadioPlaying ? '🔊 ' : '🎵 '}
+                                {tr.title}{' '}
+                                <span className="text-slate-400">
+                                  ({tr.bpm} BPM)
+                                </span>
+                              </button>
+                              {tr.isCustom && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = radioPlaylist.filter(
+                                      (item) => item.id !== tr.id
+                                    );
+                                    setRadioPlaylist(
+                                      next.length > 0
+                                        ? next
+                                        : [...DEFAULT_80S_RADIO_PLAYLIST]
+                                    );
+                                    if (currentTrackIdx >= next.length) {
+                                      setCurrentTrackIdx(0);
+                                    }
+                                  }}
+                                  className="text-rose-400 hover:text-white px-1 cursor-pointer"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Add Custom Stream / Mix Track */}
+                      <div className="flex gap-1 pt-1 border-t border-slate-800">
                         <input
-                          type="time"
-                          value={adminSettings.cinemaStartTime}
-                          onChange={(e) =>
-                            setAdminSettings((s) => ({
-                              ...s,
-                              cinemaStartTime: e.target.value,
-                            }))
-                          }
-                          className="w-full px-1 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-white"
+                          type="text"
+                          value={newTrackTitle}
+                          onChange={(e) => setNewTrackTitle(e.target.value)}
+                          placeholder="Neuer Mix/Radio-Titel..."
+                          className="flex-1 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-white"
                         />
-                      </div>
-                      <div>
-                        <label className="block text-[9px] text-slate-400">
-                          Bis (Ende)
-                        </label>
                         <input
-                          type="time"
-                          value={adminSettings.cinemaEndTime}
+                          type="text"
+                          value={newTrackUrl}
+                          onChange={(e) => setNewTrackUrl(e.target.value)}
+                          placeholder="MP3/Stream-URL (optional)"
+                          className="flex-1 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-cyan-200"
+                        />
+                        <select
+                          value={newTrackStyle}
+                          onChange={(e) =>
+                            setNewTrackStyle(
+                              e.target.value as RadioTrackItem['synthStyle']
+                            )
+                          }
+                          className="px-1 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-amber-200"
+                        >
+                          <option value="electro-boogie">Electro</option>
+                          <option value="miami-bass">Miami 808</option>
+                          <option value="italo-disco">Italo</option>
+                          <option value="funk-jam">Funk</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const t = newTrackTitle.trim();
+                            if (!t) return;
+                            const added: RadioTrackItem = {
+                              id: `custom_mix_${Date.now()}`,
+                              title: t,
+                              subtitle: 'Custom Palladium Mix',
+                              streamUrl: newTrackUrl.trim() || undefined,
+                              synthStyle: newTrackStyle,
+                              bpm: 120,
+                              isCustom: true,
+                            };
+                            const next = [...radioPlaylist, added];
+                            setRadioPlaylist(next);
+                            setNewTrackTitle('');
+                            setNewTrackUrl('');
+                          }}
+                          className="px-2 py-0.5 rounded bg-cyan-500 text-slate-950 font-mono font-bold text-[10px] cursor-pointer"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 🎬 AUTO-KINO-ZEITPLAN (DIREKT UNTER DER WEBRADIO-BOX, MEHRFACH-WOCHENTAGE Mo-So) */}
+                    <div className="p-2 rounded-lg bg-slate-950/95 border border-cyan-400/45 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[10px] font-bold uppercase text-cyan-300">
+                          🎬 Auto-Kino-Zeitplan (Wochentage &amp; Uhrzeit):
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              cinemaScheduleEnabled: !s.cinemaScheduleEnabled,
+                            }))
+                          }
+                          className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold cursor-pointer ${
+                            adminSettings.cinemaScheduleEnabled
+                              ? 'bg-cyan-400 text-slate-950'
+                              : 'bg-slate-800 text-slate-300'
+                          }`}
+                        >
+                          {adminSettings.cinemaScheduleEnabled ? 'AN' : 'AUS'}
+                        </button>
+                      </div>
+
+                      {/* Multi-selectable weekday buttons (Mo - So, default Mi & Sa) */}
+                      <div className="grid grid-cols-7 gap-1">
+                        {(['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'] as const).map(
+                          (day) => {
+                            const activeDays =
+                              Array.isArray(adminSettings.cinemaWeekdays) &&
+                              adminSettings.cinemaWeekdays.length > 0
+                                ? adminSettings.cinemaWeekdays
+                                : ['Mi', 'Sa'];
+                            const isDayActive = activeDays.includes(day);
+                            return (
+                              <button
+                                key={day}
+                                type="button"
+                                onClick={() => {
+                                  const nextDays = isDayActive
+                                    ? activeDays.filter((d) => d !== day)
+                                    : [...activeDays, day];
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    cinemaWeekdays:
+                                      nextDays.length > 0 ? nextDays : [day],
+                                  }));
+                                }}
+                                className={`py-1 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                                  isDayActive
+                                    ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_8px_rgba(34,211,238,0.4)]'
+                                    : 'bg-slate-900 text-slate-400 border-slate-700 hover:border-cyan-400/50'
+                                }`}
+                              >
+                                {day}
+                              </button>
+                            );
+                          }
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5 text-[10px] font-mono">
+                        <div className="flex items-center gap-1 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-700">
+                          <span className="text-slate-400">Von:</span>
+                          <input
+                            type="time"
+                            value={adminSettings.cinemaStartTime || '20:00'}
+                            onChange={(e) =>
+                              setAdminSettings((s) => ({
+                                ...s,
+                                cinemaStartTime: e.target.value,
+                              }))
+                            }
+                            className="w-full bg-transparent text-white focus:outline-none"
+                          />
+                        </div>
+                        <div className="flex items-center gap-1 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-700">
+                          <span className="text-slate-400">Bis:</span>
+                          <input
+                            type="time"
+                            value={adminSettings.cinemaEndTime || '22:00'}
+                            onChange={(e) =>
+                              setAdminSettings((s) => ({
+                                ...s,
+                                cinemaEndTime: e.target.value,
+                              }))
+                            }
+                            className="w-full bg-transparent text-white focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* ⏳ LEINWAND-COUNTDOWN (80ER 7-SEGMENT-UHR AUF DER KINO-LEINWAND) */}
+                    <div className="p-2 rounded-lg bg-slate-950/95 border border-fuchsia-500/45 space-y-1.5">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-[10px] font-bold uppercase text-fuchsia-300">
+                          ⏳ LEINWAND-COUNTDOWN (TAGE : STD : MIN : SEK)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextState =
+                              !adminSettings.cinemaCountdownEnabled;
+                            setAdminSettings((s) => ({
+                              ...s,
+                              cinemaCountdownEnabled: nextState,
+                            }));
+                            if (nextState) {
+                              setCenterStageMode('cinema');
+                            }
+                          }}
+                          className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold cursor-pointer ${
+                            adminSettings.cinemaCountdownEnabled
+                              ? 'bg-emerald-400 text-slate-950 shadow-[0_0_8px_rgba(52,211,153,0.45)]'
+                              : 'bg-slate-800 text-slate-300'
+                          }`}
+                        >
+                          {adminSettings.cinemaCountdownEnabled ? 'AN' : 'AUS'}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                        <input
+                          type="text"
+                          value={
+                            adminSettings.cinemaCountdownTitle ||
+                            'NÄCHSTER LIVE-STREAM'
+                          }
                           onChange={(e) =>
                             setAdminSettings((s) => ({
                               ...s,
-                              cinemaEndTime: e.target.value,
+                              cinemaCountdownTitle: e.target.value,
                             }))
                           }
-                          className="w-full px-1 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-white"
+                          placeholder="Titel (z.B. NÄCHSTER LIVE-STREAM)"
+                          className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-cyan-200"
+                        />
+                        <input
+                          type="datetime-local"
+                          value={(
+                            adminSettings.cinemaCountdownTargetIso || ''
+                          ).slice(0, 16)}
+                          onChange={(e) =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              cinemaCountdownTargetIso: e.target.value,
+                            }))
+                          }
+                          className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-amber-200"
                         />
                       </div>
                     </div>
@@ -3471,13 +4457,35 @@ export function App() {
                 </div>
 
                 {/* ============================================================= */}
-                {/* SPALTE 2: 2. HALLENLICHT / NEBEL / PFEIFE, 3. EVENT, 4. WARTUNG */}
+                {/* SPALTE 2: 2. HALLENLICHT / NEBEL / DJ-JINGLES, 3. EVENT, 4. WARTUNG */}
                 {/* ============================================================= */}
                 <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
                   <div className="space-y-2">
-                    <h3 className="font-mono font-bold text-xs uppercase text-cyan-300">
-                      2. HALLENLICHT / BLACKLIGHT / NEBEL / TRILLERPFEIFE
-                    </h3>
+                    <div className="flex items-center justify-between gap-1">
+                      <h3 className="font-mono font-bold text-xs uppercase text-cyan-300">
+                        2. HALLENLICHT / NEBEL / DJ-JINGLES
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAdminSettings((s) => ({
+                            ...s,
+                            fullHallPutzlichtEnabled:
+                              !s.fullHallPutzlichtEnabled,
+                          }))
+                        }
+                        title="Schaltet das helle Putzlicht für die gesamte Halle inkl. Außenbereiche ein/aus"
+                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                          adminSettings.fullHallPutzlichtEnabled
+                            ? 'bg-amber-300 text-slate-950 border-white shadow-[0_0_10px_rgba(253,224,71,0.5)]'
+                            : 'bg-slate-800 text-slate-300 border-slate-600'
+                        }`}
+                      >
+                        💡 Voll-Putzlicht (Gesamte Halle):{' '}
+                        {adminSettings.fullHallPutzlichtEnabled ? 'AN' : 'AUS'}
+                      </button>
+                    </div>
+
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
                       {(
                         [
@@ -3491,7 +4499,7 @@ export function App() {
                           key={l.id}
                           type="button"
                           onClick={() => setLightingMode(l.id)}
-                          className={`py-1.5 px-1 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                          className={`min-h-[34px] py-1.5 px-1 rounded font-mono text-[10px] font-bold border cursor-pointer ${
                             lightingMode === l.id
                               ? 'bg-cyan-400 text-slate-950 border-white'
                               : 'bg-slate-800 text-slate-200 border-slate-600'
@@ -3529,7 +4537,7 @@ export function App() {
                         <button
                           type="button"
                           onClick={handleStart15MinBlacklight}
-                          className="flex-1 py-1 px-2 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white font-mono text-[10px] font-bold cursor-pointer"
+                          className="min-h-[30px] flex-1 py-0.5 px-2 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white font-mono text-[10px] font-bold cursor-pointer"
                         >
                           🟣 15 Min. Blacklight starten
                         </button>
@@ -3542,7 +4550,7 @@ export function App() {
                       </div>
                     </div>
 
-                    {/* 80er-Bühnen-Nebelmaschine, NPC-Stimmen & Trillerpfeife */}
+                    {/* 80er-Disco-Nebelmaschine (gerichteter Ausstoß am Disco-Tower) & Trillerpfeife */}
                     <div className="p-2 rounded-lg bg-slate-950/90 border border-cyan-500/40 space-y-1.5">
                       <div className="flex items-center justify-between gap-1.5">
                         <button
@@ -3553,55 +4561,22 @@ export function App() {
                               fogMachineEnabled: !s.fogMachineEnabled,
                             }))
                           }
-                          className={`flex-1 py-1 px-2 rounded font-mono text-[11px] font-bold border transition cursor-pointer ${
+                          className={`min-h-[32px] flex-1 py-1 px-2 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
                             adminSettings.fogMachineEnabled
                               ? 'bg-cyan-500 text-slate-950 border-white shadow-[0_0_12px_rgba(6,182,212,0.4)]'
                               : 'bg-slate-800 text-slate-300 border-slate-600'
                           }`}
                         >
-                          🌫️ Nebelmaschine:{' '}
+                          🌫️ Disconebel:{' '}
                           {adminSettings.fogMachineEnabled ? 'AN' : 'AUS'}
                         </button>
                         <button
                           type="button"
                           onClick={() => setFogBurstCount((c) => c + 1)}
-                          className="py-1 px-2.5 rounded bg-indigo-700 hover:bg-indigo-600 border border-indigo-400/60 text-white font-mono text-[11px] font-bold transition cursor-pointer"
+                          className="min-h-[32px] py-1 px-2 rounded bg-indigo-700 hover:bg-indigo-600 border border-indigo-400/60 text-white font-mono text-[10px] font-bold transition cursor-pointer"
                         >
                           💨 Nebelstoß
                         </button>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                        {/* Hörbare NPC-Stimmen (Sprechblasen) Toggle */}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setAdminSettings((s) => {
-                              const nextVoices = !s.npcVoicesEnabled;
-                              if (
-                                !nextVoices &&
-                                typeof window !== 'undefined' &&
-                                'speechSynthesis' in window
-                              ) {
-                                window.speechSynthesis.cancel();
-                              }
-                              return {
-                                ...s,
-                                npcVoicesEnabled: nextVoices,
-                              };
-                            })
-                          }
-                          className={`py-1 px-2 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
-                            adminSettings.npcVoicesEnabled
-                              ? 'bg-emerald-500 text-slate-950 border-white shadow-[0_0_10px_rgba(16,185,129,0.4)]'
-                              : 'bg-slate-800 text-slate-300 border-slate-600'
-                          }`}
-                        >
-                          🗣️ NPC-Stimmen (Sprechblasen):{' '}
-                          {adminSettings.npcVoicesEnabled ? 'AN' : 'AUS'}
-                        </button>
-
-                        {/* 📯 Skate-Guard-Trillerpfeife Toggle */}
                         <button
                           type="button"
                           onClick={() =>
@@ -3611,23 +4586,196 @@ export function App() {
                                 !s.skateGuardWhistleEnabled,
                             }))
                           }
-                          className={`py-1 px-2 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                          className={`min-h-[32px] py-1 px-2 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
                             adminSettings.skateGuardWhistleEnabled
-                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_10px_rgba(251,191,36,0.4)]'
+                              ? 'bg-amber-400 text-slate-950 border-white'
                               : 'bg-slate-800 text-slate-300 border-slate-600'
                           }`}
                         >
-                          📯 Skate-Guard-Trillerpfeife:{' '}
+                          📯 Pfeife:{' '}
                           {adminSettings.skateGuardWhistleEnabled ? 'AN' : 'AUS'}
                         </button>
                       </div>
                     </div>
 
+                    {/* 🎙️ DJ-JINGLE & SPRACHMEMO-PULT (OHNE BROWSER-ROBOTERSTIMME! 20% AUTO-DUCKING) */}
+                    <div className="p-2 rounded-lg bg-slate-950/95 border border-amber-400/50 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[10px] font-bold uppercase text-amber-300">
+                          🎙️ DJ-Jingle &amp; Sprachmemo-Pult (Auto-Ducking 20%):
+                        </span>
+                        <span className="font-mono text-[9px] text-slate-400">
+                          .mp3 / .m4a / .wav / .ogg
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1">
+                        {(
+                          adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS
+                        ).map((slot) => {
+                          const isPlayingSlot = activeJingleSlotId === slot.id;
+                          const hasCustomAudio = Boolean(slot.audioUrl);
+                          return (
+                            <div
+                              key={slot.id}
+                              className="flex items-center gap-0.5"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => handleTriggerDjJingle(slot)}
+                                className={`min-h-[30px] flex-1 px-1.5 py-1 rounded-l font-mono text-[10px] font-bold border text-left truncate cursor-pointer transition ${
+                                  isPlayingSlot
+                                    ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.5)]'
+                                    : 'bg-slate-900 hover:bg-slate-800 text-amber-100 border-slate-700'
+                                }`}
+                              >
+                                {slot.label}
+                                {hasCustomAudio ? ' 🎵' : ''}
+                              </button>
+                              <button
+                                type="button"
+                                title="Eigene Sprachmemo / Audio-Datei (.mp3, .m4a, .wav, .ogg) oder URL hinterlegen"
+                                onClick={() =>
+                                  setEditingJingleSlotId((curr) =>
+                                    curr === slot.id ? null : slot.id
+                                  )
+                                }
+                                className={`min-h-[30px] px-1.5 py-1 rounded-r border-y border-r font-mono text-[10px] cursor-pointer ${
+                                  editingJingleSlotId === slot.id ||
+                                  hasCustomAudio
+                                    ? 'bg-fuchsia-700 border-fuchsia-400 text-white'
+                                    : 'bg-slate-800 border-slate-700 text-slate-300'
+                                }`}
+                              >
+                                📂
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {editingJingleSlotId && (
+                        <div className="p-1.5 rounded bg-slate-900 border border-fuchsia-400/50 space-y-1 text-[10px] font-mono">
+                          {(() => {
+                            const slots =
+                              adminSettings.djJingleSlots ||
+                              DEFAULT_DJ_JINGLE_SLOTS;
+                            const targetSlot = slots.find(
+                              (s) => s.id === editingJingleSlotId
+                            );
+                            if (!targetSlot) return null;
+                            return (
+                              <>
+                                <div className="flex items-center justify-between text-fuchsia-200">
+                                  <span>
+                                    Audio für:{' '}
+                                    <strong>{targetSlot.label}</strong>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingJingleSlotId(null)}
+                                    className="text-slate-400 hover:text-white cursor-pointer"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <input
+                                    type="text"
+                                    value={targetSlot.audioUrl || ''}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      const nextSlots = slots.map((item) =>
+                                        item.id === targetSlot.id
+                                          ? { ...item, audioUrl: val }
+                                          : item
+                                      );
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        djJingleSlots: nextSlots,
+                                      }));
+                                    }}
+                                    placeholder="Audio-URL (.mp3/.m4a/.wav/.ogg)..."
+                                    className="flex-1 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-cyan-200"
+                                  />
+                                  <label className="px-2 py-0.5 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold cursor-pointer whitespace-nowrap">
+                                    Upload
+                                    <input
+                                      type="file"
+                                      accept=".mp3,.m4a,.wav,.ogg,audio/*"
+                                      className="hidden"
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (!file) return;
+                                        const reader = new FileReader();
+                                        reader.onload = () => {
+                                          if (
+                                            typeof reader.result === 'string'
+                                          ) {
+                                            const nextSlots = slots.map(
+                                              (item) =>
+                                                item.id === targetSlot.id
+                                                  ? {
+                                                      ...item,
+                                                      audioUrl:
+                                                        reader.result as string,
+                                                      fileName: file.name,
+                                                    }
+                                                  : item
+                                            );
+                                            setAdminSettings((s) => ({
+                                              ...s,
+                                              djJingleSlots: nextSlots,
+                                            }));
+                                          }
+                                        };
+                                        reader.readAsDataURL(file);
+                                      }}
+                                    />
+                                  </label>
+                                  {targetSlot.audioUrl && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const nextSlots = slots.map((item) =>
+                                          item.id === targetSlot.id
+                                            ? {
+                                                ...item,
+                                                audioUrl: '',
+                                                fileName: undefined,
+                                              }
+                                            : item
+                                        );
+                                        setAdminSettings((s) => ({
+                                          ...s,
+                                          djJingleSlots: nextSlots,
+                                        }));
+                                      }}
+                                      className="px-1.5 py-0.5 rounded bg-rose-800 text-white cursor-pointer"
+                                    >
+                                      Reset
+                                    </button>
+                                  )}
+                                </div>
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
+                    </div>
+
                     {/* 3. HALLEN-SPIEL / EVENT */}
                     <div className="pt-1 border-t border-slate-800">
-                      <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300 mb-1">
-                        3. HALLEN-SPIEL / EVENT (Ballspiel = Putzlicht)
-                      </h3>
+                      <div className="flex items-center justify-between mb-1">
+                        <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
+                          3. HALLEN-SPIEL / EVENT (Bahn-Spots &amp; 15er-Counter)
+                        </h3>
+                        {hallGameMode === 'ballspiel' && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-950 border border-amber-400 font-mono text-[10px] text-amber-200 font-bold">
+                            🏐 IM SPIEL: {telemetry.ballspielRemaining} /{' '}
+                            {telemetry.ballspielTotal}
+                          </span>
+                        )}
+                      </div>
                       <div className="grid grid-cols-4 gap-1">
                         {(
                           [
@@ -3641,7 +4789,7 @@ export function App() {
                             key={g.id}
                             type="button"
                             onClick={() => setHallGameMode(g.id)}
-                            className={`py-1 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                            className={`min-h-[32px] py-1 rounded font-mono text-[10px] font-bold border cursor-pointer ${
                               hallGameMode === g.id
                                 ? 'bg-fuchsia-500 text-white border-white'
                                 : 'bg-slate-800 text-slate-300 border-slate-700'
@@ -3652,29 +4800,73 @@ export function App() {
                         ))}
                       </div>
                     </div>
+
+                    {/* 📹 ECHTZEIT-LIVE-KAMERA / HALLEN-RÜCKFAHRKAMERA IM REGIE-PULT (INKL. SOFORTIGER STYLE-VORSCHAU!) */}
+                    <div className="p-2 rounded-lg bg-slate-950 border border-rose-500/50 space-y-1">
+                      <div className="flex items-center justify-between text-[10px] font-mono">
+                        <span className="text-rose-400 font-bold flex items-center gap-1">
+                          <span className="inline-block w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                          📹 LIVE HALLEN-MONITOR (RÜCKFAHRKAMERA)
+                        </span>
+                        <span className="text-amber-300 font-bold">
+                          STYLE-VORSCHAU: {selectedStyleTile.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="relative w-full aspect-video rounded overflow-hidden border border-slate-700 bg-black">
+                        <canvas
+                          id="admin-live-monitor-canvas"
+                          width={384}
+                          height={216}
+                          className="w-full h-full object-cover"
+                        />
+                        <div className="pointer-events-none absolute bottom-1 left-1.5 right-1.5 flex items-center justify-between text-[9px] font-mono text-emerald-300 bg-black/65 px-1.5 py-0.5 rounded">
+                          <span>
+                            CAM 01 • LOOK: {selectedStyleTile.toUpperCase()}
+                          </span>
+                          <span>
+                            TEMPO: {telemetry.speed.toFixed(1)} km/h • RUNDEN:{' '}
+                            {telemetry.laps}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
 
-                  {/* 4. WARTUNGSMODUS */}
-                  <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-                    <span className="font-mono text-xs font-bold text-amber-200">
-                      4. WARTUNGSMODUS („Hier wird gebohnert“):
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() =>
+                  {/* 4. WARTUNGSMODUS („Vor der Glastür mit zugezogenen Vorhängen“) */}
+                  <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs font-bold text-amber-200">
+                        4. WARTUNGSMODUS („Vor der Glastür“):
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAdminSettings((s) => ({
+                            ...s,
+                            isMaintenanceMode: !s.isMaintenanceMode,
+                          }))
+                        }
+                        className={`min-h-[32px] px-3 py-1 rounded font-mono text-xs font-bold cursor-pointer ${
+                          adminSettings.isMaintenanceMode
+                            ? 'bg-amber-400 text-slate-950'
+                            : 'bg-slate-800 text-slate-300'
+                        }`}
+                      >
+                        {adminSettings.isMaintenanceMode ? 'AKTIV' : 'AUS'}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={adminSettings.maintenanceReopenText || ''}
+                      onChange={(e) =>
                         setAdminSettings((s) => ({
                           ...s,
-                          isMaintenanceMode: !s.isMaintenanceMode,
+                          maintenanceReopenText: e.target.value,
                         }))
                       }
-                      className={`px-3 py-1 rounded font-mono text-xs font-bold cursor-pointer ${
-                        adminSettings.isMaintenanceMode
-                          ? 'bg-amber-400 text-slate-950'
-                          : 'bg-slate-800 text-slate-300'
-                      }`}
-                    >
-                      {adminSettings.isMaintenanceMode ? 'AKTIV' : 'AUS'}
-                    </button>
+                      placeholder="Türschild-Hinweis (z.B. 🚀 ALPHA STARTING SOON)"
+                      className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-[10px] font-mono text-amber-200"
+                    />
                   </div>
                 </div>
 
@@ -3750,7 +4942,6 @@ export function App() {
                         })}
                       </div>
 
-                      {/* Kompaktes Formular "+ Gast-DJ hinzufügen" */}
                       <div className="pt-1 border-t border-slate-800/90 space-y-1">
                         <div className="grid grid-cols-2 gap-1">
                           <input
@@ -3859,6 +5050,71 @@ export function App() {
                       </div>
                     </div>
 
+                    {/* YouTube Video/Playlist URL & Kino-Leinwand Quelle */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-cyan-500/35 space-y-1">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-[10px] text-cyan-300 font-bold uppercase">
+                          🎬 Kino-Leinwand Quelle (Auto-Ducking 0%):
+                        </span>
+                        <div className="flex gap-1">
+                          {(
+                            [
+                              { id: 'twitch', label: 'Twitch' },
+                              { id: 'youtube', label: 'YouTube' },
+                              { id: 'visualizer', label: '80s Visualizer' },
+                            ] as const
+                          ).map((srcOpt) => (
+                            <button
+                              key={srcOpt.id}
+                              type="button"
+                              onClick={() =>
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  cinemaStreamSource: srcOpt.id,
+                                }))
+                              }
+                              className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold border cursor-pointer ${
+                                (adminSettings.cinemaStreamSource ||
+                                  'twitch') === srcOpt.id
+                                  ? 'bg-cyan-400 text-slate-950 border-white'
+                                  : 'bg-slate-800 text-slate-300 border-slate-700'
+                              }`}
+                            >
+                              {srcOpt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        value={adminSettings.youtubeUrl || ''}
+                        onChange={(e) =>
+                          setAdminSettings((s) => ({
+                            ...s,
+                            youtubeUrl: e.target.value,
+                            cinemaStreamSource: e.target.value.trim()
+                              ? 'youtube'
+                              : s.cinemaStreamSource,
+                          }))
+                        }
+                        placeholder="YouTube Video- oder Playlist-URL (https://www.youtube.com/watch?v=...)"
+                        className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-cyan-200"
+                      />
+                      <div className="text-[9px] font-mono text-slate-400">
+                        💡 Hinweis: YouTube-Videos/Playlists müssen auf{' '}
+                        <strong className="text-amber-200">Öffentlich</strong>{' '}
+                        oder{' '}
+                        <strong className="text-amber-200">
+                          Nicht gelistet
+                        </strong>{' '}
+                        stehen. Wenn offline/blockiert, läuft automatisch der{' '}
+                        <strong className="text-fuchsia-300">
+                          80s PALLADIUM LIVE Equalizer
+                        </strong>
+                        !
+                      </div>
+                    </div>
+
                     <div>
                       <div className="flex items-center justify-between mb-0.5">
                         <label className="font-mono text-[10px] text-slate-300">
@@ -3891,11 +5147,11 @@ export function App() {
                     </div>
                   </div>
 
-                  {/* 6. GEISTER-SKATER MANAGER & 🌐 MULTIPLAYER-SPASSRAUM */}
+                  {/* 6. GEISTER-SKATER MANAGER (STANDARDMÄSSIG LEER) & HALLEN-CREW NAMEN */}
                   <div className="pt-1.5 border-t border-slate-800 space-y-1.5">
                     <div className="flex items-center justify-between">
                       <h3 className="font-mono font-bold text-[11px] uppercase text-cyan-300">
-                        6. GEISTER-SKATER MANAGER
+                        6. GEISTER-SKATER MANAGER (FREI DEFINIERBAR)
                       </h3>
                       <button
                         type="button"
@@ -3915,28 +5171,35 @@ export function App() {
                         {adminSettings.ghostSkatersEnabled ? 'AN' : 'AUS'}
                       </button>
                     </div>
-                    <div className="flex flex-wrap gap-1">
-                      {specialSkaters.map((name) => (
-                        <span
-                          key={name}
-                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-400/50 font-mono text-[10px] text-cyan-200"
-                        >
-                          👻 {name}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = specialSkaters.filter(
-                                (n) => n !== name
-                              );
-                              setSpecialSkaters(next);
-                              saveSpecialSkaters(next);
-                            }}
-                            className="text-rose-400 hover:text-rose-300 font-bold cursor-pointer"
-                          >
-                            ×
-                          </button>
+                    <div className="flex flex-wrap gap-1 min-h-[20px]">
+                      {specialSkaters.length === 0 ? (
+                        <span className="text-[10px] font-mono text-slate-400 italic">
+                          Keine Geister-Skater eingetragen – füge unten eigene
+                          Ehrengäste hinzu.
                         </span>
-                      ))}
+                      ) : (
+                        specialSkaters.map((name) => (
+                          <span
+                            key={name}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-400/50 font-mono text-[10px] text-cyan-200"
+                          >
+                            👻 {name}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = specialSkaters.filter(
+                                  (n) => n !== name
+                                );
+                                setSpecialSkaters(next);
+                                saveSpecialSkaters(next);
+                              }}
+                              className="text-rose-400 hover:text-rose-300 font-bold cursor-pointer"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))
+                      )}
                     </div>
                     <div className="flex gap-1">
                       <input
@@ -3962,13 +5225,73 @@ export function App() {
                       <button
                         type="button"
                         onClick={() => {
-                          setSpecialSkaters([...DEFAULT_SPECIAL_SKATERS]);
-                          saveSpecialSkaters([...DEFAULT_SPECIAL_SKATERS]);
+                          setSpecialSkaters([]);
+                          saveSpecialSkaters([]);
                         }}
                         className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[10px] cursor-pointer"
                       >
-                        Reset
+                        Leeren
                       </button>
+                    </div>
+
+                    {/* 👥 HALLEN-CREW UMBENENNEN (DJ, Light Jockey, Skate-Guard, Lehrerin, Krankenschwester) */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-amber-400/40 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[10px] font-bold uppercase text-amber-300">
+                          👥 Hallen-Crew Namen (localStorage):
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              crewNames: { ...DEFAULT_CREW_NAMES },
+                            }))
+                          }
+                          className="text-[9px] font-mono text-cyan-300 hover:underline cursor-pointer"
+                        >
+                          Standard
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 text-[9.5px] font-mono">
+                        {(
+                          [
+                            { key: 'dj', label: '🎧 DJ' },
+                            { key: 'lightJockey', label: '💡 Light-Jockey' },
+                            { key: 'skateGuard', label: '🦺 Skate-Guard' },
+                            { key: 'rollerTeacher', label: '🛼 Lehrerin' },
+                            { key: 'nurse', label: '➕ Sani-Schwester' },
+                            { key: 'security', label: '🛡️ Security' },
+                          ] as { key: keyof CrewNamesConfig; label: string }[]
+                        ).map((cField) => (
+                          <div key={cField.key} className="flex flex-col">
+                            <span className="text-[8.5px] text-slate-400">
+                              {cField.label}:
+                            </span>
+                            <input
+                              type="text"
+                              value={
+                                adminSettings.crewNames?.[cField.key] ??
+                                DEFAULT_CREW_NAMES[cField.key]
+                              }
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  crewNames: {
+                                    ...(s.crewNames || DEFAULT_CREW_NAMES),
+                                    [cField.key]: val,
+                                  },
+                                  ...(cField.key === 'dj'
+                                    ? { activeDjName: val }
+                                    : {}),
+                                }));
+                              }}
+                              className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-amber-100"
+                            />
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
 
@@ -4006,7 +5329,7 @@ export function App() {
                         <button
                           type="button"
                           onClick={() => handleOpenHostRoom('palladium-hanau-89')}
-                          className="flex-1 py-1 px-2.5 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-[11px] cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.4)]"
+                          className="min-h-[34px] flex-1 py-1 px-2.5 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-[11px] cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.4)]"
                         >
                           🚀 Multiplayer-Raum öffnen
                         </button>
@@ -4183,7 +5506,7 @@ export function App() {
                   })}
                 </div>
 
-                {/* Aktions-Buttons + 7. Statistik & Einlass / 8. Intro-Reset kompakt in einer Zeile */}
+                {/* Aktions-Buttons + 16-Bit Ganzkörper-Figuren Schalter + 7. Einlass-Resets */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-800">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -4195,7 +5518,7 @@ export function App() {
                         );
                         setShowAdminTerminal(false);
                       }}
-                      className="px-3 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold text-xs cursor-pointer transition shadow-[0_0_12px_rgba(251,191,36,0.35)]"
+                      className="min-h-[34px] px-3 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold text-xs cursor-pointer transition shadow-[0_0_12px_rgba(251,191,36,0.35)]"
                     >
                       👁️ Nur für mich testen (Admin-Vorschau)
                     </button>
@@ -4212,9 +5535,30 @@ export function App() {
                         );
                         soundFX.playChallengeUnlocked();
                       }}
-                      className="px-3 py-1 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-xs cursor-pointer transition shadow-[0_0_12px_rgba(16,185,129,0.4)]"
+                      className="min-h-[34px] px-3 py-1 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-xs cursor-pointer transition shadow-[0_0_12px_rgba(16,185,129,0.4)]"
                     >
                       🚀 Ausgewählten Style für alle freischalten
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAdminSettings((s) => ({
+                          ...s,
+                          pixel16BitFiguresEnabled: !s.pixel16BitFiguresEnabled,
+                        }))
+                      }
+                      className={`min-h-[34px] px-2.5 py-1 rounded-lg font-mono font-bold text-xs border cursor-pointer transition ${
+                        adminSettings.pixel16BitFiguresEnabled ||
+                        selectedStyleTile === 'pixel-16bit'
+                          ? 'bg-fuchsia-600 text-white border-white shadow-[0_0_12px_rgba(232,121,249,0.4)]'
+                          : 'bg-slate-800 text-slate-300 border-slate-600'
+                      }`}
+                    >
+                      👾 16-Bit Ganzkörper-Figuren (24×32):{' '}
+                      {adminSettings.pixel16BitFiguresEnabled ||
+                      selectedStyleTile === 'pixel-16bit'
+                        ? 'AN'
+                        : 'AUS'}
                     </button>
                     {styleFeedbackToast && (
                       <span className="text-[10px] font-mono text-cyan-300">
@@ -4223,11 +5567,9 @@ export function App() {
                     )}
                   </div>
 
-                  {/* 7. Statistik & Einlass / 8. First-Visit-Vorhang kompakt integriert */}
                   <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-slate-300">
                     <span>
-                      <strong>7. Statistik:</strong> Heute {visitsToday} • Ges.{' '}
-                      {hallStats.totalSessions} • Stempel:{' '}
+                      Stempel:{' '}
                       <strong
                         className={
                           entryPass?.locked
@@ -4273,6 +5615,69 @@ export function App() {
                     </button>
                   </div>
                 </div>
+
+                {/* ============================================================= */}
+                {/* 7. KOMPAKTE BESUCHER-ZÄHLER (4 KACHELN OHNE BALKENDIAGRAMM)   */}
+                {/* ============================================================= */}
+                <div className="pt-2 border-t border-slate-800/90">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-emerald-400/50 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-slate-400">
+                          Aktuell auf der Bahn
+                        </div>
+                        <div className="font-display font-black text-lg text-emerald-300 leading-tight">
+                          {activePlayersOnRink}
+                        </div>
+                      </div>
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 font-mono text-[9px] text-emerald-300">
+                        LIVE
+                      </span>
+                    </div>
+
+                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-cyan-400/50 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-slate-400">
+                          Besucher heute
+                        </div>
+                        <div className="font-display font-black text-lg text-cyan-300 leading-tight">
+                          {visitsToday}
+                        </div>
+                      </div>
+                      <span className="font-mono text-[9px] text-slate-500">
+                        {todayDateStr}
+                      </span>
+                    </div>
+
+                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-fuchsia-400/50 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-slate-400">
+                          Besuche gesamt
+                        </div>
+                        <div className="font-display font-black text-lg text-fuchsia-300 leading-tight">
+                          {hallStats.totalSessions}
+                        </div>
+                      </div>
+                      <span className="font-mono text-[9px] text-slate-500">
+                        localStorage
+                      </span>
+                    </div>
+
+                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-amber-400/50 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-slate-400">
+                          Meiste Besucher (Peak)
+                        </div>
+                        <div className="font-mono font-bold text-sm sm:text-base text-amber-300 leading-tight">
+                          {peakHourText}
+                        </div>
+                      </div>
+                      <span className="font-mono text-[9px] text-amber-300/80">
+                        ⏰ Stoßzeit
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -4283,34 +5688,70 @@ export function App() {
         {/* ===================================================================== */}
         {showGuestJoinModal && initialUrlRoomId && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-md">
-            <div className="w-full max-w-md rounded-2xl bg-[#120D20] border-2 border-cyan-400 shadow-[0_0_55px_rgba(0,240,255,0.45)] p-5 text-white space-y-4">
+            <div className="w-full max-w-lg rounded-2xl bg-[#120D20] border-2 border-cyan-400 shadow-[0_0_55px_rgba(0,240,255,0.45)] p-5 text-white space-y-4">
               <div className="text-center space-y-1">
                 <span className="inline-block px-2.5 py-0.5 rounded-full bg-cyan-950 border border-cyan-400/60 font-mono text-[10px] text-cyan-300 uppercase">
-                  🌐 Live-Einladung • Raum: {initialUrlRoomId}
+                  🌐 Live-Einladung • Raum: {initialUrlRoomId} • {APP_VERSION_LABEL}
                 </span>
                 <h2 className="font-display font-black text-lg text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-amber-200 to-fuchsia-400">
                   Willkommen im Palladium Hanau! Gib deinen Skater-Namen ein &amp;
-                  wähle deine Outfit-Farbe
+                  wähle dein Freigetränk an der Kasse
                 </h2>
                 <p className="text-xs text-slate-300">
-                  Du betrittst die reine Menschen-Bahn ohne KI-Bots – rolle
-                  live mit deinen Freunden zur 80er-Show!
+                  Du betrittst die echte Multiplayer-Bahn – rolle live mit
+                  deinen Freunden zur 80er-Show!
                 </p>
               </div>
 
               <div className="space-y-3">
                 <div>
                   <label className="block font-mono text-xs text-cyan-300 mb-1">
-                    Dein Skater-Name auf der Bahn:
+                    Dein Skater-Name auf der Bahn (Pflichtfeld, mind. 2 Zeichen):
                   </label>
                   <input
                     type="text"
                     maxLength={22}
                     value={guestJoinNameInput}
-                    onChange={(e) => setGuestJoinNameInput(e.target.value)}
-                    placeholder="z.B. Roller-Robby"
+                    onChange={(e) => {
+                      setGuestJoinNameInput(e.target.value);
+                      if (guestJoinError) setGuestJoinError(null);
+                    }}
+                    placeholder="Dein Name oder Spitzname..."
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-cyan-400/60 font-mono text-sm text-white focus:outline-none focus:border-amber-300"
                   />
+                  {guestJoinError && (
+                    <div className="mt-1.5 px-2.5 py-1.5 rounded bg-rose-950/90 border border-rose-400 text-rose-200 font-mono text-xs font-bold">
+                      ⚠️ {guestJoinError}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <span className="block font-mono text-xs text-amber-300 mb-1">
+                    🎁 Dein Willkommens-Freigetränk an der Kasse:
+                  </span>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(
+                      [
+                        { id: 'combo' as FreeDrinkChoice, label: '🎁 Slush + Bloba' },
+                        { id: 'slush' as FreeDrinkChoice, label: '🍧 Slush Puppy' },
+                        { id: 'bloba' as FreeDrinkChoice, label: '🥤 Bloba Cola' },
+                      ] as const
+                    ).map((dr) => (
+                      <button
+                        key={dr.id}
+                        type="button"
+                        onClick={() => setGuestFreeDrinkChoice(dr.id)}
+                        className={`py-1.5 px-2 rounded-lg font-mono text-xs font-bold border transition cursor-pointer ${
+                          guestFreeDrinkChoice === dr.id
+                            ? 'bg-amber-400 text-slate-950 border-white'
+                            : 'bg-slate-950 border-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {dr.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div>
@@ -4346,16 +5787,28 @@ export function App() {
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="button"
+                  disabled={
+                    guestJoinNameInput.trim().length < 2 ||
+                    mpStatus === 'connecting'
+                  }
                   onClick={() =>
                     handleConnectAsGuest(
                       initialUrlRoomId,
                       guestJoinNameInput,
-                      playerShirtColor
+                      playerShirtColor,
+                      guestFreeDrinkChoice
                     )
                   }
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-400 via-emerald-400 to-amber-300 text-slate-950 font-mono font-black text-sm cursor-pointer shadow-[0_0_20px_rgba(34,211,238,0.5)] hover:brightness-110 transition"
+                  className={`flex-1 py-2.5 px-4 rounded-xl font-mono font-black text-sm transition ${
+                    guestJoinNameInput.trim().length >= 2 &&
+                    mpStatus !== 'connecting'
+                      ? 'bg-gradient-to-r from-cyan-400 via-emerald-400 to-amber-300 text-slate-950 cursor-pointer shadow-[0_0_20px_rgba(34,211,238,0.5)] hover:brightness-110'
+                      : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                  }`}
                 >
-                  🛼 Jetzt live in die Halle rollen!
+                  {mpStatus === 'connecting'
+                    ? '⏳ Prüfe Namen & verbinde...'
+                    : '🛼 Jetzt live in die Halle rollen!'}
                 </button>
               </div>
             </div>

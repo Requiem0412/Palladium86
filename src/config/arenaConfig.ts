@@ -1,11 +1,13 @@
 /**
- * PALLADIUM ROLLER ARENA HANAU (STAND: ALPHA 0.1)
+ * PALLADIUM ROLLER ARENA HANAU (STAND: Alpha v0.2 • Aktualisiert am 13.11.2026)
  * Zentrale Konfiguration, Konstanten, Upgrades, Challenges & 16:9 Breitbild-Geometrie (1920 x 1080 px)
  */
 
 // ============================================================================
 // 1. EDITIERBARE TOP-LEVEL KONSTANTEN (ADMIN-PIN & GEISTER-SKATER)
 // ============================================================================
+
+export const APP_VERSION_LABEL = 'Update V0.3 + V0.4 • Aktualisiert am 13.11.2026';
 
 export const ADMIN_PIN = '1986';
 
@@ -14,11 +16,66 @@ export const ADMIN_PIN = '1986';
  * Halbtransparent (65% Deckkraft) mit kühlem Cyan-/Weiß-Hologramm-Schimmer
  * und dezenten Doppel-Rollenspuren statt geradem Stab-Schweif.
  */
-export const DEFAULT_SPECIAL_SKATERS: string[] = [
+export const DEFAULT_SPECIAL_SKATERS: string[] = [];
+
+export const LEGACY_DEFAULT_GHOSTS: string[] = [
   'Holger 86',
   'JR (Jürgen Becker)',
   'Palladium-Legende',
   'Nachtläufer Hanau',
+];
+
+export interface CrewNamesConfig {
+  dj: string;
+  lightJockey: string;
+  skateGuard: string;
+  rollerTeacher: string;
+  nurse: string;
+  security?: string;
+}
+
+export const DEFAULT_CREW_NAMES: CrewNamesConfig = {
+  dj: 'DJ Magic Force',
+  lightJockey: 'LJ Laser-Lutz',
+  skateGuard: 'SKATE-ORDNER MANNI',
+  rollerTeacher: 'TRAINERIN CONNY',
+  nurse: 'SANI-SANDRA',
+  security: 'Security-Sammy',
+};
+
+export interface DjJingleSlot {
+  id: 'intro' | 'last-round' | 'jam-battle' | 'slow-skating';
+  label: string;
+  bubbleText: string;
+  audioUrl: string;
+  fileName?: string;
+}
+
+export const DEFAULT_DJ_JINGLE_SLOTS: DjJingleSlot[] = [
+  {
+    id: 'intro',
+    label: '🎙️ Ladies & Gentlemen Intro',
+    bubbleText: '🎙️ LADIES & GENTLEMEN — WILLKOMMEN IM PALLADIUM HANAU!',
+    audioUrl: '',
+  },
+  {
+    id: 'last-round',
+    label: '🚨 Letzte Runde',
+    bubbleText: '🚨 ACHTUNG SKATER: LETZTE RUNDE FÜR HEUTE ABEND!',
+    audioUrl: '',
+  },
+  {
+    id: 'jam-battle',
+    label: '🕺 Jam-Battle',
+    bubbleText: '🕺 ALLE ZUR SPIEGELWAND — DAS JAM-BATTLE STARTET JETZT!',
+    audioUrl: '',
+  },
+  {
+    id: 'slow-skating',
+    label: '🪩 Slow-Skating',
+    bubbleText: '🪩 LICHT AUS, SPOT AN — ZEIT FÜR DIE KUSCHELRUNDE!',
+    audioUrl: '',
+  },
 ];
 
 export const DEFAULT_TWITCH_CHANNEL = 'Dj_Magic_Force';
@@ -34,6 +91,50 @@ export interface GuestDjPreset {
   tickerText: string;
   isResident?: boolean;
 }
+
+export interface RadioTrackItem {
+  id: string;
+  title: string;
+  subtitle: string;
+  streamUrl?: string;
+  synthStyle: 'electro-boogie' | 'italo-disco' | 'miami-bass' | 'funk-jam';
+  bpm: number;
+  isCustom?: boolean;
+}
+
+export const DEFAULT_80S_RADIO_PLAYLIST: RadioTrackItem[] = [
+  {
+    id: 'mix_klecknix_electro_86',
+    title: 'Klecknix Twin-Decks — Electro-Boogie 1986',
+    subtitle: 'Palladium Resident Mix • 118 BPM (Synth + Webradio)',
+    streamUrl: 'https://ice2.somafm.com/u80s-128-mp3',
+    synthStyle: 'electro-boogie',
+    bpm: 118,
+  },
+  {
+    id: 'mix_hanau_miami_bass',
+    title: 'Hanau Jam-Floor — 808 Miami Bass & Freestyle',
+    subtitle: 'DJ Magic Force Special • 124 BPM',
+    streamUrl: 'https://stream.nightride.fm/nightride.m4a',
+    synthStyle: 'miami-bass',
+    bpm: 124,
+  },
+  {
+    id: 'mix_italo_roller_night',
+    title: 'Rollerland & Palladium — Italo-Disco Night 1985',
+    subtitle: 'High-Energy Synthesizer • 120 BPM',
+    streamUrl: 'https://ice4.somafm.com/u80s-128-mp3',
+    synthStyle: 'italo-disco',
+    bpm: 120,
+  },
+  {
+    id: 'mix_boogie_funk_express',
+    title: 'Main-Kinzig Funk & Boogie Roller-Jam',
+    subtitle: 'Oldschool Funk & Slap-Bass • 114 BPM',
+    synthStyle: 'funk-jam',
+    bpm: 114,
+  },
+];
 
 export const PARODY_BANDS = [
   'LAMIO',
@@ -51,7 +152,7 @@ export type LightingMode =
   | 'blacklight'
   | 'putzlicht'
   | 'slow-skating';
-export type CenterStageMode = 'islands' | 'live-band' | 'cinema';
+export type CenterStageMode = 'islands' | 'band' | 'cinema';
 export type ConcertLightingMode = 'auto' | 'on' | 'off';
 export type ArenaVisualStyle = 'classic-neon' | 'palladium-1989' | 'pixel-16bit';
 export type BandSkinToneMode = 'black' | 'white' | 'mixed';
@@ -60,6 +161,8 @@ export type HallGameMode = 'free-skate' | 'ballspiel' | 'slalom' | 'stuhlsprung'
 export type CameraViewMode = 'top-down' | 'chase' | 'ego';
 export type PlayerCharacterMode = 'skater' | 'wheelchair';
 export type NeonUnderglowColor = 'pink' | 'cyan' | 'green' | 'gold';
+export type NeonWristbandColor = 'pink' | 'cyan' | 'green' | 'gold';
+export type TrickMoveId = 'spin360' | 'backward' | 'flamingo' | 'starjump';
 
 export interface ProShopUpgradesState {
   bearingsAbec9: boolean;
@@ -67,6 +170,14 @@ export interface ProShopUpgradesState {
   aluPlatesHighTop: boolean;
   underglowEnabled: boolean;
   underglowColor: NeonUnderglowColor;
+  wristbandsEnabled: boolean;
+  wristbandColor: NeonWristbandColor;
+  unlockedMoves: {
+    spin360: boolean;
+    backward: boolean;
+    flamingo: boolean;
+    starjump: boolean;
+  };
 }
 
 export type ChallengeId =
@@ -242,23 +353,37 @@ export const ARENA_LAYOUT = {
     },
   },
 
-  // Exakt ZWEI breite, hindernisfreie braune Banden-Zugänge mit grüner Schwelle:
-  // Zugang 1: Unten rechts an der Bahn-Rundung bei der schrägen Kasse & Pro-Shop
-  // Zugang 2: Unten links direkt an der oberen Kante des nach unten gerückten Bistros (Bistro-/WC-Bandenzugang)
+  // Exakt ZWEI versetzte Schleusen-Banden (unten links & unten rechts):
+  // - Türkise Hauptbande hat jeweils eine saubere Öffnung (ohne braune Pfosten/Türen/grüne Balken)
+  // - Leicht nach außen versetzt (y = 888) steht direkt parallel vor der Lücke ein kurzes Prallschutz-Bandenstück
+  //   im selben türkisen Banden-Design, sodass man links und rechts um das versetzte Bandenstück herum ein- und ausfährt.
   gates: {
-    // Zugang 1 (Unten rechts an der unteren Bande)
+    // Schleusen-Bande 2 (Unten rechts über „PRO-SHOP (PALLADIUMANER)“)
     bottomRightEntrance: {
-      xStart: 1355,
-      xEnd: 1535,
+      xStart: 1345,
+      xEnd: 1525,
       y: 860,
       width: 180,
+      baffleXStart: 1368,
+      baffleXEnd: 1502,
+      baffleY: 888,
     },
-    // Zugang 2 (Links unten an der Bande / Kurvenansatz direkt an der oberen Kante des Bistros unten links)
+    // (Vertikale linke Außenbande x = 290 ist jetzt komplett durchgängig geschlossen!)
     topLeftBistro: {
       x: 290,
       yStart: 615,
-      yEnd: 745,
-      height: 130,
+      yEnd: 615,
+      height: 0,
+    },
+    // Schleusen-Bande 1 (Unten links über „SLUSH & BLOBA“)
+    bottomLeftSchwingtuer: {
+      xStart: 485,
+      xEnd: 655,
+      y: 860,
+      width: 170,
+      baffleXStart: 508,
+      baffleXEnd: 632,
+      baffleY: 888,
     },
   },
 
@@ -313,7 +438,7 @@ export const ARENA_LAYOUT = {
 
   // Rechte Hallenwand: Drei braune Holzlatten-Sitzbänke ganz nach hinten an die rechte Außenwand gerückt,
   // mit Lücke in der Mitte (y = 385..545) für die breite Metall-Doppeltür ("TECHNIK & EQUIPMENT" + "NOTAUSGANG")
-  // und Platz darunter (ab y = 692) für das bündig & gerade an der rechten Wand platzierte Kassenhäuschen!
+  // und unten ab y = 685 schlichte 80er-Glasfront mit Eingangs-Gang zwischen Kassenhäuschen und Security-Sammy!
   rightWallBenches: [
     { id: 'right-bench-1', x: 1848, y: 132, width: 48, height: 112 },
     { id: 'right-bench-2', x: 1848, y: 262, width: 48, height: 112 },
@@ -328,17 +453,22 @@ export const ARENA_LAYOUT = {
   },
 
   // 3) Untere & rechte Hallenachse:
-  // A) 1) KASSE & EINGANG PALLADIUM: Bündig und gerade (angleRad = 0) an der rechten Außenwand
-  // an der Stelle der entfernten untersten Bank platziert!
+  // A) 1) KOMPAKTES KASSENHÄUSCHEN MIT SEITLICHEM SCHALTER RECHTS ZUM EINGANGS-GANG & SECURITY-SPAWN GEGENÜBER:
   bottomEntrance: {
     cashierBooth: {
-      x: 1768,
-      y: 692,
-      width: 136,
-      height: 188,
-      centerX: 1836,
-      centerY: 786,
-      angleRad: 0, // Bündig und gerade an der rechten Wand!
+      x: 1648,
+      y: 742,
+      width: 102,
+      height: 132,
+      centerX: 1699,
+      centerY: 808,
+      angleRad: 0, // Kompakt, Kassenschalter auf der rechten Seite zum Eingangs-Gang!
+    },
+    entranceSpawn: {
+      x: 1806,
+      y: 808,
+      securityX: 1862,
+      securityY: 808,
     },
     spinWarmupZone: { x: 1658, y: 842, radius: 52 },
     woodenSlatBenches: [] as {

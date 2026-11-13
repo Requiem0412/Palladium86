@@ -2,13 +2,20 @@ import {
   ArenaVisualStyle,
   ChallengeId,
   ConcertLightingMode,
+  CrewNamesConfig,
+  DEFAULT_80S_RADIO_PLAYLIST,
+  DEFAULT_CREW_NAMES,
+  DEFAULT_DJ_JINGLE_SLOTS,
   DEFAULT_DJ_NAME,
   DEFAULT_DJ_TICKER,
   DEFAULT_SPECIAL_SKATERS,
   DEFAULT_TWITCH_CHANNEL,
+  DjJingleSlot,
   GuestDjPreset,
+  LEGACY_DEFAULT_GHOSTS,
   PALLADIUM_CHALLENGES,
   ProShopUpgradesState,
+  RadioTrackItem,
 } from '../config/arenaConfig';
 
 const KEYS = {
@@ -23,9 +30,12 @@ const KEYS = {
   ADMIN_SESSION: 'palladium_admin_session_v1',
   ENTRY_PASS: 'palladium_entry_pass',
   GUEST_DJS: 'palladium_guest_djs_v1',
+  VISITOR_VOLUME: 'palladium_visitor_volume_v1',
+  RADIO_PLAYLIST: 'palladium_radio_playlist_v1',
 };
 
 export type SingleplayerDifficulty = 'beginner' | 'intermediate' | 'pro';
+export type FreeDrinkChoice = 'slush' | 'bloba' | 'combo';
 
 export interface EntryPassData {
   active?: boolean;
@@ -34,6 +44,7 @@ export interface EntryPassData {
   hasOwnSkates: boolean;
   hasRentedSkates: boolean;
   drinkChipAvailable: boolean;
+  freeDrinkChoice?: FreeDrinkChoice;
   stampedAt?: string;
 }
 
@@ -58,19 +69,30 @@ export interface HallStatsData {
 export interface AdminPersistentSettings {
   activeDjName: string;
   twitchChannel: string;
+  youtubeUrl: string;
+  cinemaStreamSource: 'twitch' | 'youtube' | 'visualizer';
   djTickerText: string;
   isMaintenanceMode: boolean;
+  maintenanceReopenText: string;
   cinemaScheduleEnabled: boolean;
   cinemaWeekday: string;
+  cinemaWeekdays: string[];
   cinemaStartTime: string;
   cinemaEndTime: string;
+  cinemaCountdownEnabled: boolean;
+  cinemaCountdownTitle: string;
+  cinemaCountdownTargetIso: string;
   autoBlacklightEnabled: boolean;
   ghostSkatersEnabled: boolean;
   fogMachineEnabled: boolean;
   npcVoicesEnabled: boolean;
   skateGuardWhistleEnabled: boolean;
+  fullHallPutzlichtEnabled: boolean;
+  pixel16BitFiguresEnabled: boolean;
   concertLightingMode: ConcertLightingMode;
   liveArenaStyle: ArenaVisualStyle;
+  crewNames: CrewNamesConfig;
+  djJingleSlots: DjJingleSlot[];
 }
 
 function getTodayDateString(): string {
@@ -129,15 +151,16 @@ export function loadPlayerProfile(): PlayerProfileStorage {
     const raw = localStorage.getItem(KEYS.PLAYER_PROFILE);
     if (raw) {
       const parsed = JSON.parse(raw);
+      const rawName = typeof parsed.name === 'string' ? parsed.name.trim() : '';
       return {
-        name: typeof parsed.name === 'string' ? parsed.name : 'Speedy 86',
+        name: rawName === 'Speedy 86' ? '' : rawName,
         isAnonymousGuest: Boolean(parsed.isAnonymousGuest),
       };
     }
   } catch {
     // fallback
   }
-  return { name: 'Speedy 86', isAnonymousGuest: false };
+  return { name: '', isAnonymousGuest: false };
 }
 
 export function savePlayerProfile(profile: PlayerProfileStorage): void {
@@ -187,11 +210,27 @@ export function loadProShopUpgrades(): ProShopUpgradesState {
     aluPlatesHighTop: false,
     underglowEnabled: false,
     underglowColor: 'cyan',
+    wristbandsEnabled: false,
+    wristbandColor: 'pink',
+    unlockedMoves: {
+      spin360: false,
+      backward: false,
+      flamingo: false,
+      starjump: false,
+    },
   };
   try {
     const raw = localStorage.getItem(KEYS.UPGRADES);
     if (raw) {
-      return { ...defaults, ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw);
+      return {
+        ...defaults,
+        ...parsed,
+        unlockedMoves: {
+          ...defaults.unlockedMoves,
+          ...(parsed.unlockedMoves || {}),
+        },
+      };
     }
   } catch {
     // fallback
@@ -209,14 +248,11 @@ export function saveProShopUpgrades(state: ProShopUpgradesState): void {
 
 export function loadHallStats(): HallStatsData {
   const defaultStats: HallStatsData = {
-    totalSessions: 14,
-    dailyCounts: { [getTodayDateString()]: 3 },
-    // Pre-seeded realistic 80s evening curve so the bar chart looks rich immediately
-    hourlyHistogram: [
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 7, 9, 6, 3, 1,
-    ],
-    totalPlaySeconds: 1680,
-    bestLapRecord: 12,
+    totalSessions: 0,
+    dailyCounts: {},
+    hourlyHistogram: Array.from({ length: 24 }, () => 0),
+    totalPlaySeconds: 0,
+    bestLapRecord: 0,
   };
   try {
     const raw = localStorage.getItem(KEYS.HALL_STATS);
@@ -226,13 +262,20 @@ export function loadHallStats(): HallStatsData {
         Array.isArray(parsed.hourlyHistogram) &&
         parsed.hourlyHistogram.length === 24
       ) {
-        return {
-          totalSessions: Number(parsed.totalSessions) || 1,
-          dailyCounts: parsed.dailyCounts || {},
-          hourlyHistogram: parsed.hourlyHistogram,
-          totalPlaySeconds: Number(parsed.totalPlaySeconds) || 0,
-          bestLapRecord: Number(parsed.bestLapRecord) || 0,
-        };
+        // Detect and clean up legacy pre-seeded demo curve so only real visits count
+        const isLegacyPreseeded =
+          parsed.hourlyHistogram[17] === 4 &&
+          parsed.hourlyHistogram[18] === 5 &&
+          parsed.hourlyHistogram[19] === 7;
+        if (!isLegacyPreseeded) {
+          return {
+            totalSessions: Number(parsed.totalSessions) || 1,
+            dailyCounts: parsed.dailyCounts || {},
+            hourlyHistogram: parsed.hourlyHistogram,
+            totalPlaySeconds: Number(parsed.totalPlaySeconds) || 0,
+            bestLapRecord: Number(parsed.bestLapRecord) || 0,
+          };
+        }
       }
     }
   } catch {
@@ -278,12 +321,15 @@ export function resetHallStats(): HallStatsData {
 
 export function computePeakHourLabel(histogram: number[]): string {
   let maxVal = -1;
-  let peakHour = 20;
+  let peakHour = new Date().getHours();
   for (let h = 0; h < 24; h++) {
     if (histogram[h] > maxVal) {
       maxVal = histogram[h];
       peakHour = h;
     }
+  }
+  if (maxVal <= 0) {
+    peakHour = new Date().getHours();
   }
   const nextHour = (peakHour + 1) % 24;
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -295,8 +341,17 @@ export function loadSpecialSkaters(): string[] {
     const raw = localStorage.getItem(KEYS.SPECIAL_SKATERS);
     if (raw) {
       const arr = JSON.parse(raw);
-      if (Array.isArray(arr) && arr.length > 0) {
-        return arr.map((s) => String(s).trim()).filter(Boolean);
+      if (Array.isArray(arr)) {
+        const cleaned = arr
+          .map((s) => String(s).trim())
+          .filter(
+            (name) =>
+              Boolean(name) &&
+              !LEGACY_DEFAULT_GHOSTS.some(
+                (legacy) => legacy.toLowerCase() === name.toLowerCase()
+              )
+          );
+        return cleaned;
       }
     }
   } catch {
@@ -317,24 +372,66 @@ export function loadAdminSettings(): AdminPersistentSettings {
   const defaults: AdminPersistentSettings = {
     activeDjName: DEFAULT_DJ_NAME,
     twitchChannel: DEFAULT_TWITCH_CHANNEL,
+    youtubeUrl: '',
+    cinemaStreamSource: 'twitch',
     djTickerText: DEFAULT_DJ_TICKER,
     isMaintenanceMode: false,
+    maintenanceReopenText: '🚀 ALPHA STARTING SOON',
     cinemaScheduleEnabled: false,
     cinemaWeekday: 'Mittwoch',
+    cinemaWeekdays: ['Mi', 'Sa'],
     cinemaStartTime: '20:00',
     cinemaEndTime: '22:00',
+    cinemaCountdownEnabled: false,
+    cinemaCountdownTitle: 'NÄCHSTER PALLADIUM LIVE-STREAM',
+    cinemaCountdownTargetIso: '',
     autoBlacklightEnabled: false,
     ghostSkatersEnabled: true,
     fogMachineEnabled: true,
-    npcVoicesEnabled: true,
+    npcVoicesEnabled: false,
     skateGuardWhistleEnabled: false,
+    fullHallPutzlichtEnabled: false,
+    pixel16BitFiguresEnabled: false,
     concertLightingMode: 'auto',
     liveArenaStyle: 'classic-neon',
+    crewNames: { ...DEFAULT_CREW_NAMES },
+    djJingleSlots: DEFAULT_DJ_JINGLE_SLOTS.map((s) => ({ ...s })),
   };
   try {
     const raw = localStorage.getItem(KEYS.ADMIN_SETTINGS);
     if (raw) {
-      return { ...defaults, ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw);
+      if (
+        !parsed.maintenanceReopenText ||
+        parsed.maintenanceReopenText === 'Wir öffnen wieder um 20:00 Uhr'
+      ) {
+        parsed.maintenanceReopenText = '🚀 ALPHA STARTING SOON';
+      }
+      const mergedCrewNames: CrewNamesConfig = {
+        ...DEFAULT_CREW_NAMES,
+        ...(parsed.crewNames || {}),
+      };
+      const mergedJingleSlots: DjJingleSlot[] = DEFAULT_DJ_JINGLE_SLOTS.map(
+        (defSlot) => {
+          const found = Array.isArray(parsed.djJingleSlots)
+            ? parsed.djJingleSlots.find(
+                (item: DjJingleSlot) => item && item.id === defSlot.id
+              )
+            : null;
+          return found ? { ...defSlot, ...found } : { ...defSlot };
+        }
+      );
+      const mergedWeekdays =
+        Array.isArray(parsed.cinemaWeekdays) && parsed.cinemaWeekdays.length > 0
+          ? parsed.cinemaWeekdays
+          : ['Mi', 'Sa'];
+      return {
+        ...defaults,
+        ...parsed,
+        cinemaWeekdays: mergedWeekdays,
+        crewNames: mergedCrewNames,
+        djJingleSlots: mergedJingleSlots,
+      };
     }
   } catch {
     // fallback
@@ -345,6 +442,55 @@ export function loadAdminSettings(): AdminPersistentSettings {
 export function saveAdminSettings(settings: AdminPersistentSettings): void {
   try {
     localStorage.setItem(KEYS.ADMIN_SETTINGS, JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+}
+
+export function loadVisitorVolume(): number {
+  try {
+    const raw = localStorage.getItem(KEYS.VISITOR_VOLUME);
+    if (raw !== null) {
+      const val = Number(raw);
+      if (!Number.isNaN(val)) {
+        return Math.max(0, Math.min(1, val));
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return 0.7;
+}
+
+export function saveVisitorVolume(vol: number): void {
+  try {
+    localStorage.setItem(
+      KEYS.VISITOR_VOLUME,
+      String(Math.max(0, Math.min(1, vol)))
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export function loadRadioPlaylist(): RadioTrackItem[] {
+  try {
+    const raw = localStorage.getItem(KEYS.RADIO_PLAYLIST);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return [...DEFAULT_80S_RADIO_PLAYLIST];
+}
+
+export function saveRadioPlaylist(list: RadioTrackItem[]): void {
+  try {
+    localStorage.setItem(KEYS.RADIO_PLAYLIST, JSON.stringify(list));
   } catch {
     // ignore
   }
