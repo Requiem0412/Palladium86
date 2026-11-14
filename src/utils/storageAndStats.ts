@@ -42,7 +42,33 @@ const KEYS = {
   CUSTOM_LAYOUT: 'palladium_custom_layout_v1',
   INTRO_TOUR: 'palladium_intro_tour_v1',
   LOCKER_SETTINGS: 'palladium_locker_settings_v1',
+  ALPHA_BETA_CONFIG: 'palladium_alpha_beta_config_v1',
+  ALPHA_BETA_SESSION: 'palladium_alpha_beta_session_v1',
+  ALPHA_BROWSER_ID: 'palladium_alpha_browser_id_v1',
 };
+
+export const MASTER_ADMIN_KEY = 'BOSS-PALLADIUM';
+
+export interface AlphaBetaKeyEntry {
+  key: string;
+  status: 'free' | 'redeemed';
+  redeemedBy?: string;
+  redeemedAt?: string;
+  redeemedByBrowserId?: string;
+}
+
+export interface AlphaBetaAccessConfig {
+  enabled: boolean;
+  keys: AlphaBetaKeyEntry[];
+}
+
+export interface LocalAlphaBetaSession {
+  activatedKey: string;
+  testerName: string;
+  browserId: string;
+  isMasterKey: boolean;
+  activatedAt: string;
+}
 
 export type SingleplayerDifficulty = 'beginner' | 'intermediate' | 'pro';
 export type FreeDrinkChoice = 'slush' | 'bloba' | 'combo';
@@ -1069,5 +1095,138 @@ export function saveLockerPlayerSettings(settings: LockerPlayerSettings): void {
   }
 }
 
+export function getOrCreateAlphaBrowserId(): string {
+  try {
+    let existing = localStorage.getItem(KEYS.ALPHA_BROWSER_ID);
+    if (!existing) {
+      existing = `brw-${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      localStorage.setItem(KEYS.ALPHA_BROWSER_ID, existing);
+    }
+    return existing;
+  } catch {
+    return 'brw-fallback';
+  }
+}
 
+export function loadAlphaBetaConfig(): AlphaBetaAccessConfig {
+  const defaults: AlphaBetaAccessConfig = {
+    enabled: false,
+    keys: [],
+  };
+  try {
+    const raw = localStorage.getItem(KEYS.ALPHA_BETA_CONFIG);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const keys: AlphaBetaKeyEntry[] = Array.isArray(parsed.keys)
+        ? parsed.keys
+            .filter(
+              (k: unknown): k is Record<string, unknown> =>
+                Boolean(k) &&
+                typeof k === 'object' &&
+                typeof (k as { key?: unknown }).key === 'string'
+            )
+            .map((k: Record<string, unknown>): AlphaBetaKeyEntry => ({
+              key: String(k.key).trim().toUpperCase(),
+              status: k.status === 'redeemed' ? 'redeemed' : 'free',
+              redeemedBy:
+                typeof k.redeemedBy === 'string' ? k.redeemedBy : undefined,
+              redeemedAt:
+                typeof k.redeemedAt === 'string' ? k.redeemedAt : undefined,
+              redeemedByBrowserId:
+                typeof k.redeemedByBrowserId === 'string'
+                  ? k.redeemedByBrowserId
+                  : undefined,
+            }))
+        : [];
+      return {
+        enabled: Boolean(parsed.enabled),
+        keys,
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return defaults;
+}
 
+export function saveAlphaBetaConfig(config: AlphaBetaAccessConfig): void {
+  try {
+    localStorage.setItem(KEYS.ALPHA_BETA_CONFIG, JSON.stringify(config));
+  } catch {
+    // ignore
+  }
+}
+
+export function generateAlphaBetaKeys(
+  count: number,
+  current: AlphaBetaAccessConfig
+): AlphaBetaAccessConfig {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const existingSet = new Set(current.keys.map((k) => k.key.toUpperCase()));
+  const added: AlphaBetaKeyEntry[] = [];
+  for (let i = 0; i < count; i++) {
+    let candidate = '';
+    let guard = 0;
+    do {
+      let suffix = '';
+      for (let j = 0; j < 4; j++) {
+        suffix += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      candidate = `BETA-${suffix}`;
+      guard++;
+    } while (existingSet.has(candidate) && guard < 100);
+    existingSet.add(candidate);
+    added.push({
+      key: candidate,
+      status: 'free',
+    });
+  }
+  const next: AlphaBetaAccessConfig = {
+    ...current,
+    keys: [...added, ...current.keys],
+  };
+  saveAlphaBetaConfig(next);
+  return next;
+}
+
+export function loadLocalAlphaBetaSession(): LocalAlphaBetaSession | null {
+  try {
+    const raw = localStorage.getItem(KEYS.ALPHA_BETA_SESSION);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.activatedKey === 'string') {
+        return {
+          activatedKey: parsed.activatedKey.trim().toUpperCase(),
+          testerName:
+            typeof parsed.testerName === 'string' ? parsed.testerName : '',
+          browserId:
+            typeof parsed.browserId === 'string'
+              ? parsed.browserId
+              : getOrCreateAlphaBrowserId(),
+          isMasterKey: Boolean(parsed.isMasterKey),
+          activatedAt:
+            typeof parsed.activatedAt === 'string' ? parsed.activatedAt : '',
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export function saveLocalAlphaBetaSession(
+  session: LocalAlphaBetaSession | null
+): void {
+  try {
+    if (!session) {
+      localStorage.removeItem(KEYS.ALPHA_BETA_SESSION);
+    } else {
+      localStorage.setItem(KEYS.ALPHA_BETA_SESSION, JSON.stringify(session));
+    }
+  } catch {
+    // ignore
+  }
+}

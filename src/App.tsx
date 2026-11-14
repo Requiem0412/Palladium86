@@ -48,16 +48,20 @@ import {
 import { soundFX } from './utils/soundEffects';
 import {
   AdminPersistentSettings,
+  AlphaBetaAccessConfig,
   ChallengeProgressMap,
   computePeakHourLabel,
   EntryPassData,
   FreeDrinkChoice,
+  generateAlphaBetaKeys,
+  getOrCreateAlphaBrowserId,
   HallStatsData,
   IntroStepId,
   IntroTourState,
   isIntroTourComplete,
   loadAdminSettings,
   loadAdminUnlockedSession,
+  loadAlphaBetaConfig,
   loadChallengesProgress,
   loadCrtFilterEnabled,
   loadCustomArenaLayout,
@@ -67,6 +71,7 @@ import {
   loadHasEnteredBefore,
   loadHideChronik,
   loadIntroTourState,
+  loadLocalAlphaBetaSession,
   loadLockerPlayerSettings,
   loadPlayerProfile,
   loadProShopUpgrades,
@@ -74,7 +79,9 @@ import {
   loadSpecialSkaters,
   loadStampCard,
   loadVisitorVolume,
+  LocalAlphaBetaSession,
   LockerPlayerSettings,
+  MASTER_ADMIN_KEY,
   recordDailyStampVisit,
   recordMultiplayerSessionStart,
   recordMultiplayerVisitorSnapshot,
@@ -86,6 +93,7 @@ import {
   resetStampCard,
   saveAdminSettings,
   saveAdminUnlockedSession,
+  saveAlphaBetaConfig,
   saveChallengesProgress,
   saveCrtFilterEnabled,
   saveCustomArenaLayout,
@@ -95,6 +103,7 @@ import {
   saveHasEnteredBefore,
   saveHideChronik,
   saveIntroTourState,
+  saveLocalAlphaBetaSession,
   saveLockerPlayerSettings,
   savePlayerProfile,
   saveProShopUpgrades,
@@ -261,6 +270,53 @@ type MultiplayerPacket =
     };
 
 export function App() {
+  // Closed-Alpha / Beta Access State & Browser Lock
+  const [alphaBrowserId] = useState<string>(() => getOrCreateAlphaBrowserId());
+  const [alphaBetaConfig, setAlphaBetaConfig] = useState<AlphaBetaAccessConfig>(
+    () => loadAlphaBetaConfig()
+  );
+  const [localAlphaSession, setLocalAlphaSession] =
+    useState<LocalAlphaBetaSession | null>(() => loadLocalAlphaBetaSession());
+  const initialUrlBetaKey = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    const params = new URLSearchParams(window.location.search);
+    return (params.get('key') || '').trim().toUpperCase();
+  }, []);
+  const [alphaKeyInput, setAlphaKeyInput] = useState<string>(
+    () =>
+      initialUrlBetaKey ||
+      loadLocalAlphaBetaSession()?.activatedKey ||
+      ''
+  );
+  const [alphaKeyError, setAlphaKeyError] = useState<string | null>(null);
+  const [copiedBetaKeyToast, setCopiedBetaKeyToast] = useState<string | null>(
+    null
+  );
+
+  const isAlphaBetaAuthorized = useMemo(() => {
+    if (!alphaBetaConfig.enabled) return true;
+    if (!localAlphaSession) return false;
+    if (
+      localAlphaSession.isMasterKey &&
+      localAlphaSession.activatedKey.toUpperCase() === MASTER_ADMIN_KEY
+    ) {
+      return true;
+    }
+    const matched = alphaBetaConfig.keys.find(
+      (k) => k.key.toUpperCase() === localAlphaSession.activatedKey.toUpperCase()
+    );
+    return Boolean(
+      matched &&
+        matched.status === 'redeemed' &&
+        matched.redeemedByBrowserId === alphaBrowserId
+    );
+  }, [alphaBetaConfig, alphaBrowserId, localAlphaSession]);
+
+  // Tester-Rechte: Testers (logged in with a BETA-XXXX key rather than BOSS-PALLADIUM) cannot access Hallenleiter-Regie or Baumenü
+  const isTesterAccount = Boolean(
+    localAlphaSession && !localAlphaSession.isMasterKey
+  );
+
   // First-visit curtain & chronicle state (cookie-free localStorage)
   const [hideChronik, setHideChronik] = useState<boolean>(() =>
     loadHideChronik()
@@ -268,9 +324,26 @@ export function App() {
   const [, setHasEnteredBefore] = useState<boolean>(() =>
     loadHasEnteredBefore()
   );
-  const [isCurtainOpen, setIsCurtainOpen] = useState<boolean>(
-    () => loadHasEnteredBefore() || loadHideChronik()
-  );
+  const [isCurtainOpen, setIsCurtainOpen] = useState<boolean>(() => {
+    const cfg = loadAlphaBetaConfig();
+    if (cfg.enabled) {
+      const sess = loadLocalAlphaBetaSession();
+      const bId = getOrCreateAlphaBrowserId();
+      const ok =
+        Boolean(sess?.isMasterKey && sess.activatedKey === MASTER_ADMIN_KEY) ||
+        Boolean(
+          sess &&
+            cfg.keys.some(
+              (k) =>
+                k.key === sess.activatedKey &&
+                k.status === 'redeemed' &&
+                k.redeemedByBrowserId === bId
+            )
+        );
+      if (!ok) return false;
+    }
+    return loadHasEnteredBefore() || loadHideChronik();
+  });
   const [showChronicleModal, setShowChronicleModal] = useState<boolean>(
     () => !loadHasEnteredBefore() && !loadHideChronik()
   );
@@ -762,6 +835,17 @@ export function App() {
     saveLockerPlayerSettings(lockerSettings);
   }, [lockerSettings]);
 
+  // Sync Alpha/Beta key config across open browser tabs via storage event
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'palladium_alpha_beta_config_v1') {
+        setAlphaBetaConfig(loadAlphaBetaConfig());
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   // Record Multiplayer sessions & visitor snapshots for exclusive Admin Hallen-Statistik
   const prevMpActiveRef = useRef<boolean>(false);
   useEffect(() => {
@@ -1015,73 +1099,198 @@ export function App() {
   }, [isCurtainOpen, telemetry.laps]);
 
   const canEnterSingleplayerHall =
-    isAnonymousGuest || playerName.trim().length >= 2;
+    (isAnonymousGuest || playerName.trim().length >= 2) &&
+    (!alphaBetaConfig.enabled || isAlphaBetaAuthorized);
+
+  const performHallEntry = useCallback(
+    (overrideName?: string) => {
+      soundFX.unlockAudioContext();
+      soundFX.playCurtainReveal();
+      saveHasEnteredBefore(true);
+      setHasEnteredBefore(true);
+      setIsCurtainOpen(true);
+      setShowChronicleModal(false);
+
+      const drinkLabel =
+        freeDrinkChoice === 'slush'
+          ? '1x Slush Puppy'
+          : freeDrinkChoice === 'bloba'
+          ? '1x Bloba Cola'
+          : '1x Slush Puppy & 1x Bloba Cola';
+      const displayName = overrideName
+        ? overrideName
+        : isAnonymousGuest
+        ? 'Ein Gast-Skater'
+        : playerName.trim();
+      showHallAnnouncement(
+        `📻 Hallenfunk: ${displayName} hat die Halle betreten (Freigetränk: ${drinkLabel})!`
+      );
+
+      // Record daily stamp on the 10er-Stempelkarte (localStorage)
+      const updatedCard = recordDailyStampVisit();
+      const chosenWelcomeDrink: 'slush' | 'bloba' =
+        freeDrinkChoice === 'bloba' ? 'bloba' : 'slush';
+      if (updatedCard.welcomeDrinkChoice !== chosenWelcomeDrink) {
+        updatedCard.welcomeDrinkChoice = chosenWelcomeDrink;
+        saveStampCard(updatedCard);
+      }
+      setStampCard(updatedCard);
+
+      // Lock Singleplayer Entry Stamp (palladium_entry_pass) for this visit if not already locked
+      setEntryPass((prev) => {
+        if (prev?.locked) return prev;
+        const lockedPass: EntryPassData = {
+          locked: true,
+          difficulty,
+          hasOwnSkates,
+          hasRentedSkates: false,
+          drinkChipAvailable: true,
+          freeDrinkChoice,
+          stampedAt: new Date().toISOString(),
+        };
+        saveEntryPass(lockedPass);
+        setHasRentedSkates(false);
+        setDrinkChipAvailable(true);
+        return lockedPass;
+      });
+
+      // Record Solo session start in Admin Hallen-Statistik
+      setHallStats(recordSoloSessionStart());
+
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+    },
+    [
+      difficulty,
+      freeDrinkChoice,
+      hasOwnSkates,
+      isAnonymousGuest,
+      playerName,
+      showHallAnnouncement,
+    ]
+  );
+
+  const handleActivateAlphaKeyAndEnter = useCallback(() => {
+    const cleanName = playerName.trim();
+    if (cleanName.length < 2) {
+      setAlphaKeyError(
+        'Bitte gib zuerst deinen Namen (mindestens 2 Zeichen) ein.'
+      );
+      return;
+    }
+    const cleanKey = alphaKeyInput.trim().toUpperCase();
+    if (!cleanKey) {
+      setAlphaKeyError('Bitte gib deinen Alpha/Beta-Zugangs-Key ein.');
+      return;
+    }
+
+    const now = new Date();
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(
+      now.getMinutes()
+    ).padStart(2, '0')} Uhr (${String(now.getDate()).padStart(2, '0')}.${String(
+      now.getMonth() + 1
+    ).padStart(2, '0')}.)`;
+
+    // 1. Check Hallenleiter Master Key ("BOSS-PALLADIUM")
+    if (cleanKey === MASTER_ADMIN_KEY) {
+      const masterSession: LocalAlphaBetaSession = {
+        activatedKey: MASTER_ADMIN_KEY,
+        testerName: cleanName,
+        browserId: alphaBrowserId,
+        isMasterKey: true,
+        activatedAt: timeStr,
+      };
+      setLocalAlphaSession(masterSession);
+      saveLocalAlphaBetaSession(masterSession);
+      setIsAnonymousGuest(false);
+      setIsAdminUnlocked(true);
+      saveAdminUnlockedSession(true);
+      setAlphaKeyError(null);
+      performHallEntry(cleanName);
+      return;
+    }
+
+    // 2. Check generated BETA-XXXX keys in latest config
+    const latestCfg = loadAlphaBetaConfig();
+    const keyIdx = latestCfg.keys.findIndex(
+      (k) => k.key.toUpperCase() === cleanKey
+    );
+    if (keyIdx === -1) {
+      setAlphaKeyError(
+        '❌ Ungültiger Zugangs-Key! Ohne gültigen Key ist der Spielstart gesperrt.'
+      );
+      return;
+    }
+
+    const targetKey = latestCfg.keys[keyIdx];
+    if (
+      targetKey.status === 'redeemed' &&
+      targetKey.redeemedByBrowserId &&
+      targetKey.redeemedByBrowserId !== alphaBrowserId
+    ) {
+      setAlphaKeyError(
+        `❌ Dieser Key ist bereits eingelöst (${
+          targetKey.redeemedBy || 'Tester'
+        }) und kann nicht von einer zweiten Person genutzt werden!`
+      );
+      return;
+    }
+
+    // Mark key as redeemed globally & bind to this browser
+    const updatedKeys = [...latestCfg.keys];
+    updatedKeys[keyIdx] = {
+      ...targetKey,
+      status: 'redeemed',
+      redeemedBy: cleanName,
+      redeemedAt: targetKey.redeemedAt || timeStr,
+      redeemedByBrowserId: alphaBrowserId,
+    };
+    const nextCfg: AlphaBetaAccessConfig = {
+      ...latestCfg,
+      keys: updatedKeys,
+    };
+    setAlphaBetaConfig(nextCfg);
+    saveAlphaBetaConfig(nextCfg);
+
+    const testerSession: LocalAlphaBetaSession = {
+      activatedKey: cleanKey,
+      testerName: cleanName,
+      browserId: alphaBrowserId,
+      isMasterKey: false,
+      activatedAt: targetKey.redeemedAt || timeStr,
+    };
+    setLocalAlphaSession(testerSession);
+    saveLocalAlphaBetaSession(testerSession);
+    setIsAnonymousGuest(false);
+
+    // Tester-Rechte: Lock & hide Hallenleiter-Regie and Baumenü for testers
+    setIsAdminUnlocked(false);
+    saveAdminUnlockedSession(false);
+    setBuildModeEnabled(false);
+    setShowAdminTerminal(false);
+    setShowAdminPinModal(false);
+    setAlphaKeyError(null);
+
+    performHallEntry(cleanName);
+  }, [alphaBrowserId, alphaKeyInput, performHallEntry, playerName]);
 
   const handleEnterHall = useCallback(() => {
+    if (alphaBetaConfig.enabled && !isAlphaBetaAuthorized) {
+      handleActivateAlphaKeyAndEnter();
+      return;
+    }
     if (!isAnonymousGuest && playerName.trim().length < 2) {
       return;
     }
-    soundFX.unlockAudioContext();
-    soundFX.playCurtainReveal();
-    saveHasEnteredBefore(true);
-    setHasEnteredBefore(true);
-    setIsCurtainOpen(true);
-    setShowChronicleModal(false);
-
-    const drinkLabel =
-      freeDrinkChoice === 'slush'
-        ? '1x Slush Puppy'
-        : freeDrinkChoice === 'bloba'
-        ? '1x Bloba Cola'
-        : '1x Slush Puppy & 1x Bloba Cola';
-    const displayName = isAnonymousGuest
-      ? 'Ein Gast-Skater'
-      : playerName.trim();
-    showHallAnnouncement(
-      `📻 Hallenfunk: ${displayName} hat die Halle betreten (Freigetränk: ${drinkLabel})!`
-    );
-
-    // Record daily stamp on the 10er-Stempelkarte (localStorage)
-    const updatedCard = recordDailyStampVisit();
-    const chosenWelcomeDrink: 'slush' | 'bloba' =
-      freeDrinkChoice === 'bloba' ? 'bloba' : 'slush';
-    if (updatedCard.welcomeDrinkChoice !== chosenWelcomeDrink) {
-      updatedCard.welcomeDrinkChoice = chosenWelcomeDrink;
-      saveStampCard(updatedCard);
-    }
-    setStampCard(updatedCard);
-
-    // Lock Singleplayer Entry Stamp (palladium_entry_pass) for this visit if not already locked
-    setEntryPass((prev) => {
-      if (prev?.locked) return prev;
-      const lockedPass: EntryPassData = {
-        locked: true,
-        difficulty,
-        hasOwnSkates,
-        hasRentedSkates: false,
-        drinkChipAvailable: true,
-        freeDrinkChoice,
-        stampedAt: new Date().toISOString(),
-      };
-      saveEntryPass(lockedPass);
-      setHasRentedSkates(false);
-      setDrinkChipAvailable(true);
-      return lockedPass;
-    });
-
-    // Record Solo session start in Admin Hallen-Statistik
-    setHallStats(recordSoloSessionStart());
-
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
+    performHallEntry();
   }, [
-    difficulty,
-    freeDrinkChoice,
-    hasOwnSkates,
+    alphaBetaConfig.enabled,
+    handleActivateAlphaKeyAndEnter,
+    isAlphaBetaAuthorized,
     isAnonymousGuest,
+    performHallEntry,
     playerName,
-    showHallAnnouncement,
   ]);
 
   // Global keyboard shortcut for Admin Terminal: Ctrl + Shift + A (or Cmd + Shift + A)
@@ -1089,6 +1298,8 @@ export function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
         e.preventDefault();
+        // Tester-Rechte: Hallenleiter-Regie & Baumenü completely locked for testers
+        if (isTesterAccount) return;
         if (isAdminUnlocked) {
           setShowAdminTerminal((prev) => !prev);
         } else {
@@ -1134,6 +1345,7 @@ export function App() {
     handleEnterHall,
     isAdminUnlocked,
     isCurtainOpen,
+    isTesterAccount,
     showLockerModal,
   ]);
 
@@ -1178,6 +1390,8 @@ export function App() {
   }, []);
 
   const handleLogoClick = () => {
+    // Tester-Rechte: Hallenleiter-Regie & Baumenü completely locked for testers
+    if (isTesterAccount) return;
     const now = performance.now();
     const recent = logoClickTimestampsRef.current.filter((t) => now - t < 1100);
     recent.push(now);
@@ -1196,7 +1410,14 @@ export function App() {
 
   const handleVerifyAdminPin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (pinInput.trim() === ADMIN_PIN) {
+    if (isTesterAccount) {
+      setPinError('Hallenleiter-Regie ist für Alpha/Beta-Tester gesperrt.');
+      return;
+    }
+    if (
+      pinInput.trim() === ADMIN_PIN ||
+      pinInput.trim().toUpperCase() === MASTER_ADMIN_KEY
+    ) {
       setIsAdminUnlocked(true);
       saveAdminUnlockedSession(true);
       setShowAdminPinModal(false);
@@ -3485,7 +3706,7 @@ export function App() {
             </span>
           )}
 
-          {isAdminUnlocked && (
+          {isAdminUnlocked && !isTesterAccount && (
             <button
               type="button"
               onClick={() => setShowAdminTerminal(true)}
@@ -3638,7 +3859,7 @@ export function App() {
         )}
 
         {/* COMPACT TOP BAR FOR ACTIVE BUILD MODE ("🛠️ BAUMENÜ") WHEN ADMIN MODAL IS CLOSED */}
-        {isAdminUnlocked && buildModeEnabled && !showAdminTerminal && (
+        {isAdminUnlocked && !isTesterAccount && buildModeEnabled && !showAdminTerminal && (
           <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950/95 border-2 border-amber-400 text-amber-100 font-mono text-[10.5px] shadow-[0_0_25px_rgba(251,191,36,0.5)] backdrop-blur-md">
             <span className="font-bold text-amber-300">
               🛠️ BAUMENÜ (Drag • Zieh-Eck • Pfeil 1/10px • [R] Drehen)
@@ -3811,12 +4032,18 @@ export function App() {
             DEFAULT_DJ_NAME
           }
           isMuted={isMuted}
-          isCurtainOpen={isCurtainOpen && !isBlockedByMaintenance}
+          isCurtainOpen={
+            isCurtainOpen &&
+            !isBlockedByMaintenance &&
+            (!alphaBetaConfig.enabled || isAlphaBetaAuthorized)
+          }
           isMultiplayerActive={isMultiplayerActive}
           remotePlayers={remotePlayers}
           remoteControllerInputRef={remoteControllerInputRef}
           onLocalPlayerState={handleLocalMultiplayerState}
-          buildModeEnabled={isAdminUnlocked && buildModeEnabled}
+          buildModeEnabled={
+            isAdminUnlocked && !isTesterAccount && buildModeEnabled
+          }
           customLayout={customLayout}
           selectedBuildItemId={selectedBuildItemId}
           onSelectBuildItem={setSelectedBuildItemId}
@@ -4163,7 +4390,9 @@ export function App() {
         {/* ===================================================================== */}
         {/* 1. FIRST-VISIT VELVET CURTAIN & HISTORICAL CHRONICLE OVERLAY          */}
         {/* ===================================================================== */}
-        {(!isCurtainOpen || showChronicleModal) && (
+        {(!isCurtainOpen ||
+          showChronicleModal ||
+          (alphaBetaConfig.enabled && !isAlphaBetaAuthorized)) && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-[#1A051D]/98 via-[#0B0716]/98 to-[#05050B]/98 p-4 overflow-y-auto backdrop-blur-md">
             <div className="relative w-full max-w-4xl rounded-2xl bg-[#110C1D] border-2 border-fuchsia-500/60 shadow-[0_0_80px_rgba(232,121,249,0.35)] p-6 md:p-8 text-[#FFF8E7]">
               {/* Top Neon Emblem */}
@@ -4686,55 +4915,132 @@ export function App() {
                   </div>
                 )}
 
-                {/* 1. DEIN SKATER-NAME & EINSTIEG (GANZ OBEN) */}
-                <div className="p-3.5 rounded-xl bg-[#101322] border border-cyan-500/40 flex flex-col md:flex-row items-center justify-between gap-4">
-                  <div className="flex-1 w-full">
-                    <label className="block font-mono text-xs md:text-sm font-bold text-cyan-300 uppercase mb-1.5">
-                      1. DEIN SKATER-NAME &amp; EINSTIEG (Pflichtfeld ab 2 Zeichen oder Anonym-Gast):
-                    </label>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <input
-                        type="text"
-                        value={playerName}
-                        disabled={isAnonymousGuest}
-                        onChange={(e) => setPlayerName(e.target.value)}
-                        placeholder="Dein Name oder Spitzname..."
-                        maxLength={22}
-                        className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none disabled:opacity-50"
-                      />
-                      <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={isAnonymousGuest}
-                          onChange={(e) =>
-                            setIsAnonymousGuest(e.target.checked)
-                          }
-                          className="accent-fuchsia-500 w-4 h-4 cursor-pointer"
-                        />
-                        <span>[ ] Anonym bleiben / Als Gast rollen</span>
-                      </label>
+                {/* CLOSED-ALPHA / BETA-ZUGANG (WENN IN DER REGIE AKTIVIERT) */}
+                {alphaBetaConfig.enabled ? (
+                  <div className="p-4 rounded-xl bg-gradient-to-r from-[#1a0d2e] via-[#11152c] to-[#1a0d2e] border-2 border-amber-400 shadow-[0_0_28px_rgba(251,191,36,0.3)] space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-400/30 pb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2.5 py-0.5 rounded bg-amber-400 text-slate-950 font-mono text-xs font-black uppercase">
+                          🔒 ALPHA / BETA-ZUGANG
+                        </span>
+                        <span className="font-mono text-xs text-amber-200 font-bold">
+                          Geschlossener Testbetrieb • Key erforderlich
+                        </span>
+                      </div>
+                      {isAlphaBetaAuthorized && localAlphaSession && (
+                        <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-400/70 font-mono text-[11px] text-emerald-300 font-bold">
+                          🟢 Aktiv für diesen Browser ({localAlphaSession.activatedKey})
+                        </span>
+                      )}
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-1">
-                      Bitte mindestens 2 Zeichen eingeben (oder „Als Gast rollen“
-                      aktivieren), um an der Kasse vorbei in die Halle zu starten.
-                    </p>
-                  </div>
 
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      disabled={!canEnterSingleplayerHall}
-                      onClick={handleEnterHall}
-                      className={`px-6 py-3.5 rounded-xl font-display font-black text-base tracking-wider transition ${
-                        canEnterSingleplayerHall
-                          ? 'bg-gradient-to-r from-fuchsia-600 via-pink-500 to-cyan-500 hover:from-fuchsia-500 hover:to-cyan-400 text-white shadow-[0_0_25px_rgba(232,121,249,0.6)] cursor-pointer'
-                          : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                      }`}
-                    >
-                      🛼 HALLE BETRETEN [ENTER]
-                    </button>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-mono text-xs font-bold text-cyan-300 uppercase mb-1">
+                          1. Dein Tester-Name:
+                        </label>
+                        <input
+                          type="text"
+                          value={playerName}
+                          onChange={(e) => {
+                            setIsAnonymousGuest(false);
+                            setPlayerName(e.target.value);
+                            if (alphaKeyError) setAlphaKeyError(null);
+                          }}
+                          placeholder="Dein Name oder Spitzname..."
+                          maxLength={22}
+                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-mono text-xs font-bold text-amber-300 uppercase mb-1">
+                          2. Dein Zugangs-Key (z. B. BETA-XXXX):
+                        </label>
+                        <input
+                          type="text"
+                          value={alphaKeyInput}
+                          onChange={(e) => {
+                            setAlphaKeyInput(e.target.value.toUpperCase());
+                            if (alphaKeyError) setAlphaKeyError(null);
+                          }}
+                          placeholder="BETA-XXXX"
+                          maxLength={24}
+                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-amber-400/60 font-mono text-sm text-amber-200 uppercase focus:border-amber-300 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    {alphaKeyError && (
+                      <div className="px-3 py-1.5 rounded bg-rose-950/90 border border-rose-400 text-rose-200 font-mono text-xs font-bold">
+                        {alphaKeyError}
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                      <p className="text-[11px] text-slate-300 font-mono">
+                        Der Key wird bei Einlösung fest mit deinem Namen &amp; Browser verknüpft (kein Zweit-Login mit demselben Key möglich).
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleActivateAlphaKeyAndEnter}
+                        className="px-6 py-3 rounded-xl bg-gradient-to-r from-amber-400 via-fuchsia-500 to-cyan-400 hover:from-amber-300 hover:to-cyan-300 text-slate-950 font-display font-black text-base tracking-wider shadow-[0_0_25px_rgba(251,191,36,0.55)] cursor-pointer transition"
+                      >
+                        🔑 Aktivieren &amp; Starten
+                      </button>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  /* 1. DEIN SKATER-NAME & EINSTIEG (GANZ OBEN, WENN ALPHA/BETA AUS) */
+                  <div className="p-3.5 rounded-xl bg-[#101322] border border-cyan-500/40 flex flex-col md:flex-row items-center justify-between gap-4">
+                    <div className="flex-1 w-full">
+                      <label className="block font-mono text-xs md:text-sm font-bold text-cyan-300 uppercase mb-1.5">
+                        1. DEIN SKATER-NAME &amp; EINSTIEG (Pflichtfeld ab 2 Zeichen oder Anonym-Gast):
+                      </label>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <input
+                          type="text"
+                          value={playerName}
+                          disabled={isAnonymousGuest}
+                          onChange={(e) => setPlayerName(e.target.value)}
+                          placeholder="Dein Name oder Spitzname..."
+                          maxLength={22}
+                          className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none disabled:opacity-50"
+                        />
+                        <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isAnonymousGuest}
+                            onChange={(e) =>
+                              setIsAnonymousGuest(e.target.checked)
+                            }
+                            className="accent-fuchsia-500 w-4 h-4 cursor-pointer"
+                          />
+                          <span>[ ] Anonym bleiben / Als Gast rollen</span>
+                        </label>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Bitte mindestens 2 Zeichen eingeben (oder „Als Gast rollen“
+                        aktivieren), um an der Kasse vorbei in die Halle zu starten.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        disabled={!canEnterSingleplayerHall}
+                        onClick={handleEnterHall}
+                        className={`px-6 py-3.5 rounded-xl font-display font-black text-base tracking-wider transition ${
+                          canEnterSingleplayerHall
+                            ? 'bg-gradient-to-r from-fuchsia-600 via-pink-500 to-cyan-500 hover:from-fuchsia-500 hover:to-cyan-400 text-white shadow-[0_0_25px_rgba(232,121,249,0.6)] cursor-pointer'
+                            : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                        }`}
+                      >
+                        🛼 HALLE BETRETEN [ENTER]
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* 2. ROLLSCHUH-CHECK (DIREKT DARUNTER) */}
                 <div className="p-3.5 rounded-xl bg-[#141024] border border-fuchsia-500/40 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
@@ -7988,6 +8294,180 @@ export function App() {
                       </span>
                     </div>
                   </div>
+                </div>
+
+                {/* ============================================================= */}
+                {/* 7B. CLOSED-ALPHA / BETA-ZUGANG MIT KEY-GENERATOR & KEY-ZÄHLER */}
+                {/* ============================================================= */}
+                <div className="pt-2.5 border-t border-slate-800/90 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next: AlphaBetaAccessConfig = {
+                            ...alphaBetaConfig,
+                            enabled: !alphaBetaConfig.enabled,
+                          };
+                          setAlphaBetaConfig(next);
+                          saveAlphaBetaConfig(next);
+                        }}
+                        className={`min-h-[30px] px-3 py-1 rounded font-mono text-xs font-bold border cursor-pointer transition ${
+                          alphaBetaConfig.enabled
+                            ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.5)]'
+                            : 'bg-slate-800 text-slate-200 border-slate-600 hover:border-amber-400'
+                        }`}
+                      >
+                        🔒 Alpha/Beta-Zugang:{' '}
+                        {alphaBetaConfig.enabled ? 'AN' : 'AUS'}
+                      </button>
+
+                      {/* Kompakte Zähler-Leiste */}
+                      <div className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-[11px] text-slate-200 flex flex-wrap items-center gap-2">
+                        <span>
+                          Keys erstellt/rausgegeben:{' '}
+                          <strong className="text-cyan-300">
+                            {alphaBetaConfig.keys.length}
+                          </strong>
+                        </span>
+                        <span className="text-slate-600">|</span>
+                        <span>
+                          Registriert/Genutzt:{' '}
+                          <strong className="text-rose-300">
+                            {
+                              alphaBetaConfig.keys.filter(
+                                (k) => k.status === 'redeemed'
+                              ).length
+                            }
+                          </strong>
+                        </span>
+                        <span className="text-slate-600">|</span>
+                        <span>
+                          Noch frei:{' '}
+                          <strong className="text-emerald-300">
+                            {
+                              alphaBetaConfig.keys.filter(
+                                (k) => k.status === 'free'
+                              ).length
+                            }
+                          </strong>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Generator Buttons (+ 1 Key / + 3 Keys generieren) */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-mono text-[10px] text-amber-300/90 mr-1">
+                        Leiter-Key: <strong>{MASTER_ADMIN_KEY}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAlphaBetaConfig((prev) =>
+                            generateAlphaBetaKeys(1, prev)
+                          )
+                        }
+                        className="min-h-[28px] px-2.5 py-1 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono text-[11px] font-bold cursor-pointer"
+                      >
+                        + 1 Key
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAlphaBetaConfig((prev) =>
+                            generateAlphaBetaKeys(3, prev)
+                          )
+                        }
+                        className="min-h-[28px] px-2.5 py-1 rounded bg-fuchsia-500 hover:bg-fuchsia-400 text-white font-mono text-[11px] font-bold cursor-pointer"
+                      >
+                        + 3 Keys generieren
+                      </button>
+                      {copiedBetaKeyToast && (
+                        <span className="font-mono text-[10px] text-emerald-300 font-bold">
+                          {copiedBetaKeyToast}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Kompakte Key-Liste */}
+                  {alphaBetaConfig.keys.length > 0 && (
+                    <div className="max-h-36 overflow-y-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-1.5 p-2 rounded-lg bg-slate-950/90 border border-slate-800 font-mono text-[10.5px]">
+                      {alphaBetaConfig.keys.map((item) => {
+                        const isRedeemed = item.status === 'redeemed';
+                        return (
+                          <div
+                            key={item.key}
+                            className={`flex items-center justify-between gap-1.5 px-2 py-1 rounded border ${
+                              isRedeemed
+                                ? 'bg-rose-950/35 border-rose-500/50 text-rose-100'
+                                : 'bg-emerald-950/30 border-emerald-500/40 text-emerald-100'
+                            }`}
+                          >
+                            <div className="truncate">
+                              <span className="font-bold mr-1.5">
+                                {item.key}
+                              </span>
+                              <span>
+                                {isRedeemed
+                                  ? `🔴 Eingelöst (${item.redeemedBy || 'Gast'}${
+                                      item.redeemedAt
+                                        ? `, ${item.redeemedAt}`
+                                        : ''
+                                    })`
+                                  : '🟢 Frei'}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                title="Link & Key in Zwischenablage kopieren (?key=BETA-XXXX)"
+                                onClick={() => {
+                                  if (
+                                    typeof window !== 'undefined' &&
+                                    navigator.clipboard
+                                  ) {
+                                    const base = `${window.location.origin}${window.location.pathname}`;
+                                    const shareText = `${base}?key=${encodeURIComponent(
+                                      item.key
+                                    )} (Key: ${item.key})`;
+                                    navigator.clipboard.writeText(shareText);
+                                    setCopiedBetaKeyToast(
+                                      `✅ ${item.key} kopiert!`
+                                    );
+                                    window.setTimeout(
+                                      () => setCopiedBetaKeyToast(null),
+                                      2200
+                                    );
+                                  }
+                                }}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-cyan-500 hover:text-slate-950 border border-slate-600 text-[9.5px] font-bold cursor-pointer"
+                              >
+                                📋 Link &amp; Key kopieren
+                              </button>
+                              <button
+                                type="button"
+                                title="Key löschen"
+                                onClick={() => {
+                                  const next: AlphaBetaAccessConfig = {
+                                    ...alphaBetaConfig,
+                                    keys: alphaBetaConfig.keys.filter(
+                                      (k) => k.key !== item.key
+                                    ),
+                                  };
+                                  setAlphaBetaConfig(next);
+                                  saveAlphaBetaConfig(next);
+                                }}
+                                className="px-1.5 py-0.5 rounded bg-rose-950 hover:bg-rose-700 border border-rose-500/50 text-rose-200 text-[9.5px] cursor-pointer"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 {/* ============================================================= */}
