@@ -24,6 +24,7 @@ import {
   DjSoundboardEffectId,
   EditableModuleId,
   formatLayoutConfigCodeBlock,
+  getModuleCollisionRect,
   GuestDjPreset,
   HallGameMode,
   LightingMode,
@@ -49,6 +50,8 @@ import { soundFX } from './utils/soundEffects';
 import {
   AdminPersistentSettings,
   AlphaBetaAccessConfig,
+  CertificateDefinition,
+  CertificateId,
   ChallengeProgressMap,
   computePeakHourLabel,
   EntryPassData,
@@ -62,6 +65,7 @@ import {
   loadAdminSettings,
   loadAdminUnlockedSession,
   loadAlphaBetaConfig,
+  loadCertificatesState,
   loadChallengesProgress,
   loadCrtFilterEnabled,
   loadCustomArenaLayout,
@@ -78,10 +82,16 @@ import {
   loadRadioPlaylist,
   loadSpecialSkaters,
   loadStampCard,
+  loadTesterFeedback,
   loadVisitorVolume,
   LocalAlphaBetaSession,
   LockerPlayerSettings,
   MASTER_ADMIN_KEY,
+  PALLADIUM_CERTIFICATES,
+  PALLADIUM_SPIND_COLLECTIBLES,
+  PalladiumCertificatesState,
+  loadFirstVisitSlushClaimed,
+  saveFirstVisitSlushClaimed,
   recordDailyStampVisit,
   recordMultiplayerSessionStart,
   recordMultiplayerVisitorSnapshot,
@@ -94,6 +104,7 @@ import {
   saveAdminSettings,
   saveAdminUnlockedSession,
   saveAlphaBetaConfig,
+  saveCertificatesState,
   saveChallengesProgress,
   saveCrtFilterEnabled,
   saveCustomArenaLayout,
@@ -110,9 +121,12 @@ import {
   saveRadioPlaylist,
   saveSpecialSkaters,
   saveStampCard,
+  saveTesterFeedback,
   saveVisitorVolume,
   SingleplayerDifficulty,
   StampCardData,
+  TesterFeedbackCategory,
+  TesterFeedbackItem,
 } from './utils/storageAndStats';
 
 const MULTIPLAYER_OUTFIT_COLORS = [
@@ -189,6 +203,13 @@ interface AdminSyncPayload {
   isMaintenanceMode: boolean;
   maintenanceReopenText: string;
   liveArenaStyle: ArenaVisualStyle;
+  skateDirection?: 'ccw' | 'cw';
+  neonLightboxesEnabled?: boolean;
+  neonLightboxLine1?: string;
+  neonLightboxLine2?: string;
+  neonLightboxLine3?: string;
+  familyDayActive?: boolean;
+  liveEventActive?: boolean;
   customLayout?: CustomArenaLayoutState;
 }
 
@@ -289,6 +310,7 @@ export function App() {
       ''
   );
   const [alphaKeyError, setAlphaKeyError] = useState<string | null>(null);
+  const [bouncerMessage, setBouncerMessage] = useState<string | null>(null);
   const [copiedBetaKeyToast, setCopiedBetaKeyToast] = useState<string | null>(
     null
   );
@@ -305,12 +327,17 @@ export function App() {
     const matched = alphaBetaConfig.keys.find(
       (k) => k.key.toUpperCase() === localAlphaSession.activatedKey.toUpperCase()
     );
+    const sessionNameNorm = (localAlphaSession.testerName || '')
+      .trim()
+      .toLowerCase();
+    const keyOwnerNorm = (matched?.redeemedBy || '').trim().toLowerCase();
     return Boolean(
       matched &&
+        !matched.blocked &&
         matched.status === 'redeemed' &&
-        matched.redeemedByBrowserId === alphaBrowserId
+        (!keyOwnerNorm || keyOwnerNorm === sessionNameNorm)
     );
-  }, [alphaBetaConfig, alphaBrowserId, localAlphaSession]);
+  }, [alphaBetaConfig, localAlphaSession]);
 
   // Tester-Rechte: Testers (logged in with a BETA-XXXX key rather than BOSS-PALLADIUM) cannot access Hallenleiter-Regie or Baumenü
   const isTesterAccount = Boolean(
@@ -359,6 +386,42 @@ export function App() {
     () => loadLockerPlayerSettings()
   );
   const [showLockerModal, setShowLockerModal] = useState<boolean>(false);
+  const [lockerTab, setLockerTab] = useState<
+    'gear' | 'tasks' | 'events' | 'feedback' | 'certificates'
+  >('gear');
+  const [certificatesState, setCertificatesState] =
+    useState<PalladiumCertificatesState>(() => loadCertificatesState());
+  const certificatesStateRef =
+    useRef<PalladiumCertificatesState>(certificatesState);
+  useEffect(() => {
+    certificatesStateRef.current = certificatesState;
+  }, [certificatesState]);
+  const [newlyUnlockedCert, setNewlyUnlockedCert] =
+    useState<CertificateDefinition | null>(null);
+  const [zoomedCertId, setZoomedCertId] = useState<CertificateId | null>(null);
+  const [adminTab, setAdminTab] = useState<
+    'track' | 'light_dj' | 'access' | 'look_build'
+  >('track');
+  const [springerStaffelShowSec, setSpringerStaffelShowSec] =
+    useState<number>(0);
+  const [showDjSoundboardHud, setShowDjSoundboardHud] =
+    useState<boolean>(false);
+  const [teleportTrigger, setTeleportTrigger] = useState<{
+    x: number;
+    y: number;
+    headingRad?: number;
+    label?: string;
+    seq: number;
+  } | null>(null);
+  const [testerFeedbackList, setTesterFeedbackList] = useState<
+    TesterFeedbackItem[]
+  >(() => loadTesterFeedback());
+  const [feedbackCategory, setFeedbackCategory] =
+    useState<TesterFeedbackCategory>('Idee');
+  const [feedbackText, setFeedbackText] = useState<string>('');
+  const [feedbackSentToast, setFeedbackSentToast] = useState<string | null>(
+    null
+  );
   const [lockerDrinkBoostTrigger, setLockerDrinkBoostTrigger] =
     useState<number>(0);
   const [introTour, setIntroTour] = useState<IntroTourState>(() =>
@@ -369,8 +432,6 @@ export function App() {
     introTourRef.current = introTour;
   }, [introTour]);
   const [introBannerText, setIntroBannerText] = useState<string | null>(null);
-  const [isIntroBoxMinimized, setIsIntroBoxMinimized] =
-    useState<boolean>(false);
 
   const [nameDisplayMode, setNameDisplayMode] =
     useState<NameDisplayMode>('focus');
@@ -423,7 +484,7 @@ export function App() {
     initialEntryPass ? initialEntryPass.hasRentedSkates : false
   );
   const [drinkChipAvailable, setDrinkChipAvailable] = useState<boolean>(
-    initialEntryPass ? initialEntryPass.drinkChipAvailable : true
+    initialEntryPass ? initialEntryPass.drinkChipAvailable : !loadFirstVisitSlushClaimed()
   );
 
   // Public Visitor Volume & Mute Control (linked with Spind Disco-Sound toggle)
@@ -748,7 +809,7 @@ export function App() {
   const [twitchMuted, setTwitchMuted] = useState<boolean>(false);
   const [fogBurstCount, setFogBurstCount] = useState<number>(0);
   const [isBottomBarCollapsed, setIsBottomBarCollapsed] =
-    useState<boolean>(false);
+    useState<boolean>(true);
 
   // Hall Statistics (localStorage)
   const [hallStats, setHallStats] = useState<HallStatsData>(() =>
@@ -957,6 +1018,21 @@ export function App() {
     handleStart15MinBlacklight,
   ]);
 
+  // Springer-Staffel-Show Countdown Timer
+  useEffect(() => {
+    if (springerStaffelShowSec <= 0) return;
+    const timer = window.setInterval(() => {
+      setSpringerStaffelShowSec((prev) => {
+        if (prev <= 1) {
+          setHallGameMode((m) => (m === 'springerstaffel' ? 'free-skate' : m));
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [springerStaffelShowSec]);
+
   // Check whether the configured Twitch channel is LIVE / online
   useEffect(() => {
     const channel = (adminSettings.twitchChannel || '').trim();
@@ -1057,6 +1133,49 @@ export function App() {
     adminSettings.cinemaEndTime,
   ]);
 
+  // ============================================================================
+  // 21:00-UHR-LEINWAND-AUTOMATIK & LIVE-EVENT-KOPPLUNG
+  // Sobald die Systemuhr 21:00 Uhr erreicht ODER das Live-Event in der Regie
+  // aktiviert wird, fährt die Kino-Leinwand automatisch herunter.
+  // Vor 21:00 Uhr bleibt sie standardmäßig eingezogen ('islands'), sofern nicht manuell gewählt.
+  // ============================================================================
+  const autoCinema21Ref = useRef<{
+    after21Triggered: boolean;
+    liveEventTriggered: boolean;
+  }>({
+    after21Triggered: false,
+    liveEventTriggered: false,
+  });
+
+  useEffect(() => {
+    const check21ClockAndLiveEvent = () => {
+      const now = new Date();
+      const isAfter21 = now.getHours() >= 21;
+      const isLiveEvent = Boolean(adminSettings.liveEventActive);
+
+      if (isLiveEvent && !autoCinema21Ref.current.liveEventTriggered) {
+        autoCinema21Ref.current.liveEventTriggered = true;
+        setCenterStageMode((curr) => (curr === 'band' ? curr : 'cinema'));
+        return;
+      }
+      if (!isLiveEvent && autoCinema21Ref.current.liveEventTriggered) {
+        autoCinema21Ref.current.liveEventTriggered = false;
+        if (!isAfter21 && !adminSettings.cinemaScheduleEnabled) {
+          setCenterStageMode((curr) => (curr === 'cinema' ? 'islands' : curr));
+        }
+      }
+
+      if (isAfter21 && !autoCinema21Ref.current.after21Triggered) {
+        autoCinema21Ref.current.after21Triggered = true;
+        setCenterStageMode((curr) => (curr === 'islands' ? 'cinema' : curr));
+      }
+    };
+
+    check21ClockAndLiveEvent();
+    const timer = window.setInterval(check21ClockAndLiveEvent, 15000);
+    return () => window.clearInterval(timer);
+  }, [adminSettings.liveEventActive, adminSettings.cinemaScheduleEnabled]);
+
   // Automatic Audio-Ducking (0% Hall Radio) whenever a live Twitch or YouTube stream is playing with sound on the Cinema Screen
   useEffect(() => {
     const src = adminSettings.cinemaStreamSource || 'twitch';
@@ -1111,22 +1230,19 @@ export function App() {
       setIsCurtainOpen(true);
       setShowChronicleModal(false);
 
-      const drinkLabel =
-        freeDrinkChoice === 'slush'
-          ? '1x Slush Puppy'
-          : freeDrinkChoice === 'bloba'
-          ? '1x Bloba Cola'
-          : '1x Slush Puppy & 1x Bloba Cola';
-      const displayName = overrideName
-        ? overrideName
-        : isAnonymousGuest
-        ? 'Ein Gast-Skater'
-        : playerName.trim();
-      showHallAnnouncement(
-        `📻 Hallenfunk: ${displayName} hat die Halle betreten (Freigetränk: ${drinkLabel})!`
-      );
+      // Einmaliger Willkommens-Slush NUR beim allerersten Besuch!
+      // Bei späteren Besuchen: abwechselnde Palladium-Erinnerungsstücke für den Spind
+      const firstVisitAlreadyClaimed = loadFirstVisitSlushClaimed();
+      const isFirstEverVisit = !firstVisitAlreadyClaimed;
+      if (isFirstEverVisit) {
+        saveFirstVisitSlushClaimed();
+        setDrinkChipAvailable(true);
+      } else {
+        setDrinkChipAvailable(false);
+      }
 
       // Record daily stamp on the 10er-Stempelkarte (localStorage)
+      const prevStamps = stampCard.stamps;
       const updatedCard = recordDailyStampVisit();
       const chosenWelcomeDrink: 'slush' | 'bloba' =
         freeDrinkChoice === 'bloba' ? 'bloba' : 'slush';
@@ -1136,6 +1252,46 @@ export function App() {
       }
       setStampCard(updatedCard);
 
+      const displayName = overrideName
+        ? overrideName
+        : isAnonymousGuest
+        ? 'Ein Gast-Skater'
+        : playerName.trim();
+
+      if (isFirstEverVisit) {
+        const drinkLabel =
+          freeDrinkChoice === 'slush'
+            ? '1x Willkommens-Slush'
+            : freeDrinkChoice === 'bloba'
+            ? '1x Willkommens-Bloba-Cola'
+            : '1x Willkommens-Slush';
+        showHallAnnouncement(
+          `📻 Hallenfunk: Willkommen ${displayName}! Einmaliges Willkommensgeschenk: ${drinkLabel} an der Bistro-Theke!`
+        );
+      } else {
+        // Ab dem 2. Besuch: Sammelstücke für den Spind (bei neuem Tagesstempel oder Treue-Stufe)
+        const existingCollectibles = lockerSettings.collectibles ?? [];
+        const nextIdx =
+          existingCollectibles.length % PALLADIUM_SPIND_COLLECTIBLES.length;
+        const collectible = PALLADIUM_SPIND_COLLECTIBLES[nextIdx];
+        if (
+          updatedCard.stamps !== prevStamps &&
+          !existingCollectibles.includes(collectible.label)
+        ) {
+          setLockerSettings((prev) => ({
+            ...prev,
+            collectibles: [...(prev.collectibles ?? []), collectible.label],
+          }));
+          showHallAnnouncement(
+            `📻 Hallenfunk: ${displayName} ist zurück! Neues Spind-Sammlerstück: ${collectible.icon} ${collectible.label}!`
+          );
+        } else {
+          showHallAnnouncement(
+            `📻 Hallenfunk: ${displayName} rollt wieder in die Palladium Arena!`
+          );
+        }
+      }
+
       // Lock Singleplayer Entry Stamp (palladium_entry_pass) for this visit if not already locked
       setEntryPass((prev) => {
         if (prev?.locked) return prev;
@@ -1144,13 +1300,12 @@ export function App() {
           difficulty,
           hasOwnSkates,
           hasRentedSkates: false,
-          drinkChipAvailable: true,
+          drinkChipAvailable: isFirstEverVisit,
           freeDrinkChoice,
           stampedAt: new Date().toISOString(),
         };
         saveEntryPass(lockedPass);
         setHasRentedSkates(false);
-        setDrinkChipAvailable(true);
         return lockedPass;
       });
 
@@ -1166,22 +1321,40 @@ export function App() {
       freeDrinkChoice,
       hasOwnSkates,
       isAnonymousGuest,
+      lockerSettings.collectibles,
       playerName,
       showHallAnnouncement,
+      stampCard.stamps,
     ]
   );
 
   const handleActivateAlphaKeyAndEnter = useCallback(() => {
     const cleanName = playerName.trim();
     if (cleanName.length < 2) {
+      const msg = 'Ey, du kommst hier net rein! Kein gültiger VIP-Key.';
       setAlphaKeyError(
         'Bitte gib zuerst deinen Namen (mindestens 2 Zeichen) ein.'
       );
+      setBouncerMessage(msg);
       return;
     }
     const cleanKey = alphaKeyInput.trim().toUpperCase();
     if (!cleanKey) {
-      setAlphaKeyError('Bitte gib deinen Alpha/Beta-Zugangs-Key ein.');
+      const msg = 'Ey, du kommst hier net rein! Kein gültiger VIP-Key.';
+      setAlphaKeyError(msg);
+      setBouncerMessage(msg);
+      return;
+    }
+
+    // Prüfe ob derselbe Name bereits live im Multiplayer auf der Bahn fährt
+    const nameAlreadyOnTrack = remotePlayers.some(
+      (rp) => (rp.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+    );
+    if (nameAlreadyOnTrack) {
+      const msg =
+        'Ey, du kommst hier net rein! Der Name fährt schon auf der Bahn.';
+      setAlphaKeyError(msg);
+      setBouncerMessage(msg);
       return;
     }
 
@@ -1207,6 +1380,7 @@ export function App() {
       setIsAdminUnlocked(true);
       saveAdminUnlockedSession(true);
       setAlphaKeyError(null);
+      setBouncerMessage(null);
       performHallEntry(cleanName);
       return;
     }
@@ -1217,27 +1391,49 @@ export function App() {
       (k) => k.key.toUpperCase() === cleanKey
     );
     if (keyIdx === -1) {
-      setAlphaKeyError(
-        '❌ Ungültiger Zugangs-Key! Ohne gültigen Key ist der Spielstart gesperrt.'
-      );
+      const msg = 'Ey, du kommst hier net rein! Kein gültiger VIP-Key.';
+      setAlphaKeyError(msg);
+      setBouncerMessage(msg);
       return;
     }
 
     const targetKey = latestCfg.keys[keyIdx];
-    if (
-      targetKey.status === 'redeemed' &&
-      targetKey.redeemedByBrowserId &&
-      targetKey.redeemedByBrowserId !== alphaBrowserId
-    ) {
-      setAlphaKeyError(
-        `❌ Dieser Key ist bereits eingelöst (${
-          targetKey.redeemedBy || 'Tester'
-        }) und kann nicht von einer zweiten Person genutzt werden!`
-      );
+    if (targetKey.blocked) {
+      const msg = 'Ey, du kommst hier net rein! Kein gültiger VIP-Key.';
+      setAlphaKeyError(msg);
+      setBouncerMessage(msg);
       return;
     }
 
-    // Mark key as redeemed globally & bind to this browser
+    // Prüfe, ob dieser Name bereits fest an einen ANDEREN eingelösten Key gekoppelt ist:
+    const otherKeyForSameName = latestCfg.keys.find(
+      (k) =>
+        k.status === 'redeemed' &&
+        k.redeemedBy &&
+        k.redeemedBy.trim().toLowerCase() === cleanName.toLowerCase() &&
+        k.key.toUpperCase() !== cleanKey
+    );
+    if (otherKeyForSameName) {
+      const msg =
+        'Ey, du kommst hier net rein! Der Name fährt schon auf der Bahn.';
+      setAlphaKeyError(msg);
+      setBouncerMessage(msg);
+      return;
+    }
+
+    // Strikte Namens- & Key-Kopplung:
+    // Ist der Key bereits eingelöst, darf NUR derselbe Tester mit exakt demselben Namen + Key jederzeit wieder rein!
+    if (targetKey.status === 'redeemed') {
+      const boundName = (targetKey.redeemedBy || '').trim().toLowerCase();
+      if (boundName && boundName !== cleanName.toLowerCase()) {
+        const msg = 'Ey, du kommst hier net rein! Kein gültiger VIP-Key.';
+        setAlphaKeyError(msg);
+        setBouncerMessage(msg);
+        return;
+      }
+    }
+
+    // Mark key as redeemed globally & bind strictly to this tester name
     const updatedKeys = [...latestCfg.keys];
     updatedKeys[keyIdx] = {
       ...targetKey,
@@ -1271,9 +1467,16 @@ export function App() {
     setShowAdminTerminal(false);
     setShowAdminPinModal(false);
     setAlphaKeyError(null);
+    setBouncerMessage(null);
 
     performHallEntry(cleanName);
-  }, [alphaBrowserId, alphaKeyInput, performHallEntry, playerName]);
+  }, [
+    alphaBrowserId,
+    alphaKeyInput,
+    performHallEntry,
+    playerName,
+    remotePlayers,
+  ]);
 
   const handleEnterHall = useCallback(() => {
     if (alphaBetaConfig.enabled && !isAlphaBetaAuthorized) {
@@ -1283,6 +1486,19 @@ export function App() {
     if (!isAnonymousGuest && playerName.trim().length < 2) {
       return;
     }
+    const cleanName = playerName.trim();
+    if (
+      !isAnonymousGuest &&
+      remotePlayers.some(
+        (rp) => (rp.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+      )
+    ) {
+      const msg =
+        'Ey, du kommst hier net rein! Der Name fährt schon auf der Bahn.';
+      setBouncerMessage(msg);
+      return;
+    }
+    setBouncerMessage(null);
     performHallEntry();
   }, [
     alphaBetaConfig.enabled,
@@ -1291,16 +1507,28 @@ export function App() {
     isAnonymousGuest,
     performHallEntry,
     playerName,
+    remotePlayers,
   ]);
 
-  // Global keyboard shortcut for Admin Terminal: Ctrl + Shift + A (or Cmd + Shift + A)
+  // Geheimer Shortcut für Hallenleiter-Regie: Strg + Shift + R / Cmd + Shift + R (oder Strg + Shift + A)
+  // WICHTIG: Globale Einzeltasten-Shortcuts pausieren automatisch, sobald der Fokus in einem <input>, <textarea> oder <select> liegt!
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const isInput =
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        Boolean(target?.isContentEditable);
+
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 'a')
+      ) {
         e.preventDefault();
-        // Tester-Rechte: Hallenleiter-Regie & Baumenü completely locked for testers
-        if (isTesterAccount) return;
-        if (isAdminUnlocked) {
+        if (isAdminUnlocked && !isTesterAccount) {
           setShowAdminTerminal((prev) => !prev);
         } else {
           setPinInput('');
@@ -1310,11 +1538,10 @@ export function App() {
         return;
       }
 
-      const tag = (e.target as HTMLElement)?.tagName;
-      const isInput =
-        tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+      // Wenn in einem Eingabefeld getippt wird: alle globalen Spiel-Shortcuts pausieren!
+      if (isInput) return;
 
-      if (!isInput && e.key.toLowerCase() === 'i' && !e.ctrlKey && !e.metaKey) {
+      if (e.key.toLowerCase() === 'i' && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         setIsBottomBarCollapsed((prev) => !prev);
         return;
@@ -1332,10 +1559,8 @@ export function App() {
         (e.key === 'Enter' || e.key === ' ') &&
         canEnterSingleplayerHall
       ) {
-        if (!isInput) {
-          e.preventDefault();
-          handleEnterHall();
-        }
+        e.preventDefault();
+        handleEnterHall();
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -1390,15 +1615,13 @@ export function App() {
   }, []);
 
   const handleLogoClick = () => {
-    // Tester-Rechte: Hallenleiter-Regie & Baumenü completely locked for testers
-    if (isTesterAccount) return;
     const now = performance.now();
     const recent = logoClickTimestampsRef.current.filter((t) => now - t < 1100);
     recent.push(now);
     logoClickTimestampsRef.current = recent;
     if (recent.length >= 3) {
       logoClickTimestampsRef.current = [];
-      if (isAdminUnlocked) {
+      if (isAdminUnlocked && !isTesterAccount) {
         setShowAdminTerminal(true);
       } else {
         setPinInput('');
@@ -1410,16 +1633,23 @@ export function App() {
 
   const handleVerifyAdminPin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isTesterAccount) {
-      setPinError('Hallenleiter-Regie ist für Alpha/Beta-Tester gesperrt.');
-      return;
-    }
     if (
       pinInput.trim() === ADMIN_PIN ||
       pinInput.trim().toUpperCase() === MASTER_ADMIN_KEY
     ) {
+      const upgradedSession: LocalAlphaBetaSession = {
+        activatedKey: MASTER_ADMIN_KEY,
+        testerName: playerName.trim() || localAlphaSession?.testerName || 'Hallenleiter',
+        browserId: alphaBrowserId,
+        isMasterKey: true,
+        activatedAt: localAlphaSession?.activatedAt || new Date().toLocaleTimeString(),
+      };
+      setLocalAlphaSession(upgradedSession);
+      saveLocalAlphaBetaSession(upgradedSession);
       setIsAdminUnlocked(true);
       saveAdminUnlockedSession(true);
+      setIsCurtainOpen(true);
+      setShowChronicleModal(false);
       setShowAdminPinModal(false);
       setShowAdminTerminal(true);
       setPinError(null);
@@ -1534,6 +1764,13 @@ export function App() {
       maintenanceReopenText:
         adminSettings.maintenanceReopenText || '🚀 ALPHA STARTING SOON',
       liveArenaStyle: adminSettings.liveArenaStyle || 'classic-neon',
+      skateDirection: adminSettings.skateDirection || 'ccw',
+      neonLightboxesEnabled: adminSettings.neonLightboxesEnabled !== false,
+      neonLightboxLine1: adminSettings.neonLightboxLine1 ?? 'RESIDENT DJ',
+      neonLightboxLine2: adminSettings.neonLightboxLine2 ?? 'DJ MAGIC FORCE',
+      neonLightboxLine3: adminSettings.neonLightboxLine3 ?? 'AB 21:00 UHR',
+      familyDayActive: Boolean(adminSettings.familyDayActive),
+      liveEventActive: Boolean(adminSettings.liveEventActive),
       customLayout,
     };
   }, [
@@ -1566,6 +1803,13 @@ export function App() {
     adminSettings.isMaintenanceMode,
     adminSettings.maintenanceReopenText,
     adminSettings.liveArenaStyle,
+    adminSettings.skateDirection,
+    adminSettings.neonLightboxesEnabled,
+    adminSettings.neonLightboxLine1,
+    adminSettings.neonLightboxLine2,
+    adminSettings.neonLightboxLine3,
+    adminSettings.familyDayActive,
+    adminSettings.liveEventActive,
     customLayout,
   ]);
 
@@ -1621,6 +1865,14 @@ export function App() {
       maintenanceReopenText:
         s.maintenanceReopenText || prev.maintenanceReopenText,
       liveArenaStyle: s.liveArenaStyle,
+      skateDirection: s.skateDirection ?? prev.skateDirection,
+      neonLightboxesEnabled:
+        s.neonLightboxesEnabled ?? prev.neonLightboxesEnabled,
+      neonLightboxLine1: s.neonLightboxLine1 ?? prev.neonLightboxLine1,
+      neonLightboxLine2: s.neonLightboxLine2 ?? prev.neonLightboxLine2,
+      neonLightboxLine3: s.neonLightboxLine3 ?? prev.neonLightboxLine3,
+      familyDayActive: s.familyDayActive ?? prev.familyDayActive,
+      liveEventActive: s.liveEventActive ?? prev.liveEventActive,
     }));
     window.setTimeout(() => {
       isApplyingRemoteAdminSyncRef.current = false;
@@ -2505,10 +2757,10 @@ export function App() {
           if (pkt.type === 'join-rejected') {
             settled = true;
             window.clearTimeout(handshakeTimeout);
-            setGuestJoinError(
-              pkt.reason ||
-                'Dieser Skater-Name ist in der Halle bereits vergeben – bitte wähle einen anderen!'
-            );
+            const msg =
+              'Ey, du kommst hier net rein! Der Name fährt schon auf der Bahn.';
+            setGuestJoinError(pkt.reason || msg);
+            setBouncerMessage(msg);
             setMpStatus('error');
             setMpRole('solo');
             cleanupPeerSession();
@@ -2937,51 +3189,339 @@ export function App() {
     return `${base}?room=${encodeURIComponent(mpRoomId)}`;
   }, [mpRoomId]);
 
-  const handleIntroStepComplete = useCallback((stepId: IntroStepId) => {
-    const current = introTourRef.current;
-    if (current[stepId]) return;
-
-    const nextTour: IntroTourState = {
-      ...current,
-      [stepId]: true,
-    };
-    const allDone = isIntroTourComplete(nextTour);
-    const claimBonusNow = allDone && !current.bonusClaimed;
-    if (claimBonusNow) {
-      nextTour.bonusClaimed = true;
-    }
-
-    introTourRef.current = nextTour;
-    setIntroTour(nextTour);
-    saveIntroTourState(nextTour);
+  // Feierliches Urkunden-Freischalt-Pop-up (5 Sekunden oder per Klick auf "In meinen Spind hängen")
+  const triggerCertificatePopup = useCallback((certId: CertificateId) => {
+    const def = PALLADIUM_CERTIFICATES.find((c) => c.id === certId);
+    if (!def) return;
     soundFX.playChallengeUnlocked();
-
-    if (stepId === 'fetch_drink') {
-      setLockerSettings((prev) => ({
-        ...prev,
-        drinksInLocker: Math.min(9, (prev.drinksInLocker || 0) + 1),
-      }));
-    }
-
-    if (claimBonusNow) {
-      setLockerSettings((prev) => ({
-        ...prev,
-        vipDiscoSkatesEquipped: true,
-      }));
-      const msg =
-        '🎉 Einführung komplett! +20 Bonus-Punkte & VIP Disco-Rollschuhe!';
-      setIntroBannerText(msg);
-      window.setTimeout(() => {
-        setIntroBannerText((curr) => (curr === msg ? null : curr));
-      }, 4200);
-    } else {
-      const msg = '✅ Aufgabe erledigt! +20 Punkte';
-      setIntroBannerText(msg);
-      window.setTimeout(() => {
-        setIntroBannerText((curr) => (curr === msg ? null : curr));
-      }, 2600);
-    }
+    setNewlyUnlockedCert(def);
   }, []);
+
+  useEffect(() => {
+    if (!newlyUnlockedCert) return;
+    const timer = window.setTimeout(() => {
+      setNewlyUnlockedCert((curr) =>
+        curr?.id === newlyUnlockedCert.id ? null : curr
+      );
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [newlyUnlockedCert]);
+
+  // Check 7-Day Stammgast & 14-Day Treue certificates on load / visit
+  useEffect(() => {
+    const cur = certificatesStateRef.current;
+    const visitDaysCount = cur.visitDates.length;
+    const dateLabel = new Date().toLocaleDateString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+    let changed = false;
+    const nextUnlocked = { ...cur.unlocked };
+    let firstNewId: CertificateId | null = null;
+
+    if (visitDaysCount >= 7 && !nextUnlocked.stammgast_7?.unlocked) {
+      nextUnlocked.stammgast_7 = { unlocked: true, unlockedAt: dateLabel };
+      changed = true;
+      firstNewId = 'stammgast_7';
+    }
+    if (visitDaysCount >= 14 && !nextUnlocked.treue_14?.unlocked) {
+      nextUnlocked.treue_14 = { unlocked: true, unlockedAt: dateLabel };
+      changed = true;
+      firstNewId = 'treue_14';
+    }
+    if (changed) {
+      const nextState: PalladiumCertificatesState = {
+        ...cur,
+        unlocked: nextUnlocked,
+      };
+      certificatesStateRef.current = nextState;
+      setCertificatesState(nextState);
+      saveCertificatesState(nextState);
+      if (firstNewId) {
+        triggerCertificatePopup(firstNewId);
+      }
+    }
+  }, [triggerCertificatePopup]);
+
+  // Mehrstufige Event-Urkunden:
+  // - "DJ-Livestream-Teilnahme" (Bronze 1x, Silber 3x, Gold 5x)
+  // - "Liveband-Abend" (Bronze 1x, Silber 3x, Gold 5x)
+  useEffect(() => {
+    if (!isCurtainOpen) return;
+    const cur = certificatesStateRef.current;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const dateLabel = new Date().toLocaleDateString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+
+    const isDjEventActive =
+      centerStageMode === 'cinema' || Boolean(adminSettings.liveEventActive);
+    const isBandEventActive = centerStageMode === 'band';
+
+    let changed = false;
+    let nextDjCount = cur.djLivestreamCount || 0;
+    let nextDjSessions = [...(cur.djLivestreamSessions || [])];
+    let nextBandCount = cur.livebandCount || 0;
+    let nextBandSessions = [...(cur.livebandSessions || [])];
+    const nextUnlocked = { ...cur.unlocked };
+    let popupCertId: CertificateId | null = null;
+
+    const djKey = `${todayIso}_${adminSettings.activeDjName || 'DJ'}_${
+      adminSettings.liveEventActive ? 'live' : 'cinema'
+    }`;
+    if (isDjEventActive && !nextDjSessions.includes(djKey)) {
+      nextDjSessions.push(djKey);
+      nextDjCount += 1;
+      nextUnlocked.dj_livestream = {
+        unlocked: true,
+        unlockedAt: dateLabel,
+      };
+      changed = true;
+      if (nextDjCount === 1 || nextDjCount === 3 || nextDjCount === 5) {
+        popupCertId = 'dj_livestream';
+      }
+    }
+
+    const bandKey = `${todayIso}_${
+      customBandInput.trim() || activeBandName || 'Band'
+    }`;
+    if (isBandEventActive && !nextBandSessions.includes(bandKey)) {
+      nextBandSessions.push(bandKey);
+      nextBandCount += 1;
+      nextUnlocked.liveband_abend = {
+        unlocked: true,
+        unlockedAt: dateLabel,
+      };
+      changed = true;
+      if (nextBandCount === 1 || nextBandCount === 3 || nextBandCount === 5) {
+        popupCertId = 'liveband_abend';
+      }
+    }
+
+    if (changed) {
+      const nextState: PalladiumCertificatesState = {
+        ...cur,
+        djLivestreamCount: nextDjCount,
+        djLivestreamSessions: nextDjSessions,
+        livebandCount: nextBandCount,
+        livebandSessions: nextBandSessions,
+        unlocked: nextUnlocked,
+      };
+      certificatesStateRef.current = nextState;
+      setCertificatesState(nextState);
+      saveCertificatesState(nextState);
+      if (popupCertId) {
+        triggerCertificatePopup(popupCertId);
+      }
+    }
+  }, [
+    activeBandName,
+    adminSettings.activeDjName,
+    adminSettings.liveEventActive,
+    centerStageMode,
+    customBandInput,
+    isCurtainOpen,
+    triggerCertificatePopup,
+  ]);
+
+  const recordCompletedTaskForCertificates = useCallback(() => {
+    const cur = certificatesStateRef.current;
+    const nextCount = (cur.totalTasksCompleted || 0) + 1;
+    const dateLabel = new Date().toLocaleDateString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+    const nextUnlocked = { ...cur.unlocked };
+    let unlockedId: CertificateId | null = null;
+
+    if (nextCount >= 25 && !nextUnlocked.fleiss_25?.unlocked) {
+      nextUnlocked.fleiss_25 = { unlocked: true, unlockedAt: dateLabel };
+      unlockedId = 'fleiss_25';
+    }
+    if (nextCount >= 50 && !nextUnlocked.allrounder_50?.unlocked) {
+      nextUnlocked.allrounder_50 = { unlocked: true, unlockedAt: dateLabel };
+      unlockedId = 'allrounder_50';
+    }
+    if (nextCount >= 100 && !nextUnlocked.legende_100?.unlocked) {
+      nextUnlocked.legende_100 = { unlocked: true, unlockedAt: dateLabel };
+      unlockedId = 'legende_100';
+    }
+
+    const nextState: PalladiumCertificatesState = {
+      ...cur,
+      totalTasksCompleted: nextCount,
+      unlocked: nextUnlocked,
+    };
+    certificatesStateRef.current = nextState;
+    setCertificatesState(nextState);
+    saveCertificatesState(nextState);
+
+    if (unlockedId) {
+      triggerCertificatePopup(unlockedId);
+    }
+  }, [triggerCertificatePopup]);
+
+  const handleCertificateEvent = useCallback(
+    (
+      eventType:
+        | 'skate_rink'
+        | 'clean_slalom'
+        | 'clean_jump'
+        | 'high_speed_jump'
+    ) => {
+      const cur = certificatesStateRef.current;
+      const dateLabel = new Date().toLocaleDateString('de-DE', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
+
+      if (eventType === 'skate_rink') {
+        const isSunday = new Date().getDay() === 0;
+        const isFamilyDayActive =
+          Boolean(adminSettings.familyDayActive) ||
+          (adminSettings.neonLightboxLine2 || '')
+            .toUpperCase()
+            .includes('FAMILY');
+        if (
+          (isSunday || isFamilyDayActive) &&
+          !cur.unlocked.family_day?.unlocked
+        ) {
+          const nextState: PalladiumCertificatesState = {
+            ...cur,
+            unlocked: {
+              ...cur.unlocked,
+              family_day: { unlocked: true, unlockedAt: dateLabel },
+            },
+          };
+          certificatesStateRef.current = nextState;
+          setCertificatesState(nextState);
+          saveCertificatesState(nextState);
+          triggerCertificatePopup('family_day');
+        }
+        return;
+      }
+
+      let cleanSlalomDone = cur.cleanSlalomDone;
+      let cleanJumpDone = cur.cleanJumpDone;
+      let highSpeedJumpDone = cur.highSpeedJumpDone;
+      const nextUnlocked = { ...cur.unlocked };
+      let unlockedId: CertificateId | null = null;
+      let changed = false;
+
+      if (eventType === 'clean_slalom' && !cleanSlalomDone) {
+        cleanSlalomDone = true;
+        changed = true;
+      }
+      if (eventType === 'clean_jump' && !cleanJumpDone) {
+        cleanJumpDone = true;
+        changed = true;
+      }
+      if (eventType === 'high_speed_jump' && !highSpeedJumpDone) {
+        highSpeedJumpDone = true;
+        changed = true;
+      }
+
+      if (
+        cleanSlalomDone &&
+        cleanJumpDone &&
+        !nextUnlocked.fuehrerschein?.unlocked
+      ) {
+        nextUnlocked.fuehrerschein = { unlocked: true, unlockedAt: dateLabel };
+        unlockedId = 'fuehrerschein';
+        changed = true;
+      }
+
+      if (highSpeedJumpDone && !nextUnlocked.koenig_der_luefte?.unlocked) {
+        nextUnlocked.koenig_der_luefte = {
+          unlocked: true,
+          unlockedAt: dateLabel,
+        };
+        unlockedId = 'koenig_der_luefte';
+        changed = true;
+      }
+
+      if (changed) {
+        const nextState: PalladiumCertificatesState = {
+          ...cur,
+          cleanSlalomDone,
+          cleanJumpDone,
+          highSpeedJumpDone,
+          unlocked: nextUnlocked,
+        };
+        certificatesStateRef.current = nextState;
+        setCertificatesState(nextState);
+        saveCertificatesState(nextState);
+        if (unlockedId) {
+          triggerCertificatePopup(unlockedId);
+        }
+      }
+    },
+    [
+      adminSettings.familyDayActive,
+      adminSettings.neonLightboxLine2,
+      triggerCertificatePopup,
+    ]
+  );
+
+  const showTaskCompletedBanner = useCallback((taskTitle: string) => {
+    const msg = `✅ Aufgabe abgeschlossen: ${taskTitle} (+20 Pkt)`;
+    setIntroBannerText(msg);
+    window.setTimeout(() => {
+      setIntroBannerText((curr) => (curr === msg ? null : curr));
+    }, 2500);
+  }, []);
+
+  const handleIntroStepComplete = useCallback(
+    (stepId: IntroStepId) => {
+      const current = introTourRef.current;
+      if (current[stepId]) return;
+
+      const stepLabels: Record<IntroStepId, string> = {
+        open_locker: 'Spind öffnen',
+        fetch_drink: 'Getränk an der Gastro holen',
+        skate_rink: 'Runde auf der Bahn drehen',
+        try_ballspiel: 'Ballspiel ausprobieren',
+      };
+
+      const nextTour: IntroTourState = {
+        ...current,
+        [stepId]: true,
+      };
+      const allDone = isIntroTourComplete(nextTour);
+      const claimBonusNow = allDone && !current.bonusClaimed;
+      if (claimBonusNow) {
+        nextTour.bonusClaimed = true;
+      }
+
+      introTourRef.current = nextTour;
+      setIntroTour(nextTour);
+      saveIntroTourState(nextTour);
+      soundFX.playChallengeUnlocked();
+      recordCompletedTaskForCertificates();
+
+      if (stepId === 'fetch_drink') {
+        setLockerSettings((prev) => ({
+          ...prev,
+          drinksInLocker: Math.min(9, (prev.drinksInLocker || 0) + 1),
+        }));
+      }
+
+      if (claimBonusNow) {
+        setLockerSettings((prev) => ({
+          ...prev,
+          vipDiscoSkatesEquipped: true,
+        }));
+      }
+
+      showTaskCompletedBanner(stepLabels[stepId]);
+    },
+    [recordCompletedTaskForCertificates, showTaskCompletedBanner]
+  );
 
   const handleDrinkFromLocker = useCallback(() => {
     setLockerSettings((prev) => {
@@ -3021,6 +3561,8 @@ export function App() {
 
         if (completed && !current.completed) {
           soundFX.playChallengeUnlocked();
+          showTaskCompletedBanner(def.title);
+          recordCompletedTaskForCertificates();
           setUnlockedToast(def);
           window.setTimeout(() => {
             setUnlockedToast((curr) => (curr?.id === def.id ? null : curr));
@@ -3031,6 +3573,7 @@ export function App() {
             const nextU: ProShopUpgradesState = {
               ...uPrev,
               unlockedMoves: { ...uPrev.unlockedMoves },
+              bonusPoints: (uPrev.bonusPoints || 0) + 20,
             };
             if (id === 'warmup_spins') {
               nextU.underglowEnabled = true;
@@ -3062,7 +3605,7 @@ export function App() {
         return updatedMap;
       });
     },
-    []
+    [recordCompletedTaskForCertificates, showTaskCompletedBanner]
   );
 
   const completedChallengesCount = useMemo(() => {
@@ -3377,14 +3920,28 @@ export function App() {
               handleIntroStepComplete('open_locker');
               setShowLockerModal((v) => !v);
             }}
-            title="Mein Spind (SPINDE): Inventar, VIP Disco-Rollschuhe, Getränke & Anzeige-/Sound-Regler"
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border cursor-pointer text-[11px] font-mono transition ${
+            title="Mein Spind & Hallen-Guide: Ausrüstung, Aufgaben & Rundgang, Live-Events & Tester-Feedback"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border cursor-pointer text-[11px] font-mono font-bold transition ${
               showLockerModal || telemetry.nearLockers
-                ? 'bg-cyan-950/90 border-cyan-400 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.4)]'
+                ? 'bg-cyan-950/90 border-cyan-400 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.45)]'
                 : 'bg-slate-900/90 hover:bg-slate-800 border-cyan-500/50 text-cyan-200'
             }`}
           >
             <span>🗄️ Spind</span>
+            <span className="px-1.5 py-0.5 rounded bg-amber-400/20 border border-amber-300/60 text-amber-200 text-[10px]">
+              {(introTour.open_locker ? 1 : 0) +
+                (introTour.fetch_drink ? 1 : 0) +
+                (introTour.skate_rink ? 1 : 0) +
+                (introTour.try_ballspiel ? 1 : 0) <
+              4
+                ? `${
+                    (introTour.open_locker ? 1 : 0) +
+                    (introTour.fetch_drink ? 1 : 0) +
+                    (introTour.skate_rink ? 1 : 0) +
+                    (introTour.try_ballspiel ? 1 : 0)
+                  }/4`
+                : `${completedChallengesCount}/${PALLADIUM_CHALLENGES.length}`}
+            </span>
             {lockerSettings.vipDiscoSkatesEquipped && (
               <span className="text-amber-300 text-[10px]">🪩</span>
             )}
@@ -3394,16 +3951,6 @@ export function App() {
               </span>
             )}
           </button>
-
-          {/* Gamepad Active Badge */}
-          {telemetry.gamepadConnected && (
-            <span
-              title={telemetry.gamepadName}
-              className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-950/90 border border-emerald-400/60 text-emerald-300 font-mono text-[11px] animate-pulse"
-            >
-              🎮 Pad aktiv
-            </span>
-          )}
 
           {/* Slipstream Active Indicator */}
           {telemetry.isSlipstreamActive && (
@@ -3563,22 +4110,30 @@ export function App() {
 
           <button
             type="button"
-            onClick={() => setShowChallengesModal(true)}
+            onClick={() => {
+              handleIntroStepComplete('open_locker');
+              setLockerTab('tasks');
+              setShowLockerModal(true);
+            }}
             className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-amber-400/50 text-amber-200 font-medium transition cursor-pointer"
           >
-            🏆 Aufgaben ({completedChallengesCount}/{PALLADIUM_CHALLENGES.length})
+            ✅ Aufgaben ({completedChallengesCount}/{PALLADIUM_CHALLENGES.length})
           </button>
 
           <button
             type="button"
-            onClick={() => setShowHallGamesModal(true)}
+            onClick={() => {
+              handleIntroStepComplete('open_locker');
+              setLockerTab('events');
+              setShowLockerModal(true);
+            }}
             className={`px-2.5 py-1 rounded border font-medium transition cursor-pointer ${
-              hallGameMode !== 'free-skate'
+              hallGameMode !== 'free-skate' || springerStaffelShowSec > 0
                 ? 'bg-fuchsia-950/90 border-fuchsia-400 text-fuchsia-200 shadow-[0_0_10px_rgba(232,121,249,0.4)]'
                 : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-cyan-200'
             }`}
           >
-            🎮 Hallen-Spiele
+            🎪 Live-Events
           </button>
 
           <button
@@ -3608,18 +4163,34 @@ export function App() {
             🎫 Stempel: {stampCard.stamps} / 10
           </button>
 
-          {/* 📱 Handy-Controller QR-Code Button */}
+          {/* 📱 Handy-Controller QR-Code Button + Gebündelter Eingabe-Status */}
           <button
             type="button"
             onClick={() => setShowPhoneControllerModal(true)}
             title="Smartphone als 80er-Touch-Gamepad per QR-Code verbinden (?controller=ROOM_ID)"
-            className={`px-2.5 py-1 rounded border font-mono font-medium transition cursor-pointer ${
-              phonePadConnected
-                ? 'bg-emerald-950/90 border-emerald-400 text-emerald-200 shadow-[0_0_10px_rgba(16,185,129,0.4)]'
+            className={`px-2.5 py-1 rounded border font-mono font-medium transition cursor-pointer flex items-center gap-1.5 ${
+              phonePadConnected || telemetry.gamepadConnected
+                ? 'bg-emerald-950/90 border-emerald-400 text-emerald-200 shadow-[0_0_12px_rgba(16,185,129,0.5)]'
                 : 'bg-slate-900 hover:bg-slate-800 border-cyan-500/40 text-cyan-200'
             }`}
           >
-            📱 Handy-Controller{phonePadConnected ? ' (AKTIV)' : ''}
+            <span>📱 Handy-Controller</span>
+            {phonePadConnected ? (
+              <span className="px-1.5 py-0.5 rounded bg-emerald-400 text-slate-950 font-black text-[9.5px] animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.85)]">
+                📱 Handy-Pad verbunden
+              </span>
+            ) : telemetry.gamepadConnected ? (
+              <span
+                title={telemetry.gamepadName}
+                className="px-1.5 py-0.5 rounded bg-cyan-400 text-slate-950 font-black text-[9.5px] animate-pulse shadow-[0_0_8px_rgba(34,211,238,0.85)]"
+              >
+                🎮 Gamepad verbunden
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 text-[9.5px]">
+                ⌨️ Tastatur aktiv • ⚪ Kein Pad
+              </span>
+            )}
           </button>
 
           {/* 📺 80er-CRT-Filter (Scanlines) Quick Toggle */}
@@ -3706,6 +4277,7 @@ export function App() {
             </span>
           )}
 
+          {/* Regie-Button erscheint erst NACH Entsperrung per Doppelklick auf Hallen-Logo oder Strg+Shift+R */}
           {isAdminUnlocked && !isTesterAccount && (
             <button
               type="button"
@@ -3727,104 +4299,88 @@ export function App() {
           </div>
         )}
 
-        {/* 16-BIT SOFORT-FEEDBACK BANNER FÜR PFLICHT-EINFÜHRUNG (+20 PUNKTE / BONUS) */}
+        {/* SCHLANKES, HALBTRANSPARENTES 80ER-NEON-BANNER OBEN MITTIG (~2.5s): "✅ Aufgabe abgeschlossen: [Titel] (+20 Pkt)" */}
         {introBannerText && (
-          <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-50 px-5 py-2 rounded-lg bg-[#0c1428]/95 border-2 border-emerald-400 text-emerald-200 font-mono text-xs sm:text-sm font-black tracking-wide shadow-[0_0_28px_rgba(16,185,129,0.75)] animate-bounce">
+          <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-2 rounded-full bg-[#091124]/85 backdrop-blur-md border-2 border-cyan-400 text-emerald-200 font-mono text-xs sm:text-sm font-black tracking-wide shadow-[0_0_26px_rgba(0,240,255,0.65)] transition-opacity duration-300">
             {introBannerText}
           </div>
         )}
 
-        {/* KOMPAKTE AUFGABENBOX OBEN RECHTS (PFLICHT-EINFÜHRUNG: PALLADIUM-RUNDGANG) */}
-        {isCurtainOpen && !isBlockedByMaintenance && (
-          <div className="absolute top-3 right-3 z-30 w-64 rounded-xl bg-[#0e1324]/92 border-2 border-amber-400/75 p-2.5 text-white shadow-[0_0_20px_rgba(0,0,0,0.7)] backdrop-blur-sm">
-            <div className="flex items-center justify-between gap-1 border-b border-slate-700/80 pb-1.5">
-              <button
-                type="button"
-                onClick={() => setShowChallengesModal(true)}
-                className="text-left font-mono text-[11px] font-extrabold text-amber-300 hover:text-amber-200 cursor-pointer flex items-center gap-1"
-              >
-                <span>🧭 Einführung: Palladium-Rundgang</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsIntroBoxMinimized((v) => !v)}
-                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-[9px] cursor-pointer"
-                title="Aufgabenbox ein-/ausklappen"
-              >
-                {isIntroBoxMinimized ? '▼' : '▲'}
-              </button>
-            </div>
+        {/* FEIERLICHES URKUNDEN-FREISCHALT-POP-UP (MITTIG MIT GLANZ-EFFEKT & "IN MEINEN SPIND HÄNGEN") */}
+        {newlyUnlockedCert && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-4 backdrop-blur-xs">
+            <div
+              className={`relative w-full max-w-md rounded-2xl p-6 text-center shadow-[0_0_50px_rgba(251,191,36,0.65)] border-4 ${
+                newlyUnlockedCert.tier === 'extreme-gold' ||
+                newlyUnlockedCert.tier === 'gold'
+                  ? 'bg-gradient-to-br from-[#2b1c06] via-[#13192e] to-[#362205] border-amber-300'
+                  : 'bg-gradient-to-br from-[#0f172a] via-[#181230] to-[#0f172a] border-cyan-300'
+              }`}
+            >
+              <div className="inline-block px-3 py-0.5 rounded-full bg-amber-400/20 border border-amber-300 font-mono text-[10px] font-black uppercase tracking-widest text-amber-200 mb-2">
+                ✨ Neue Palladium-Urkunde verliehen! ✨
+              </div>
+              <div className="text-4xl my-1">{newlyUnlockedCert.icon}</div>
+              <h3 className="font-display font-black text-xl text-amber-200 tracking-wide uppercase">
+                {newlyUnlockedCert.title}
+              </h3>
+              <p className="font-mono text-xs text-cyan-300 font-bold mt-0.5">
+                {newlyUnlockedCert.subtitle}
+              </p>
 
-            {!isIntroBoxMinimized && (
-              <div className="mt-1.5 space-y-1 font-mono text-[10.5px]">
-                {(
-                  [
-                    {
-                      id: 'open_locker' as IntroStepId,
-                      label: 'Spind öffnen',
-                      hint: 'Klick auf SPINDE / [E]',
-                    },
-                    {
-                      id: 'fetch_drink' as IntroStepId,
-                      label: 'Getränk an der Gastro holen',
-                      hint: 'Bistro-Theke nutzen',
-                    },
-                    {
-                      id: 'skate_rink' as IntroStepId,
-                      label: 'Runde auf der Bahn drehen',
-                      hint: 'Durch Schleuse fahren',
-                    },
-                    {
-                      id: 'try_ballspiel' as IntroStepId,
-                      label: 'Ballspiel ausprobieren',
-                      hint: 'Werfen oder passen',
-                    },
-                  ] as const
-                ).map((st) => {
-                  const done = introTour[st.id];
-                  return (
-                    <div
-                      key={st.id}
-                      className={`flex items-center justify-between px-1.5 py-1 rounded border ${
-                        done
-                          ? 'bg-emerald-950/50 border-emerald-400/60 text-emerald-200'
-                          : 'bg-slate-900/85 border-slate-700/80 text-slate-200'
-                      }`}
-                    >
-                      <span className="truncate">
-                        {done ? '✅' : '⬜'} {st.label}
-                      </span>
-                      <span
-                        className={`text-[9px] ml-1 shrink-0 ${
-                          done ? 'text-emerald-300 font-bold' : 'text-amber-300'
-                        }`}
-                      >
-                        {done ? '+20 Pkt' : st.hint}
-                      </span>
-                    </div>
-                  );
-                })}
-
-                <div className="pt-1 flex items-center justify-between text-[10px] border-t border-slate-800">
-                  {isIntroTourComplete(introTour) ? (
-                    <span className="text-emerald-300 font-bold">
-                      🎉 Komplett! Alle Aufgaben frei
-                    </span>
-                  ) : (
-                    <span className="text-amber-200/90">
-                      🔒 Weitere Aufgaben nach Rundgang
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setShowChallengesModal(true)}
-                    className="text-cyan-300 hover:underline cursor-pointer font-bold"
-                  >
-                    Alle ({completedChallengesCount}/{PALLADIUM_CHALLENGES.length})
-                  </button>
+              {/* Official Framed Certificate Preview */}
+              <div className="my-3 p-3 rounded-xl bg-amber-50/95 text-slate-900 border-2 border-amber-600 shadow-inner text-left font-serif relative overflow-hidden">
+                <div className="text-[10px] font-mono uppercase tracking-widest text-amber-900 font-bold text-center border-b border-amber-300 pb-1">
+                  ★ ROLLER DISCO PALLADIUM HANAU • EHREN-URKUNDE ★
+                </div>
+                <p className="text-xs text-slate-800 mt-2 leading-relaxed">
+                  Hiermit wird offiziell bestätigt, dass{' '}
+                  <strong className="text-rose-700 font-black">
+                    {playerName || 'Palladium-Skater'}
+                  </strong>{' '}
+                  die Auszeichnung{' '}
+                  <strong>„{newlyUnlockedCert.title}“</strong> ({newlyUnlockedCert.description}) im Palladium Hanau gemeistert hat.
+                </p>
+                <div className="mt-3 pt-1.5 border-t border-amber-300 flex items-center justify-between text-[10px] font-mono text-slate-700">
+                  <span>
+                    Datum:{' '}
+                    <strong>
+                      {certificatesState.unlocked[newlyUnlockedCert.id]
+                        ?.unlockedAt ||
+                        new Date().toLocaleDateString('de-DE')}
+                    </strong>
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full border-2 border-rose-700 text-rose-800 font-black rotate-[-4deg]">
+                    {newlyUnlockedCert.hasRedWaxSeal
+                      ? '🔴 ROTES WACHS-SIEGEL • PALLADIUM'
+                      : '🏛️ STEMPEL: PALLADIUM HANAU'}
+                  </span>
                 </div>
               </div>
-            )}
+
+              <div className="flex items-center justify-center gap-2 mt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const certId = newlyUnlockedCert.id;
+                    setNewlyUnlockedCert(null);
+                    setLockerTab('certificates');
+                    setZoomedCertId(certId);
+                    setShowLockerModal(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 hover:from-amber-300 hover:to-yellow-200 text-slate-950 font-mono text-xs font-black shadow-[0_0_20px_rgba(251,191,36,0.6)] cursor-pointer transition"
+                >
+                  📌 In meinen Spind hängen
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewlyUnlockedCert(null)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-mono text-xs font-bold cursor-pointer"
+                >
+                  Weiterrollen
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -4067,95 +4623,127 @@ export function App() {
           lockerDrinkBoostTrigger={lockerDrinkBoostTrigger}
           onOpenLockerModal={() => setShowLockerModal(true)}
           onIntroStepComplete={handleIntroStepComplete}
+          skateDirection={adminSettings.skateDirection || 'ccw'}
+          springerStaffelShowActive={springerStaffelShowSec > 0}
+          teleportTrigger={teleportTrigger}
+          onClickDjConsole={() => setShowDjSoundboardHud((v) => !v)}
+          neonLightboxesEnabled={adminSettings.neonLightboxesEnabled !== false}
+          neonLightboxLine1={adminSettings.neonLightboxLine1 ?? 'RESIDENT DJ'}
+          neonLightboxLine2={
+            adminSettings.neonLightboxLine2 ?? 'DJ MAGIC FORCE'
+          }
+          neonLightboxLine3={adminSettings.neonLightboxLine3 ?? 'AB 21:00 UHR'}
+          onAwardObstaclePoints={(pts) =>
+            setUpgrades((u) => ({
+              ...u,
+              bonusPoints: (u.bonusPoints || 0) + pts,
+            }))
+          }
+          onRequestAdminPinModal={() => {
+            if (isAdminUnlocked && !isTesterAccount) {
+              setShowAdminTerminal((prev) => !prev);
+            } else {
+              setPinInput('');
+              setPinError(null);
+              setShowAdminPinModal(true);
+            }
+          }}
+          onCertificateEvent={handleCertificateEvent}
           onTelemetry={setTelemetry}
         />
 
-        {/* LIVE KINO-LEINWAND OVERLAY (TWITCH / YOUTUBE / 80s VISUALIZER & COUNTDOWN FALLBACK) */}
+        {/* LIVE KINO-LEINWAND OVERLAY (EXAKT ZENTRIERT & BÜNDIG IN DER INNEREN BILDFLÄCHE DES RAHMENS) */}
         {isCurtainOpen &&
           !isBlockedByMaintenance &&
           centerStageMode === 'cinema' &&
-          cameraMode === 'top-down' && (
-            <div
-              style={{
-                left: `${
-                  (((customLayout?.modules?.centerStage?.x ??
-                    DEFAULT_CUSTOM_ARENA_LAYOUT.modules.centerStage.x) +
-                    85) /
-                    1920) *
-                  100
-                }%`,
-                top: `${
-                  (((customLayout?.modules?.centerStage?.y ??
-                    DEFAULT_CUSTOM_ARENA_LAYOUT.modules.centerStage.y) +
-                    38) /
-                    1080) *
-                  100
-                }%`,
-                width: `${(350 / 1920) * 100}%`,
-                height: `${(256 / 1080) * 100}%`,
-              }}
-              className="z-20 absolute rounded border-2 border-cyan-400/90 shadow-[0_0_30px_rgba(34,211,238,0.55)] overflow-hidden flex flex-col pointer-events-auto"
-            >
-              <div className="flex items-center justify-between px-2 py-0.5 bg-slate-950/95 border-b border-cyan-500/40 text-[9.5px] font-mono">
-                <span className="text-cyan-300 font-bold truncate">
-                  {adminSettings.cinemaCountdownEnabled
-                    ? `⏳ ${adminSettings.cinemaCountdownTitle || 'COUNTDOWN'}`
-                    : adminSettings.cinemaStreamSource === 'youtube' &&
-                      youtubeEmbedUrl
-                    ? '🎬 YOUTUBE LIVE / PLAYLIST'
-                    : adminSettings.cinemaStreamSource === 'twitch' &&
-                      isTwitchOnline
-                    ? `🎬 TWITCH LIVE: ${adminSettings.twitchChannel}`
-                    : '🎹 PALLADIUM LIVE VISUALIZER'}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setTwitchMuted((m) => !m)}
-                    className="text-amber-300 hover:underline cursor-pointer"
-                  >
-                    {twitchMuted ? '🔇 Ton an' : '🔊 Stumm'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCenterStageMode('islands')}
-                    title="Kino-Leinwand schließen"
-                    className="text-rose-300 hover:text-white cursor-pointer font-bold"
-                  >
-                    ×
-                  </button>
+          cameraMode === 'top-down' &&
+          (() => {
+            const csRaw =
+              customLayout?.modules?.centerStage ||
+              DEFAULT_CUSTOM_ARENA_LAYOUT.modules.centerStage;
+            const cs = getModuleCollisionRect(csRaw);
+            const csScaleX = cs.width / 630;
+            const csScaleY = cs.height / 284;
+            const closedStageWidth = Math.max(160, Math.round(390 * csScaleX));
+            const closedStageX = Math.round(
+              cs.x + (cs.width - closedStageWidth) / 2
+            );
+            const closedStageY = Math.round(cs.y - 6 * csScaleY);
+            const scrX = Math.round(closedStageX + 20 * csScaleX) + 3;
+            const scrY = Math.round(closedStageY + 20 * csScaleY) + 3;
+            const scrW = Math.max(120, Math.round(350 * csScaleX)) - 6;
+            const scrH = Math.max(90, Math.round(256 * csScaleY)) - 6;
+            return (
+              <div
+                style={{
+                  left: `${(scrX / 1920) * 100}%`,
+                  top: `${(scrY / 1080) * 100}%`,
+                  width: `${(scrW / 1920) * 100}%`,
+                  height: `${(scrH / 1080) * 100}%`,
+                }}
+                className="z-20 absolute rounded border border-cyan-400/80 shadow-[0_0_24px_rgba(34,211,238,0.45)] overflow-hidden flex flex-col pointer-events-auto"
+              >
+                <div className="flex items-center justify-between px-2 py-0.5 bg-slate-950/95 border-b border-cyan-500/40 text-[9.5px] font-mono">
+                  <span className="text-cyan-300 font-bold truncate">
+                    {adminSettings.cinemaCountdownEnabled
+                      ? `⏳ ${adminSettings.cinemaCountdownTitle || 'COUNTDOWN'}`
+                      : adminSettings.cinemaStreamSource === 'youtube' &&
+                        youtubeEmbedUrl
+                      ? '🎬 YOUTUBE LIVE / PLAYLIST'
+                      : adminSettings.cinemaStreamSource === 'twitch' &&
+                        isTwitchOnline
+                      ? `🎬 TWITCH LIVE: ${adminSettings.twitchChannel}`
+                      : '🎹 PALLADIUM LIVE VISUALIZER'}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setTwitchMuted((m) => !m)}
+                      className="text-amber-300 hover:underline cursor-pointer"
+                    >
+                      {twitchMuted ? '🔇 Ton an' : '🔊 Stumm'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCenterStageMode('islands')}
+                      title="Kino-Leinwand schließen"
+                      className="text-rose-300 hover:text-white cursor-pointer font-bold"
+                    >
+                      ×
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              {!adminSettings.cinemaCountdownEnabled &&
-              adminSettings.cinemaStreamSource === 'youtube' &&
-              youtubeEmbedUrl ? (
-                <iframe
-                  title="Palladium Kino-Leinwand YouTube Stream"
-                  src={youtubeEmbedUrl}
-                  className="w-full flex-1 border-0 bg-black"
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                  allowFullScreen
-                />
-              ) : !adminSettings.cinemaCountdownEnabled &&
-                adminSettings.cinemaStreamSource === 'twitch' &&
-                isTwitchOnline ? (
-                <iframe
-                  title="Palladium Kino-Leinwand Live Twitch Stream"
-                  src={`https://player.twitch.tv/?channel=${encodeURIComponent(
-                    adminSettings.twitchChannel
-                  )}&parent=${encodeURIComponent(twitchParentHost)}&muted=${
-                    twitchMuted ? 'true' : 'false'
-                  }`}
-                  className="w-full flex-1 border-0 bg-black"
-                  allowFullScreen
-                />
-              ) : (
-                /* Transparent pass-through so the Canvas 80s Equalizer / PALLADIUM LIVE / 7-Segment Countdown Clock shines through cleanly! */
-                <div className="w-full flex-1 bg-transparent pointer-events-none" />
-              )}
-            </div>
-          )}
+                {!adminSettings.cinemaCountdownEnabled &&
+                adminSettings.cinemaStreamSource === 'youtube' &&
+                youtubeEmbedUrl ? (
+                  <iframe
+                    title="Palladium Kino-Leinwand YouTube Stream"
+                    src={youtubeEmbedUrl}
+                    className="w-full flex-1 border-0 bg-black"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                  />
+                ) : !adminSettings.cinemaCountdownEnabled &&
+                  adminSettings.cinemaStreamSource === 'twitch' &&
+                  isTwitchOnline ? (
+                  <iframe
+                    title="Palladium Kino-Leinwand Live Twitch Stream"
+                    src={`https://player.twitch.tv/?channel=${encodeURIComponent(
+                      adminSettings.twitchChannel
+                    )}&parent=${encodeURIComponent(twitchParentHost)}&muted=${
+                      twitchMuted ? 'true' : 'false'
+                    }`}
+                    className="w-full flex-1 border-0 bg-black"
+                    allowFullScreen
+                  />
+                ) : (
+                  /* Transparent pass-through so the Canvas 80s Equalizer / PALLADIUM LIVE / 7-Segment Countdown Clock shines through cleanly! */
+                  <div className="w-full flex-1 bg-transparent pointer-events-none" />
+                )}
+              </div>
+            );
+          })()}
 
         {/* CHALLENGE UNLOCKED 80s RETRO BANNER */}
         {unlockedToast && (
@@ -4170,9 +4758,9 @@ export function App() {
           </div>
         )}
 
-        {/* CONTEXTUAL INTERACTION PROMPTS NEAR PRO-SHOP / SKATE RENTAL / DJ-TOWER */}
-        {isCurtainOpen && telemetry.nearDjTower && (
-          <div className="absolute top-14 left-4 z-30 flex flex-wrap items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-950/95 border-2 border-fuchsia-400 shadow-[0_0_20px_rgba(232,121,249,0.45)] text-xs font-mono">
+        {/* ZENTRIERTE DJ-SOUNDBOARD LEISTE UNTEN AM BILDSCHIRMRAND (NUR BEI AKTIVEM KLICK AUFS DJ-PULT) */}
+        {isCurtainOpen && showDjSoundboardHud && (
+          <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-30 flex flex-wrap items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950/95 border-2 border-fuchsia-400 shadow-[0_0_22px_rgba(232,121,249,0.5)] text-xs font-mono">
             <span className="text-fuchsia-300 font-bold mr-1">
               🎛️ DJ-SOUNDBOARD:
             </span>
@@ -4194,6 +4782,14 @@ export function App() {
                 {snd.label}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setShowDjSoundboardHud(false)}
+              title="DJ-Soundboard schließen"
+              className="ml-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-800 border border-slate-600 text-rose-200 font-bold cursor-pointer"
+            >
+              ×
+            </button>
           </div>
         )}
 
@@ -4248,9 +4844,9 @@ export function App() {
             type="button"
             onClick={() => setIsBottomBarCollapsed(false)}
             title="Steuerungs- & Info-Leiste wieder ausklappen [I]"
-            className="z-20 absolute bottom-2 right-3 px-2.5 py-1 rounded-md bg-[#080B12]/90 hover:bg-slate-900 border border-slate-700/80 hover:border-cyan-400/60 text-[11px] font-mono text-cyan-300 shadow-lg cursor-pointer transition"
+            className="z-20 absolute bottom-2 right-3 px-2.5 py-1 rounded-md bg-[#080B12]/90 hover:bg-slate-900 border border-cyan-500/50 hover:border-cyan-400 text-[11px] font-mono font-bold text-cyan-300 shadow-lg cursor-pointer transition"
           >
-            ▲ Steuerung &amp; 80er-Moves [I]
+            [I] Steuerung ▴
           </button>
         ) : (
           <div className="z-20 absolute bottom-0 inset-x-0 px-3 py-1 bg-[#080B12]/90 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-300">
@@ -4917,19 +5513,19 @@ export function App() {
 
                 {/* CLOSED-ALPHA / BETA-ZUGANG (WENN IN DER REGIE AKTIVIERT) */}
                 {alphaBetaConfig.enabled ? (
-                  <div className="p-4 rounded-xl bg-gradient-to-r from-[#1a0d2e] via-[#11152c] to-[#1a0d2e] border-2 border-amber-400 shadow-[0_0_28px_rgba(251,191,36,0.3)] space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-400/30 pb-2">
+                  <div className="p-4 rounded-xl bg-gradient-to-r from-[#1a0d2e] via-[#11152c] to-[#1a0d2e] border-2 border-amber-400 ring-2 ring-cyan-400/60 shadow-[0_0_36px_rgba(251,191,36,0.45)] space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-400/40 pb-2">
                       <div className="flex items-center gap-2">
-                        <span className="px-2.5 py-0.5 rounded bg-amber-400 text-slate-950 font-mono text-xs font-black uppercase">
+                        <span className="px-2.5 py-0.5 rounded bg-gradient-to-r from-amber-400 to-cyan-300 text-slate-950 font-mono text-xs font-black uppercase shadow-[0_0_12px_rgba(251,191,36,0.6)]">
                           🔒 ALPHA / BETA-ZUGANG
                         </span>
-                        <span className="font-mono text-xs text-amber-200 font-bold">
-                          Geschlossener Testbetrieb • Key erforderlich
+                        <span className="font-mono text-xs text-cyan-200 font-bold">
+                          Geschlossener Testbetrieb • VIP-Key &amp; Name fest gekoppelt
                         </span>
                       </div>
                       {isAlphaBetaAuthorized && localAlphaSession && (
-                        <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-400/70 font-mono text-[11px] text-emerald-300 font-bold">
-                          🟢 Aktiv für diesen Browser ({localAlphaSession.activatedKey})
+                        <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-400 font-mono text-[11px] text-emerald-300 font-bold shadow-[0_0_10px_rgba(16,185,129,0.4)]">
+                          🟢 Aktiv ({localAlphaSession.testerName} • {localAlphaSession.activatedKey})
                         </span>
                       )}
                     </div>
@@ -4937,7 +5533,7 @@ export function App() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div>
                         <label className="block font-mono text-xs font-bold text-cyan-300 uppercase mb-1">
-                          1. Dein Tester-Name:
+                          1. Dein Tester-Name (fest an deinen Key gebunden):
                         </label>
                         <input
                           type="text"
@@ -4946,10 +5542,11 @@ export function App() {
                             setIsAnonymousGuest(false);
                             setPlayerName(e.target.value);
                             if (alphaKeyError) setAlphaKeyError(null);
+                            if (bouncerMessage) setBouncerMessage(null);
                           }}
                           placeholder="Dein Name oder Spitzname..."
                           maxLength={22}
-                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border-2 border-cyan-400/60 text-sm text-white focus:border-amber-300 focus:outline-none"
                         />
                       </div>
 
@@ -4963,23 +5560,47 @@ export function App() {
                           onChange={(e) => {
                             setAlphaKeyInput(e.target.value.toUpperCase());
                             if (alphaKeyError) setAlphaKeyError(null);
+                            if (bouncerMessage) setBouncerMessage(null);
                           }}
                           placeholder="BETA-XXXX"
                           maxLength={24}
-                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-amber-400/60 font-mono text-sm text-amber-200 uppercase focus:border-amber-300 focus:outline-none"
+                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border-2 border-amber-400/70 font-mono text-sm font-bold text-amber-200 uppercase focus:border-cyan-300 focus:outline-none"
                         />
                       </div>
                     </div>
 
-                    {alphaKeyError && (
-                      <div className="px-3 py-1.5 rounded bg-rose-950/90 border border-rose-400 text-rose-200 font-mono text-xs font-bold">
-                        {alphaKeyError}
+                    {/* 🕶️ KULTIGE 80ER-PIXEL-TÜRSTEHER-GRAFIK MIT SONNENBRILLE & SPRECHBLASE */}
+                    {(bouncerMessage || alphaKeyError) && (
+                      <div className="p-3 rounded-xl bg-rose-950/95 border-2 border-rose-400 shadow-[0_0_24px_rgba(244,63,94,0.5)] flex items-center gap-3.5 animate-pulse">
+                        <div className="w-14 h-14 rounded-xl bg-slate-900 border-2 border-amber-400 flex flex-col items-center justify-center shrink-0 relative overflow-hidden shadow-inner">
+                          {/* 80s Flat-Top Hair */}
+                          <div className="w-8 h-2.5 bg-amber-800 rounded-t-xs" />
+                          {/* Head + Cool 80s Sunglasses */}
+                          <div className="w-8 h-5 bg-amber-300 flex items-center justify-center">
+                            <div className="w-7 h-2 bg-slate-950 border border-cyan-400/80 flex items-center justify-between px-0.5">
+                              <div className="w-2 h-0.5 bg-cyan-300" />
+                              <div className="w-2 h-0.5 bg-cyan-300" />
+                            </div>
+                          </div>
+                          {/* Broad 80s Bouncer Jacket + Gold Chain */}
+                          <div className="w-12 h-5 bg-slate-800 border-t border-fuchsia-500 flex items-center justify-center">
+                            <div className="w-4 h-1.5 border-b-2 border-amber-400 rounded-full" />
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-[10px] font-black uppercase tracking-wider text-amber-300">
+                            🕶️ PALLADIUM-TÜRSTEHER ROCKY:
+                          </div>
+                          <div className="mt-1 p-2 rounded-lg bg-slate-950 border border-rose-400/80 font-mono text-xs sm:text-sm font-black text-white">
+                            „{bouncerMessage || alphaKeyError}“
+                          </div>
+                        </div>
                       </div>
                     )}
 
                     <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                       <p className="text-[11px] text-slate-300 font-mono">
-                        Der Key wird bei Einlösung fest mit deinem Namen &amp; Browser verknüpft (kein Zweit-Login mit demselben Key möglich).
+                        Gleicher Name + gleicher Key = jederzeit Einlass • Fremder Name oder besetzter Name wird vom Türsteher abgewiesen.
                       </p>
                       <button
                         type="button"
@@ -4992,53 +5613,72 @@ export function App() {
                   </div>
                 ) : (
                   /* 1. DEIN SKATER-NAME & EINSTIEG (GANZ OBEN, WENN ALPHA/BETA AUS) */
-                  <div className="p-3.5 rounded-xl bg-[#101322] border border-cyan-500/40 flex flex-col md:flex-row items-center justify-between gap-4">
-                    <div className="flex-1 w-full">
-                      <label className="block font-mono text-xs md:text-sm font-bold text-cyan-300 uppercase mb-1.5">
-                        1. DEIN SKATER-NAME &amp; EINSTIEG (Pflichtfeld ab 2 Zeichen oder Anonym-Gast):
-                      </label>
-                      <div className="flex flex-wrap items-center gap-3">
-                        <input
-                          type="text"
-                          value={playerName}
-                          disabled={isAnonymousGuest}
-                          onChange={(e) => setPlayerName(e.target.value)}
-                          placeholder="Dein Name oder Spitzname..."
-                          maxLength={22}
-                          className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none disabled:opacity-50"
-                        />
-                        <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={isAnonymousGuest}
-                            onChange={(e) =>
-                              setIsAnonymousGuest(e.target.checked)
-                            }
-                            className="accent-fuchsia-500 w-4 h-4 cursor-pointer"
-                          />
-                          <span>[ ] Anonym bleiben / Als Gast rollen</span>
+                  <div className="p-3.5 rounded-xl bg-[#101322] border border-cyan-500/40 flex flex-col gap-3">
+                    <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+                      <div className="flex-1 w-full">
+                        <label className="block font-mono text-xs md:text-sm font-bold text-cyan-300 uppercase mb-1.5">
+                          1. DEIN SKATER-NAME &amp; EINSTIEG (Pflichtfeld ab 2 Zeichen oder Anonym-Gast):
                         </label>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <input
+                            type="text"
+                            value={playerName}
+                            disabled={isAnonymousGuest}
+                            onChange={(e) => {
+                              setPlayerName(e.target.value);
+                              if (bouncerMessage) setBouncerMessage(null);
+                            }}
+                            placeholder="Dein Name oder Spitzname..."
+                            maxLength={22}
+                            className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none disabled:opacity-50"
+                          />
+                          <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={isAnonymousGuest}
+                              onChange={(e) =>
+                                setIsAnonymousGuest(e.target.checked)
+                              }
+                              className="accent-fuchsia-500 w-4 h-4 cursor-pointer"
+                            />
+                            <span>[ ] Anonym bleiben / Als Gast rollen</span>
+                          </label>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Bitte mindestens 2 Zeichen eingeben (oder „Als Gast rollen“
+                          aktivieren), um an der Kasse vorbei in die Halle zu starten.
+                        </p>
                       </div>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        Bitte mindestens 2 Zeichen eingeben (oder „Als Gast rollen“
-                        aktivieren), um an der Kasse vorbei in die Halle zu starten.
-                      </p>
+
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          disabled={!canEnterSingleplayerHall}
+                          onClick={handleEnterHall}
+                          className={`px-6 py-3.5 rounded-xl font-display font-black text-base tracking-wider transition ${
+                            canEnterSingleplayerHall
+                              ? 'bg-gradient-to-r from-fuchsia-600 via-pink-500 to-cyan-500 hover:from-fuchsia-500 hover:to-cyan-400 text-white shadow-[0_0_25px_rgba(232,121,249,0.6)] cursor-pointer'
+                              : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                          }`}
+                        >
+                          🛼 HALLE BETRETEN [ENTER]
+                        </button>
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        disabled={!canEnterSingleplayerHall}
-                        onClick={handleEnterHall}
-                        className={`px-6 py-3.5 rounded-xl font-display font-black text-base tracking-wider transition ${
-                          canEnterSingleplayerHall
-                            ? 'bg-gradient-to-r from-fuchsia-600 via-pink-500 to-cyan-500 hover:from-fuchsia-500 hover:to-cyan-400 text-white shadow-[0_0_25px_rgba(232,121,249,0.6)] cursor-pointer'
-                            : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                        }`}
-                      >
-                        🛼 HALLE BETRETEN [ENTER]
-                      </button>
-                    </div>
+                    {bouncerMessage && (
+                      <div className="p-3 rounded-xl bg-rose-950/95 border-2 border-rose-400 shadow-[0_0_20px_rgba(244,63,94,0.45)] flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-lg bg-slate-900 border-2 border-amber-400 flex items-center justify-center text-2xl shrink-0">
+                          🕶️
+                        </div>
+                        <div className="font-mono text-xs font-black text-white">
+                          <span className="block text-[10px] text-amber-300 uppercase">
+                            PALLADIUM-TÜRSTEHER ROCKY:
+                          </span>
+                          „{bouncerMessage}“
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -5096,7 +5736,7 @@ export function App() {
                   </span>
                 </div>
 
-                {/* 3. DIGITALE 10ER-STEMPELKARTE & 1x START-FREIGETRÄNK NACH WAHL */}
+                {/* 3. DIGITALE 10ER-STEMPELKARTE & EINMALIGES WILLKOMMENSGESCHENK / SPIND-SAMMELSTÜCKE */}
                 <div className="p-3.5 rounded-xl bg-[#161228] border border-amber-400/50 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
@@ -5104,13 +5744,22 @@ export function App() {
                         3. DIGITALE 10er-STEMPELKARTE — 🎫 Stempel: {stampCard.stamps} / 10
                       </span>
                       <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 font-mono text-[10px] text-amber-200">
-                        {stampCard.stamps >= 10
-                          ? '🎁 10/10 VOLL: 1x Gratis-Zubehör im PRO-SHOP [E]!'
-                          : 'Pro Besuchstag +1 Stempel • Bei 10/10 1x Gratis-Zubehör im PRO-SHOP'}
+                        {!loadFirstVisitSlushClaimed()
+                          ? '🎁 1. Besuch: Einmaliger Gratis-Slush inklusive!'
+                          : '🎁 Treue-Prämie: Palladium-Sammlerstücke für deinen Spind!'}
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-300 mt-0.5">
-                      Wähle dein <strong>1x Start-Freigetränk nach Wahl</strong> für die Bistro-Theke:
+                      {!loadFirstVisitSlushClaimed() ? (
+                        <>
+                          Wähle dein <strong>einmaliges Willkommensgeschenk</strong> beim allerersten Besuch:
+                        </>
+                      ) : (
+                        <>
+                          Willkommens-Slush bereits eingelöst • Bei weiteren Besuchen sammelst du{' '}
+                          <strong>Original Palladium-Hanau T-Shirt, 80er-Neon-Mütze &amp; Rollschuh-Glöckchen</strong> im Spind!
+                        </>
+                      )}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -5744,207 +6393,925 @@ export function App() {
         {/* ===================================================================== */}
         {showLockerModal && (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-xs"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 backdrop-blur-xs"
             onClick={() => setShowLockerModal(false)}
           >
             <div
-              className="w-full max-w-[320px] rounded-xl bg-[#10172A] border-2 border-cyan-400 shadow-[0_0_30px_rgba(34,211,238,0.45)] p-3.5 text-white font-mono"
+              className="w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-2xl bg-[#10172A] border-2 border-cyan-400 shadow-[0_0_35px_rgba(34,211,238,0.45)] p-4 text-white font-mono space-y-3"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between border-b border-slate-700 pb-2">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-base">🗄️</span>
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-slate-700 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">🗄️</span>
                   <div>
-                    <h3 className="font-bold text-xs text-cyan-300 uppercase tracking-wider">
-                      SPIND #86 • PALLADIUM
+                    <h3 className="font-bold text-sm sm:text-base text-cyan-300 uppercase tracking-wider">
+                      MEIN SPIND &amp; HALLEN-GUIDE • PALLADIUM #86
                     </h3>
-                    <p className="text-[9.5px] text-slate-400">
-                      16-Bit Schließfach (Schließen mit × oder ESC)
+                    <p className="text-[10px] text-slate-400">
+                      ⭐ Punkte-Konto:{' '}
+                      <strong className="text-amber-300">
+                        {availableProShopPoints} Pkt
+                      </strong>{' '}
+                      • 1-Klick-Kacheln (Schließen mit × oder ESC)
                     </p>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowLockerModal(false)}
-                  className="w-6 h-6 rounded bg-slate-800 hover:bg-rose-900 border border-slate-600 text-slate-200 text-xs font-bold cursor-pointer flex items-center justify-center"
+                  className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-rose-900 border border-slate-600 text-slate-200 text-sm font-bold cursor-pointer flex items-center justify-center"
                   title="Schließen [ESC]"
                 >
                   ×
                 </button>
               </div>
 
-              {/* SEKTION 1: MEIN SPIND (INVENTAR) */}
-              <div className="mt-2.5 space-y-2">
-                <div className="text-[10px] font-bold uppercase text-amber-300 tracking-wider">
-                  🎒 Mein Spind (Inventar)
-                </div>
-
-                {/* Punktestand */}
-                <div className="flex items-center justify-between px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-700 text-[11px]">
-                  <span className="text-slate-300">⭐ Punkte-Konto:</span>
-                  <span className="font-bold text-amber-300">
-                    {availableProShopPoints} Pkt
-                  </span>
-                </div>
-
-                {/* Aktuelle Rollschuhe + VIP Disco-Rollschuhe Umschalter */}
-                <div className="p-2 rounded bg-slate-900/90 border border-slate-700 space-y-1.5 text-[11px]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-300">🛼 Rollschuhe:</span>
-                    <span className="font-bold text-cyan-200">
-                      {lockerSettings.vipDiscoSkatesEquipped
-                        ? '🪩 VIP Disco-Rollschuhe'
-                        : hasOwnSkates
-                        ? 'Eigene 80s Quads'
-                        : hasRentedSkates
-                        ? 'Leih-Rollschuhe'
-                        : 'Straßenschuhe'}
-                    </span>
-                  </div>
-                  {isIntroTourComplete(introTour) ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setLockerSettings((prev) => ({
-                          ...prev,
-                          vipDiscoSkatesEquipped: !prev.vipDiscoSkatesEquipped,
-                        }))
-                      }
-                      className={`w-full py-1 px-2 rounded border text-[10.5px] font-bold transition cursor-pointer ${
-                        lockerSettings.vipDiscoSkatesEquipped
-                          ? 'bg-amber-500/25 border-amber-300 text-amber-200'
-                          : 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-slate-200'
-                      }`}
-                    >
-                      {lockerSettings.vipDiscoSkatesEquipped
-                        ? '✓ VIP Disco-Rollschuhe angelegt (+Speed & Gold-Glanz)'
-                        : '🪩 VIP Disco-Rollschuhe anziehen'}
-                    </button>
-                  ) : (
-                    <div className="text-[9.5px] text-slate-400">
-                      🔒 VIP Disco-Rollschuhe: Schließe die 4 Schritte der
-                      Einführung ab!
-                    </div>
-                  )}
-                </div>
-
-                {/* Getränke im Spind mit Trinken-Button */}
-                <div className="p-2 rounded bg-slate-900/90 border border-slate-700 flex items-center justify-between gap-2 text-[11px]">
-                  <div>
-                    <div className="text-slate-200 font-bold">
-                      🥤 Getränke: {lockerSettings.drinksInLocker || 0}x
-                    </div>
-                    <div className="text-[9.5px] text-slate-400">
-                      Slush &amp; Bloba Speed-Boost
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={(lockerSettings.drinksInLocker || 0) <= 0}
-                    onClick={handleDrinkFromLocker}
-                    className={`px-2.5 py-1 rounded border text-[10.5px] font-bold transition ${
-                      (lockerSettings.drinksInLocker || 0) > 0
-                        ? 'bg-cyan-500 hover:bg-cyan-400 border-white text-slate-950 cursor-pointer shadow-[0_0_10px_rgba(34,211,238,0.4)]'
-                        : 'bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed'
-                    }`}
-                  >
-                    🥤 Trinken
-                  </button>
-                </div>
-              </div>
-
-              {/* SEKTION 2: ANZEIGE & SOUND (SCHIEBEREGLER / TOGGLES) */}
-              <div className="mt-3 pt-2.5 border-t border-slate-700 space-y-1.5">
-                <div className="text-[10px] font-bold uppercase text-cyan-300 tracking-wider">
-                  🎛️ Anzeige &amp; Sound (localStorage)
-                </div>
-
+              {/* 5 Haupt-Reiter (Tabs) im Kachel-/Button-Stil inkl. 🏆 Urkunden & Rekorde */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
                 {(
                   [
                     {
-                      key: 'showAiNames' as const,
-                      label: 'KI-Namen',
-                      desc: 'Standard: AUS (aufgeräumte Bahn)',
-                      value: lockerSettings.showAiNames,
-                      onToggle: () =>
-                        setLockerSettings((prev) => ({
-                          ...prev,
-                          showAiNames: !prev.showAiNames,
-                        })),
+                      id: 'gear' as const,
+                      label: '🛼 Ausrüstung & Style',
                     },
                     {
-                      key: 'showOwnName' as const,
-                      label: 'Eigener Name (JR)',
-                      desc: 'Standard: AN',
-                      value: lockerSettings.showOwnName,
-                      onToggle: () =>
-                        setLockerSettings((prev) => ({
-                          ...prev,
-                          showOwnName: !prev.showOwnName,
-                        })),
+                      id: 'tasks' as const,
+                      label: `✅ Aufgaben (${
+                        isIntroTourComplete(introTour)
+                          ? `${completedChallengesCount}/9`
+                          : `${
+                              (introTour.open_locker ? 1 : 0) +
+                              (introTour.fetch_drink ? 1 : 0) +
+                              (introTour.skate_rink ? 1 : 0) +
+                              (introTour.try_ballspiel ? 1 : 0)
+                            }/4`
+                      })`,
                     },
                     {
-                      key: 'showSpeechBubbles' as const,
-                      label: 'Sprechblasen',
-                      desc: 'Standard: AN',
-                      value: lockerSettings.showSpeechBubbles,
-                      onToggle: () =>
-                        setLockerSettings((prev) => ({
-                          ...prev,
-                          showSpeechBubbles: !prev.showSpeechBubbles,
-                        })),
+                      id: 'events' as const,
+                      label: '🎪 Live-Events & Shows',
                     },
                     {
-                      key: 'discoSoundEnabled' as const,
-                      label: 'Disco-Sound',
-                      desc: 'Standard: AN',
-                      value: lockerSettings.discoSoundEnabled && !isMuted,
-                      onToggle: () => {
-                        const nextSound = !(
-                          lockerSettings.discoSoundEnabled && !isMuted
-                        );
-                        setLockerSettings((prev) => ({
-                          ...prev,
-                          discoSoundEnabled: nextSound,
-                        }));
-                        setIsMuted(!nextSound);
-                        soundFX.setMuted(!nextSound);
-                      },
+                      id: 'certificates' as const,
+                      label: `🏆 Urkunden & Rekorde (${
+                        PALLADIUM_CERTIFICATES.filter(
+                          (c) => certificatesState.unlocked[c.id]?.unlocked
+                        ).length
+                      }/${PALLADIUM_CERTIFICATES.length})`,
+                    },
+                    {
+                      id: 'feedback' as const,
+                      label: '💬 Tester-Feedback',
                     },
                   ] as const
-                ).map((item) => (
-                  <div
-                    key={item.key}
-                    className="flex items-center justify-between px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-700/90"
-                  >
-                    <div>
-                      <div className="text-[11px] font-bold text-slate-100">
-                        {item.label}
+                ).map((t) => {
+                  const active = lockerTab === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setLockerTab(t.id)}
+                      className={`py-2 px-2 rounded-xl border text-[10.5px] font-bold transition cursor-pointer ${
+                        active
+                          ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_14px_rgba(34,211,238,0.5)]'
+                          : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-200'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* TAB A: 🛼 AUSRÜSTUNG & STYLE */}
+              {lockerTab === 'gear' && (
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {/* Rollschuhe Status + VIP-Umschalter */}
+                    <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-slate-300 font-bold">
+                          🛼 Rollschuhe:
+                        </span>
+                        <span className="font-bold text-cyan-200">
+                          {lockerSettings.vipDiscoSkatesEquipped
+                            ? '🪩 VIP Disco-Rollschuhe'
+                            : hasOwnSkates
+                            ? 'Eigene 80s Quads'
+                            : hasRentedSkates
+                            ? 'Leih-Rollschuhe'
+                            : 'Straßenschuhe'}
+                        </span>
                       </div>
-                      <div className="text-[9px] text-slate-400">
-                        {item.desc}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHasOwnSkates(true);
+                          setHasRentedSkates(false);
+                        }}
+                        className={`w-full py-1.5 px-2 rounded-lg border text-[11px] font-bold transition cursor-pointer ${
+                          hasOwnSkates || hasRentedSkates
+                            ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                            : 'bg-amber-500 hover:bg-amber-400 border-white text-slate-950'
+                        }`}
+                      >
+                        {hasOwnSkates || hasRentedSkates
+                          ? '✓ Rollschuhe geschnürt (Bereit für die Bahn)'
+                          : '🛼 Jetzt 80s Rollschuhe anziehen'}
+                      </button>
+                      {isIntroTourComplete(introTour) ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setLockerSettings((prev) => ({
+                              ...prev,
+                              vipDiscoSkatesEquipped:
+                                !prev.vipDiscoSkatesEquipped,
+                            }))
+                          }
+                          className={`w-full py-1.5 px-2 rounded-lg border text-[11px] font-bold transition cursor-pointer ${
+                            lockerSettings.vipDiscoSkatesEquipped
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.45)]'
+                              : 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-slate-200'
+                          }`}
+                        >
+                          {lockerSettings.vipDiscoSkatesEquipped
+                            ? '🪩 VIP Disco-Rollschuhe: AN (+Speed)'
+                            : '🪩 VIP Disco-Rollschuhe: AUS'}
+                        </button>
+                      ) : (
+                        <div className="text-[10px] text-amber-300/90">
+                          🔒 VIP Disco-Rollschuhe: Schließe im Reiter „Aufgaben“
+                          die 4 Schritte der Einführung ab!
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Getränke & 1-Klick-Ausstattung */}
+                    <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-bold text-slate-200">
+                            🥤 Getränke im Spind: {lockerSettings.drinksInLocker || 0}x
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            Slush &amp; Bloba Speed-Boost
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={(lockerSettings.drinksInLocker || 0) <= 0}
+                          onClick={handleDrinkFromLocker}
+                          className={`px-3 py-1.5 rounded-lg border text-[11px] font-bold transition ${
+                            (lockerSettings.drinksInLocker || 0) > 0
+                              ? 'bg-cyan-400 hover:bg-cyan-300 border-white text-slate-950 cursor-pointer shadow-[0_0_10px_rgba(34,211,238,0.4)]'
+                              : 'bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed'
+                          }`}
+                        >
+                          🥤 Trinken
+                        </button>
                       </div>
+
+                      {/* 1-Klick Kacheln für Skater/Rollstuhl & Kengol-Cap */}
+                      <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCharacterMode((m) =>
+                              m === 'skater' ? 'wheelchair' : 'skater'
+                            )
+                          }
+                          className={`py-1.5 px-2 rounded-lg border text-[10.5px] font-bold cursor-pointer ${
+                            characterMode === 'wheelchair'
+                              ? 'bg-cyan-500 text-slate-950 border-white'
+                              : 'bg-slate-800 text-slate-200 border-slate-700'
+                          }`}
+                        >
+                          {characterMode === 'wheelchair'
+                            ? '♿ Rollstuhl: AN'
+                            : '🛼 Skater-Modus'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setKengolHatEnabled((c) => !c)}
+                          className={`py-1.5 px-2 rounded-lg border text-[10.5px] font-bold cursor-pointer ${
+                            kengolHatEnabled
+                              ? 'bg-fuchsia-500 text-white border-white'
+                              : 'bg-slate-800 text-slate-200 border-slate-700'
+                          }`}
+                        >
+                          🧢 Kengol-Cap: {kengolHatEnabled ? 'AN' : 'AUS'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Outfit-Farbe & Pro-Shop Direktbutton */}
+                  <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-700 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[11px] font-bold text-slate-300 mr-1">
+                        👕 Outfit-Farbe:
+                      </span>
+                      {MULTIPLAYER_OUTFIT_COLORS.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          title={`Outfit-Farbe: ${c.label}`}
+                          onClick={() => setPlayerShirtColor(c.hex)}
+                          style={{ backgroundColor: c.hex }}
+                          className={`w-6 h-6 rounded-full border cursor-pointer transition ${
+                            playerShirtColor === c.hex
+                              ? 'border-2 border-white scale-110 shadow-[0_0_10px_rgba(255,255,255,0.7)]'
+                              : 'border-slate-700 opacity-75 hover:opacity-100'
+                          }`}
+                        />
+                      ))}
                     </div>
                     <button
                       type="button"
-                      role="switch"
-                      aria-checked={item.value}
-                      onClick={item.onToggle}
-                      className={`relative w-11 h-5 rounded-full transition cursor-pointer border ${
-                        item.value
-                          ? 'bg-emerald-500/90 border-emerald-300'
-                          : 'bg-slate-800 border-slate-600'
-                      }`}
+                      onClick={() => {
+                        setShowLockerModal(false);
+                        setShowProShopModal(true);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 border border-white/60 text-white text-[11px] font-bold cursor-pointer"
                     >
-                      <span
-                        className={`block w-3.5 h-3.5 rounded-full bg-white transition-transform ${
-                          item.value ? 'translate-x-6' : 'translate-x-0.5'
-                        }`}
-                      />
+                      🛒 Pro-Shop &amp; 80s-Moves öffnen
                     </button>
                   </div>
-                ))}
-              </div>
+
+                  {/* Anzeige & Sound als klare AN/AUS Kachel-Buttons */}
+                  <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-700 space-y-1.5">
+                    <div className="text-[10px] font-bold uppercase text-cyan-300">
+                      🎛️ Anzeige &amp; Sound (Direkt-Schalter)
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                      {(
+                        [
+                          {
+                            key: 'showAiNames' as const,
+                            label: 'KI-Namen',
+                            value: lockerSettings.showAiNames,
+                            onToggle: () =>
+                              setLockerSettings((prev) => ({
+                                ...prev,
+                                showAiNames: !prev.showAiNames,
+                              })),
+                          },
+                          {
+                            key: 'showOwnName' as const,
+                            label: 'Eigener Name',
+                            value: lockerSettings.showOwnName,
+                            onToggle: () =>
+                              setLockerSettings((prev) => ({
+                                ...prev,
+                                showOwnName: !prev.showOwnName,
+                              })),
+                          },
+                          {
+                            key: 'showSpeechBubbles' as const,
+                            label: 'Sprechblasen',
+                            value: lockerSettings.showSpeechBubbles,
+                            onToggle: () =>
+                              setLockerSettings((prev) => ({
+                                ...prev,
+                                showSpeechBubbles: !prev.showSpeechBubbles,
+                              })),
+                          },
+                          {
+                            key: 'discoSoundEnabled' as const,
+                            label: 'Disco-Sound',
+                            value:
+                              lockerSettings.discoSoundEnabled && !isMuted,
+                            onToggle: () => {
+                              const nextSound = !(
+                                lockerSettings.discoSoundEnabled && !isMuted
+                              );
+                              setLockerSettings((prev) => ({
+                                ...prev,
+                                discoSoundEnabled: nextSound,
+                              }));
+                              setIsMuted(!nextSound);
+                              soundFX.setMuted(!nextSound);
+                            },
+                          },
+                        ] as const
+                      ).map((item) => (
+                        <button
+                          key={item.key}
+                          type="button"
+                          onClick={item.onToggle}
+                          className={`py-2 px-2 rounded-lg border text-[11px] font-bold transition cursor-pointer ${
+                            item.value
+                              ? 'bg-emerald-500 text-slate-950 border-white shadow-[0_0_10px_rgba(16,185,129,0.4)]'
+                              : 'bg-slate-950 text-slate-400 border-slate-700 hover:border-slate-500'
+                          }`}
+                        >
+                          {item.label}: {item.value ? 'AN' : 'AUS'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Gesammelte Palladium-Erinnerungsstücke im Spind */}
+                  <div className="p-2.5 rounded-xl bg-slate-900/90 border border-fuchsia-500/40 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase text-fuchsia-300">
+                        🎁 Palladium-Sammlerstücke im Spind (ab 2. Besuch):
+                      </span>
+                      <span className="text-[9.5px] text-amber-300 font-bold">
+                        {(lockerSettings.collectibles || []).length} /{' '}
+                        {PALLADIUM_SPIND_COLLECTIBLES.length} gesammelt
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                      {PALLADIUM_SPIND_COLLECTIBLES.map((col) => {
+                        const owned = (
+                          lockerSettings.collectibles || []
+                        ).includes(col.label);
+                        return (
+                          <div
+                            key={col.id}
+                            className={`px-2 py-1.5 rounded-lg border text-[10px] font-bold flex items-center gap-1.5 ${
+                              owned
+                                ? 'bg-fuchsia-950/80 border-fuchsia-400 text-fuchsia-100'
+                                : 'bg-slate-950/70 border-slate-800 text-slate-500'
+                            }`}
+                          >
+                            <span>{col.icon}</span>
+                            <span className="truncate">{col.label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB B: ✅ AUFGABEN & RUNDGANG */}
+              {lockerTab === 'tasks' && (
+                <div className="space-y-3">
+                  <div className="p-3 rounded-xl bg-gradient-to-r from-indigo-950/90 via-slate-900/95 to-emerald-950/80 border border-emerald-400/70 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-emerald-300">
+                        🧭 Einführung: Palladium-Rundgang (+20 Pkt je Schritt)
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400 text-[10px] font-bold text-emerald-200">
+                        {isIntroTourComplete(introTour)
+                          ? '🎉 Komplett (+VIP Rollschuhe!)'
+                          : `${
+                              (introTour.open_locker ? 1 : 0) +
+                              (introTour.fetch_drink ? 1 : 0) +
+                              (introTour.skate_rink ? 1 : 0) +
+                              (introTour.try_ballspiel ? 1 : 0)
+                            } / 4 erledigt`}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {(
+                        [
+                          {
+                            id: 'open_locker' as IntroStepId,
+                            title: '1. Spind öffnen',
+                            desc: 'Einmal auf die SPINDE klicken oder [E] drücken.',
+                          },
+                          {
+                            id: 'fetch_drink' as IntroStepId,
+                            title: '2. Getränk an der Gastro holen',
+                            desc: 'Unten links an der SLUSH & BLOB Bar erfrischen.',
+                          },
+                          {
+                            id: 'skate_rink' as IntroStepId,
+                            title: '3. Runde auf der Bahn drehen',
+                            desc: 'Durch eine Schleuse auf die Rollfläche fahren.',
+                          },
+                          {
+                            id: 'try_ballspiel' as IntroStepId,
+                            title: '4. Ballspiel ausprobieren',
+                            desc: 'Im Ballspiel per [Space] oder Mausklick werfen.',
+                          },
+                        ] as const
+                      ).map((step) => {
+                        const done = introTour[step.id];
+                        return (
+                          <div
+                            key={step.id}
+                            className={`p-2 rounded-lg border ${
+                              done
+                                ? 'bg-emerald-950/60 border-emerald-400 text-emerald-100'
+                                : 'bg-slate-900/90 border-slate-700 text-slate-200'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between text-[11px] font-bold">
+                              <span>
+                                {done ? '✅' : '⬜'} {step.title}
+                              </span>
+                              <span
+                                className={
+                                  done ? 'text-emerald-300' : 'text-amber-300'
+                                }
+                              >
+                                {done ? '+20 Pkt ✓' : '+20 Pkt'}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-slate-300 mt-0.5 font-sans">
+                              {step.desc}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 9 Tages-Challenges als übersichtliche Kacheln */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-1">
+                    {PALLADIUM_CHALLENGES.map((ch, idx) => {
+                      const introDone = isIntroTourComplete(introTour);
+                      const st = challengesProgress[ch.id] || {
+                        progress: 0,
+                        completed: false,
+                      };
+                      return (
+                        <div
+                          key={ch.id}
+                          className={`p-2.5 rounded-xl border ${
+                            !introDone
+                              ? 'bg-slate-950/75 border-slate-800 opacity-75'
+                              : st.completed
+                              ? 'bg-emerald-950/40 border-emerald-400/70'
+                              : 'bg-slate-900/90 border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-1 text-[11px] font-bold">
+                            <span>
+                              {st.completed ? '✅' : !introDone ? '🔒' : '🎯'}{' '}
+                              {idx + 1}. {ch.title}
+                            </span>
+                            <span className="text-amber-300">
+                              {st.completed
+                                ? 'ERFÜLLT'
+                                : `${st.progress}/${ch.target}`}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-300 mt-1 font-sans">
+                            {ch.description}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB C: 🎪 LIVE-EVENTS & SHOWS (MIT DIREKT-TEILNEHMEN / TELEPORT) */}
+              {lockerTab === 'events' && (
+                <div className="space-y-2.5">
+                  <div className="text-[11px] text-slate-300">
+                    Klicke auf eine Event-Kachel, um das Event sofort zu starten
+                    und direkt zum Startpunkt auf der Bahn zu springen:
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {(
+                      [
+                        {
+                          id: 'free-skate' as HallGameMode,
+                          title: '🛼 Freies Laufen (Oval-Runde)',
+                          desc: 'Entspanntes Rollen im großen Oval mit Musik & Lichtshow.',
+                          target: { x: 800, y: 740 },
+                        },
+                        {
+                          id: 'ballspiel' as HallGameMode,
+                          title: '🟠 Ballspiel (Abwerfen & Passen)',
+                          desc: 'Schnapp dir den Ball in der Hallenmitte und wirf per Mausklick!',
+                          target: { x: 800, y: 500 },
+                        },
+                        {
+                          id: 'springerstaffel' as HallGameMode,
+                          title: '🤸‍♂️ Springer-Staffel-Show (Hochsprung)',
+                          desc: 'Geordnete Anlaufspur über die 4 Hochsprung-Gestelle ab 60 cm!',
+                          target: { x: 540, y: 740 },
+                        },
+                        {
+                          id: 'slalom' as HallGameMode,
+                          title: '🚧 Slalom-Parcours',
+                          desc: 'Schlängle dich fehlerfrei durch die leuchtenden 80er-Pylonen.',
+                          target: { x: 560, y: 260 },
+                        },
+                        {
+                          id: 'stuhlsprung' as HallGameMode,
+                          title: '🪑 Stuhl- & Hindernissprung',
+                          desc: 'Springe mit [J] oder [Shift] über die Klappstuhlreihen.',
+                          target: { x: 560, y: 740 },
+                        },
+                      ] as const
+                    ).map((ev) => {
+                      const isActive = hallGameMode === ev.id;
+                      return (
+                        <div
+                          key={ev.id}
+                          className={`p-3 rounded-xl border flex flex-col justify-between gap-2 ${
+                            isActive
+                              ? 'bg-fuchsia-950/80 border-fuchsia-400 shadow-[0_0_15px_rgba(232,121,249,0.35)]'
+                              : 'bg-slate-900/90 border-slate-700'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-bold text-xs text-white">
+                                {ev.title}
+                              </span>
+                              {isActive && (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-400 text-slate-950 text-[9px] font-bold">
+                                  AKTIV
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-slate-300 mt-1 font-sans">
+                              {ev.desc}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setHallGameMode(ev.id);
+                              if (ev.id === 'springerstaffel') {
+                                setSpringerStaffelShowSec(120);
+                              }
+                              setHasOwnSkates(true);
+                              setTeleportTrigger({
+                                x: ev.target.x,
+                                y: ev.target.y,
+                                seq: Date.now(),
+                              });
+                              setShowLockerModal(false);
+                            }}
+                            className="w-full py-1.5 px-2.5 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-[11px] cursor-pointer transition"
+                          >
+                            🚀 Teilnehmen &amp; zum Startpunkt springen
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    {/* Richtungswechsel / Slow-Skate Kachel */}
+                    <div
+                      className={`p-3 rounded-xl border flex flex-col justify-between gap-2 ${
+                        (adminSettings.skateDirection || 'ccw') === 'cw' ||
+                        lightingMode === 'slow-skating'
+                          ? 'bg-amber-950/70 border-amber-400'
+                          : 'bg-slate-900/90 border-slate-700'
+                      }`}
+                    >
+                      <div>
+                        <div className="font-bold text-xs text-amber-200">
+                          🔄 Richtungswechsel / Slow-Skate-Runde
+                        </div>
+                        <p className="text-[10px] text-slate-300 mt-1 font-sans">
+                          Aktuelle Fahrtrichtung:{' '}
+                          <strong className="text-cyan-300">
+                            {(adminSettings.skateDirection || 'ccw') === 'cw'
+                              ? 'Im Uhrzeigersinn (Rückwärts-Skater aktiv)'
+                              : 'Gegen den Uhrzeigersinn (Normal)'}
+                          </strong>
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHasOwnSkates(true);
+                          setTeleportTrigger({
+                            x: 800,
+                            y: 740,
+                            seq: Date.now(),
+                          });
+                          setShowLockerModal(false);
+                        }}
+                        className="w-full py-1.5 px-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[11px] cursor-pointer transition"
+                      >
+                        🛼 Direkt auf die Außenbahn springen
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB E: 🏆 URKUNDEN- & POKALWAND (GERAHMTE URKUNDEN ZUM ANKLICKEN & VERGRÖSSERN) */}
+              {lockerTab === 'certificates' && (
+                <div className="space-y-3">
+                  <div className="p-2.5 rounded-xl bg-slate-900/95 border border-amber-400/50 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <div>
+                      <span className="font-bold text-amber-300">
+                        🏆 Offizielle Palladium-Urkunden- &amp; Pokalwand
+                      </span>
+                      <p className="text-[10px] text-slate-300 font-sans">
+                        Klicke auf eine Urkunde zum Vergrößern (mit deinem Namen, Datum &amp; Palladium-Hanau-Stempel).
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] font-mono">
+                      <span className="px-2 py-0.5 rounded bg-slate-950 border border-cyan-500/40 text-cyan-200">
+                        📅 Besuchstage: <strong>{certificatesState.visitDates.length}</strong>
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-slate-950 border border-amber-500/40 text-amber-200">
+                        ✅ Aufgaben gesamt: <strong>{certificatesState.totalTasksCompleted}</strong>
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Vergrößerte Urkunden-Ansicht (wenn eine Urkunde angeklickt wurde) */}
+                  {zoomedCertId &&
+                    (() => {
+                      const cert = PALLADIUM_CERTIFICATES.find(
+                        (c) => c.id === zoomedCertId
+                      );
+                      if (!cert) return null;
+                      const unlockInfo = certificatesState.unlocked[cert.id];
+                      const isUnlocked = Boolean(unlockInfo?.unlocked);
+                      return (
+                        <div
+                          className={`p-4 rounded-2xl border-4 shadow-2xl relative ${
+                            cert.tier === 'extreme-gold' || cert.tier === 'gold'
+                              ? 'bg-gradient-to-br from-amber-100 via-yellow-50 to-amber-100 border-amber-500 text-slate-900'
+                              : 'bg-gradient-to-br from-slate-100 via-white to-amber-50 border-cyan-500 text-slate-900'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between border-b-2 border-amber-700/40 pb-2">
+                            <span className="font-mono text-[10px] font-black uppercase tracking-widest text-amber-900">
+                              ★ ROLLER DISCO PALLADIUM HANAU • OFFIZIELLE URKUNDE ★
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setZoomedCertId(null)}
+                              className="px-2 py-0.5 rounded bg-slate-900 text-white font-mono text-[10px] font-bold cursor-pointer"
+                            >
+                              ✕ Schließen
+                            </button>
+                          </div>
+
+                          <div className="text-center my-3 space-y-1">
+                            <div className="text-3xl">{cert.icon}</div>
+                            <h4 className="font-display font-black text-lg uppercase tracking-wide text-slate-900">
+                              {cert.title}
+                            </h4>
+                            <div className="font-mono text-xs font-bold text-rose-700">
+                              {cert.subtitle}
+                            </div>
+                            <p className="text-xs text-slate-700 max-w-md mx-auto pt-1 font-sans">
+                              Verliehen an{' '}
+                              <strong className="text-slate-950 underline">
+                                {playerName || 'Palladium-Skater'}
+                              </strong>{' '}
+                              für: {cert.description}
+                            </p>
+                          </div>
+
+                          <div className="mt-3 pt-2 border-t border-amber-700/30 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-slate-800">
+                            <span>
+                              Status:{' '}
+                              <strong>
+                                {isUnlocked
+                                  ? `✅ Verliehen am ${unlockInfo?.unlockedAt || 'Heute'}`
+                                  : '🔒 Noch nicht freigeschaltet'}
+                              </strong>
+                            </span>
+                            <span
+                              className={`px-2.5 py-0.5 rounded-full border-2 font-black rotate-[-3deg] ${
+                                cert.hasRedWaxSeal
+                                  ? 'bg-rose-700 text-amber-100 border-amber-300 shadow'
+                                  : 'border-rose-700 text-rose-800'
+                              }`}
+                            >
+                              {cert.hasRedWaxSeal
+                                ? '🔴 ROTES WACHS-SIEGEL • KÖNIG DER LÜFTE'
+                                : '🏛️ STEMPEL: PALLADIUM HANAU 1986'}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                  {/* 8 Gerahmte Urkunden-Kacheln */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
+                    {PALLADIUM_CERTIFICATES.map((cert) => {
+                      const unlockInfo = certificatesState.unlocked[cert.id];
+                      const isUnlocked = Boolean(unlockInfo?.unlocked);
+                      const isGold =
+                        cert.tier === 'gold' || cert.tier === 'extreme-gold';
+
+                      let progressLabel = isUnlocked
+                        ? `Verliehen: ${unlockInfo?.unlockedAt || 'Aktiv'}`
+                        : 'Noch gesperrt';
+                      if (cert.id === 'dj_livestream') {
+                        const cnt = certificatesState.djLivestreamCount || 0;
+                        const tierStr =
+                          cnt >= 5
+                            ? '🥇 Gold (5x)'
+                            : cnt >= 3
+                            ? '🥈 Silber (3x)'
+                            : cnt >= 1
+                            ? '🥉 Bronze (1x)'
+                            : 'Noch 0x';
+                        progressLabel = `${tierStr} • Fortschritt: ${cnt} / ${
+                          cnt < 1 ? 1 : cnt < 3 ? 3 : 5
+                        }`;
+                      } else if (cert.id === 'liveband_abend') {
+                        const cnt = certificatesState.livebandCount || 0;
+                        const tierStr =
+                          cnt >= 5
+                            ? '🥇 Gold (5x)'
+                            : cnt >= 3
+                            ? '🥈 Silber (3x)'
+                            : cnt >= 1
+                            ? '🥉 Bronze (1x)'
+                            : 'Noch 0x';
+                        progressLabel = `${tierStr} • Fortschritt: ${cnt} / ${
+                          cnt < 1 ? 1 : cnt < 3 ? 3 : 5
+                        }`;
+                      } else if (!isUnlocked) {
+                        if (cert.id === 'stammgast_7') {
+                          progressLabel = `${Math.min(
+                            7,
+                            certificatesState.visitDates.length
+                          )} / 7 Tage`;
+                        } else if (cert.id === 'treue_14') {
+                          progressLabel = `${Math.min(
+                            14,
+                            certificatesState.visitDates.length
+                          )} / 14 Tage`;
+                        } else if (cert.id === 'fuehrerschein') {
+                          const cnt =
+                            (certificatesState.cleanSlalomDone ? 1 : 0) +
+                            (certificatesState.cleanJumpDone ? 1 : 0);
+                          progressLabel = `${cnt} / 2 Disziplinen (Slalom + Sprung)`;
+                        } else if (cert.id === 'fleiss_25') {
+                          progressLabel = `${Math.min(
+                            25,
+                            certificatesState.totalTasksCompleted
+                          )} / 25 Aufgaben`;
+                        } else if (cert.id === 'allrounder_50') {
+                          progressLabel = `${Math.min(
+                            50,
+                            certificatesState.totalTasksCompleted
+                          )} / 50 Aufgaben`;
+                        } else if (cert.id === 'legende_100') {
+                          progressLabel = `${Math.min(
+                            100,
+                            certificatesState.totalTasksCompleted
+                          )} / 100 Aufgaben`;
+                        } else if (cert.id === 'family_day') {
+                          progressLabel = 'Sonntags / am Family-Day rollen';
+                        } else if (cert.id === 'koenig_der_luefte') {
+                          progressLabel = '3er-Stuhl / Hochsprung mit Vollgas';
+                        }
+                      }
+
+                      return (
+                        <button
+                          key={cert.id}
+                          type="button"
+                          onClick={() => setZoomedCertId(cert.id)}
+                          className={`p-2.5 rounded-xl border-2 text-left transition cursor-pointer flex flex-col justify-between gap-1.5 ${
+                            isUnlocked
+                              ? isGold
+                                ? 'bg-gradient-to-br from-amber-950/90 via-slate-900 to-yellow-950/80 border-amber-400 shadow-[0_0_16px_rgba(251,191,36,0.35)]'
+                                : 'bg-gradient-to-br from-cyan-950/80 via-slate-900 to-indigo-950/80 border-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.25)]'
+                              : 'bg-slate-950/80 border-slate-800 opacity-75 hover:opacity-100 hover:border-slate-600'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xl">{cert.icon}</span>
+                              <div>
+                                <div className="text-[11px] font-bold text-white leading-tight">
+                                  {cert.title}
+                                </div>
+                                <div className="text-[9.5px] text-amber-300">
+                                  {cert.subtitle}
+                                </div>
+                              </div>
+                            </div>
+                            {cert.hasRedWaxSeal && (
+                              <span
+                                title="Rotes Wachs-Siegel"
+                                className="px-1.5 py-0.5 rounded-full bg-rose-700 border border-amber-300 text-[9px] font-bold text-amber-100 shrink-0"
+                              >
+                                🔴 Siegel
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-300 font-sans line-clamp-2">
+                            {cert.description}
+                          </p>
+                          <div className="flex items-center justify-between pt-1 border-t border-slate-800/80 text-[9.5px] font-mono">
+                            <span
+                              className={
+                                isUnlocked
+                                  ? 'text-emerald-300 font-bold'
+                                  : 'text-slate-400'
+                              }
+                            >
+                              {isUnlocked ? '🏅 ' : '🔒 '}
+                              {progressLabel}
+                            </span>
+                            <span className="text-cyan-300 underline">
+                              Ansehen 🔍
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB D: 💬 TESTER-FEEDBACK */}
+              {lockerTab === 'feedback' && (
+                <div className="space-y-3">
+                  <div className="p-3 rounded-xl bg-slate-900/95 border border-cyan-400/50 space-y-2.5">
+                    <div className="text-xs font-bold text-cyan-300">
+                      💬 Direktes Alpha/Beta Tester-Feedback an die Hallenleitung
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {(
+                        [
+                          { id: 'Bug' as TesterFeedbackCategory, label: '🐞 Bug melden' },
+                          { id: 'Idee' as TesterFeedbackCategory, label: '💡 Idee / Wunsch' },
+                          { id: 'Lob' as TesterFeedbackCategory, label: '🎉 Lob & Grüße' },
+                        ] as const
+                      ).map((cat) => (
+                        <button
+                          key={cat.id}
+                          type="button"
+                          onClick={() => setFeedbackCategory(cat.id)}
+                          className={`py-2 px-2 rounded-lg border text-xs font-bold cursor-pointer transition ${
+                            feedbackCategory === cat.id
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_10px_rgba(251,191,36,0.4)]'
+                              : 'bg-slate-950 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          {cat.label}
+                        </button>
+                      ))}
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={feedbackText}
+                      onChange={(e) => setFeedbackText(e.target.value)}
+                      placeholder="Schreibe hier kurz dein Feedback, eine Idee oder einen gefundenen Bug..."
+                      className="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white font-sans focus:border-cyan-400 focus:outline-none"
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-slate-400">
+                        Absender:{' '}
+                        <strong className="text-slate-200">
+                          {playerName || 'Gast'}
+                        </strong>
+                        {localAlphaSession?.activatedKey
+                          ? ` (${localAlphaSession.activatedKey})`
+                          : ''}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const clean = feedbackText.trim();
+                          if (!clean) return;
+                          const item: TesterFeedbackItem = {
+                            id: `fb_${Date.now()}`,
+                            author: playerName || 'Gast',
+                            keyUsed: localAlphaSession?.activatedKey,
+                            category: feedbackCategory,
+                            text: clean,
+                            createdAt: new Date().toLocaleString('de-DE', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            }),
+                          };
+                          const next = [item, ...testerFeedbackList];
+                          setTesterFeedbackList(next);
+                          saveTesterFeedback(next);
+                          setFeedbackText('');
+                          setFeedbackSentToast(
+                            '✅ Danke! Dein Feedback wurde im Hallenleiter-Postfach gespeichert.'
+                          );
+                          window.setTimeout(
+                            () => setFeedbackSentToast(null),
+                            3200
+                          );
+                        }}
+                        className="px-4 py-1.5 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-bold text-xs cursor-pointer"
+                      >
+                        📨 Feedback absenden
+                      </button>
+                    </div>
+                    {feedbackSentToast && (
+                      <div className="text-xs text-emerald-300 font-bold">
+                        {feedbackSentToast}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -6368,7 +7735,7 @@ export function App() {
                     🎛️ HALLENLEITER-REGIE — PALLADIUM HANAU
                   </h2>
                   <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-rose-950/90 border border-rose-500/40 text-rose-300 uppercase">
-                    PIN-GESCHÜTZT • 3-SPALTEN-REGIE
+                    PIN-GESCHÜTZT • 4-TAB KACHEL-SYSTEM
                   </span>
                   <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-slate-900 border border-cyan-500/40 text-cyan-300">
                     {APP_VERSION_LABEL}
@@ -6414,16 +7781,313 @@ export function App() {
                 </div>
               </div>
 
-              {/* 3-COLUMN WIDESCREEN GRID */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-stretch">
+              {/* 4 GROSSE HAUPT-REITER (TABS) IM KLAREN KACHEL-/BUTTON-STIL */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                {(
+                  [
+                    {
+                      id: 'track' as const,
+                      label: '🛼 Tab 1: Bahn, Shows & Fahrtrichtung',
+                      sub: 'Modi, Springer-Staffel, Richtung & Live-Monitor',
+                    },
+                    {
+                      id: 'light_dj' as const,
+                      label: '🎛️ Tab 2: Licht, DJ & Kino',
+                      sub: 'Mittel-Arena, Licht/Nebel, Jingles, Radio & Kino',
+                    },
+                    {
+                      id: 'access' as const,
+                      label: `🔑 Tab 3: Zugang, Alpha/Beta & Besucher${
+                        testerFeedbackList.length > 0
+                          ? ` (${testerFeedbackList.length} 💬)`
+                          : ''
+                      }`,
+                      sub: 'Keys, Feedback, Wartung, Crew, Statistik & MP',
+                    },
+                    {
+                      id: 'look_build' as const,
+                      label: '🎨 Tab 4: Hallen-Look & Baumenü',
+                      sub: 'Bahn-Styles, 16-Bit/CRT & Kachel-Baumenü',
+                    },
+                  ] as const
+                ).map((tab) => {
+                  const active = adminTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setAdminTab(tab.id)}
+                      className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                        active
+                          ? 'bg-gradient-to-r from-amber-400 to-cyan-400 text-slate-950 border-white shadow-[0_0_18px_rgba(34,211,238,0.45)]'
+                          : 'bg-slate-900/95 hover:bg-slate-800 border-slate-700 text-white'
+                      }`}
+                    >
+                      <div className="font-mono font-bold text-xs sm:text-sm">
+                        {tab.label}
+                      </div>
+                      <div
+                        className={`text-[10px] font-mono mt-0.5 ${
+                          active ? 'text-slate-900 font-bold' : 'text-slate-400'
+                        }`}
+                      >
+                        {tab.sub}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* TAB 1: 🛼 BAHN, SHOWS & FAHRTRICHTUNG */}
+              {adminTab === 'track' && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
+                  <div className="p-3.5 rounded-xl bg-slate-900/95 border border-cyan-500/40 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
+                        🎪 Hallen-Modi &amp; Shows (Direkt-Kacheln)
+                      </h3>
+                      {hallGameMode === 'ballspiel' && (
+                        <span className="px-2 py-0.5 rounded bg-amber-950 border border-amber-400 font-mono text-[10px] text-amber-200 font-bold">
+                          🏐 IM SPIEL: {telemetry.ballspielRemaining} /{' '}
+                          {telemetry.ballspielTotal}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                      {(
+                        [
+                          { id: 'free-skate', label: '🛼 Frei' },
+                          { id: 'ballspiel', label: '🟠 Ballspiel' },
+                          { id: 'slalom', label: '🚧 Slalom' },
+                          { id: 'stuhlsprung', label: '🪑 Hochsprung' },
+                          { id: 'springerstaffel', label: '🤸‍♂️ Springer-Staffel' },
+                        ] as { id: HallGameMode; label: string }[]
+                      ).map((g) => {
+                        const active = hallGameMode === g.id;
+                        return (
+                          <button
+                            key={g.id}
+                            type="button"
+                            onClick={() => setHallGameMode(g.id)}
+                            className={`min-h-[40px] py-2 px-2 rounded-xl font-mono text-[11px] font-bold border cursor-pointer transition ${
+                              active
+                                ? 'bg-fuchsia-500 text-white border-white shadow-[0_0_14px_rgba(232,121,249,0.5)]'
+                                : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-fuchsia-400/60'
+                            }`}
+                          >
+                            {g.label}: {active ? 'AN' : 'AUS'}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Direkter Springer-Staffel-Show Start/Stopp Button + Timer */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-amber-400/50 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="font-mono text-xs font-bold text-amber-300">
+                          🤸‍♂️ Springer-Staffel-Show (Geordnete Anlaufspur &amp; Sprung-Reihe)
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-400">
+                          Skater reihen sich hintereinander auf der Anlaufspur ein und springen nacheinander über HOCHSPRUNG 1–4.
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {springerStaffelShowSec > 0 && (
+                          <span className="px-2.5 py-1 rounded-lg bg-amber-950 border border-amber-400 font-mono text-xs text-amber-200 font-bold">
+                            ⏱️ {Math.floor(springerStaffelShowSec / 60)}:
+                            {String(springerStaffelShowSec % 60).padStart(2, '0')}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (
+                              hallGameMode === 'springerstaffel' &&
+                              springerStaffelShowSec > 0
+                            ) {
+                              setSpringerStaffelShowSec(0);
+                              setHallGameMode('free-skate');
+                            } else {
+                              setHallGameMode('springerstaffel');
+                              setSpringerStaffelShowSec(120);
+                            }
+                          }}
+                          className={`min-h-[38px] px-3.5 py-1.5 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            hallGameMode === 'springerstaffel'
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.5)]'
+                              : 'bg-slate-800 hover:bg-slate-700 text-amber-200 border-amber-400/60'
+                          }`}
+                        >
+                          {hallGameMode === 'springerstaffel'
+                            ? '⏹️ Springer-Staffel-Show stoppen (AN)'
+                            : '▶️ Springer-Staffel-Show starten'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Umschalter Fahrtrichtung */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-400/50 space-y-2">
+                      <div className="font-mono text-xs font-bold text-cyan-300 uppercase">
+                        🔄 Fahrtrichtung (Normal ↔ Richtungswechsel / Slow-Skate):
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              skateDirection: 'ccw',
+                            }))
+                          }
+                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            (adminSettings.skateDirection || 'ccw') === 'ccw'
+                              ? 'bg-emerald-400 text-slate-950 border-white shadow-[0_0_14px_rgba(16,185,129,0.45)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          ↺ Gegen den Uhrzeigersinn (Normal):{' '}
+                          {(adminSettings.skateDirection || 'ccw') === 'ccw'
+                            ? 'AN'
+                            : 'AUS'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              skateDirection: 'cw',
+                            }))
+                          }
+                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            adminSettings.skateDirection === 'cw'
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.45)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          ↻ Im Uhrzeigersinn (Richtungswechsel / Slow-Skate):{' '}
+                          {adminSettings.skateDirection === 'cw' ? 'AN' : 'AUS'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Hallendichte / Tempo */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-700 space-y-2">
+                      <div className="font-mono text-xs font-bold text-cyan-300 uppercase">
+                        🏁 Hallendichte / Tempo:
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {(
+                          [
+                            {
+                              id: 'beginner' as SingleplayerDifficulty,
+                              label: '🟢 Anfänger',
+                            },
+                            {
+                              id: 'intermediate' as SingleplayerDifficulty,
+                              label: '🟡 Mittel',
+                            },
+                            {
+                              id: 'pro' as SingleplayerDifficulty,
+                              label: '🔴 Profi',
+                            },
+                          ] as const
+                        ).map((lvl) => {
+                          const active = difficulty === lvl.id;
+                          return (
+                            <button
+                              key={lvl.id}
+                              type="button"
+                              onClick={() => setDifficulty(lvl.id)}
+                              className={`min-h-[36px] py-1.5 px-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                                active
+                                  ? 'bg-cyan-400 text-slate-950 border-white'
+                                  : 'bg-slate-900 text-slate-300 border-slate-700'
+                              }`}
+                            >
+                              {lvl.label}: {active ? 'AN' : 'AUS'}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Live-Hallen-Monitor rechts in Tab 1 */}
+                  <div className="p-3.5 rounded-xl bg-slate-900/95 border border-rose-500/50 space-y-2 flex flex-col justify-between">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-rose-400 font-bold flex items-center gap-1.5">
+                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping" />
+                        📹 LIVE HALLEN-MONITOR (RÜCKFAHRKAMERA)
+                      </span>
+                      <span className="text-amber-300 font-bold">
+                        STYLE: {selectedStyleTile.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="relative w-full aspect-video rounded-xl overflow-hidden border-2 border-slate-700 bg-black">
+                      <canvas
+                        id="admin-live-monitor-canvas"
+                        width={384}
+                        height={216}
+                        className="w-full h-full object-cover"
+                      />
+                      <div className="pointer-events-none absolute bottom-1.5 left-2 right-2 flex items-center justify-between text-[10px] font-mono text-emerald-300 bg-black/70 px-2 py-1 rounded">
+                        <span>
+                          RICHTUNG:{' '}
+                          {(adminSettings.skateDirection || 'ccw') === 'cw'
+                            ? '↻ IM UHRZEIGERSINN'
+                            : '↺ GEGEN UHRZEIGERSINN'}
+                        </span>
+                        <span>
+                          TEMPO: {telemetry.speed.toFixed(1)} km/h • RUNDEN:{' '}
+                          {telemetry.laps}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 2: 🎛️ LICHT, DJ & KINO */}
+              <div
+                className={
+                  adminTab === 'light_dj'
+                    ? 'grid grid-cols-1 lg:grid-cols-3 gap-3 items-stretch'
+                    : 'hidden'
+                }
+              >
                 {/* ============================================================= */}
                 {/* SPALTE 1: 1. MITTEL-ARENA & LIVE-BAND + 80s WEBRADIO/PLAYLIST */}
                 {/* ============================================================= */}
                 <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
                   <div className="space-y-2">
-                    <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
-                      1. MITTEL-ARENA &amp; LIVE-BAND-BOOKING
-                    </h3>
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
+                        1. MITTEL-ARENA &amp; LIVE-BAND-BOOKING
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextLive = !adminSettings.liveEventActive;
+                          setAdminSettings((s) => ({
+                            ...s,
+                            liveEventActive: nextLive,
+                          }));
+                          if (nextLive && centerStageMode === 'islands') {
+                            setCenterStageMode('cinema');
+                          }
+                        }}
+                        className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                          adminSettings.liveEventActive
+                            ? 'bg-rose-600 text-white border-white shadow-[0_0_12px_rgba(244,63,94,0.75)] animate-pulse'
+                            : 'bg-slate-800 text-slate-300 border-slate-600 hover:border-rose-400'
+                        }`}
+                        title="Schaltet das Live-Event ein (fährt vor 21:00 Uhr automatisch die Kino-Leinwand herunter und vergibt Event-Urkunden)"
+                      >
+                        🔴 Live-Event aktiv:{' '}
+                        {adminSettings.liveEventActive ? 'AN' : 'AUS'}
+                      </button>
+                    </div>
                     <div className="grid grid-cols-3 gap-1.5">
                       {(
                         [
@@ -7365,36 +9029,20 @@ export function App() {
                       </div>
                     </div>
 
-                    {/* 📹 ECHTZEIT-LIVE-KAMERA / HALLEN-RÜCKFAHRKAMERA IM REGIE-PULT (INKL. SOFORTIGER STYLE-VORSCHAU!) */}
-                    <div className="p-2 rounded-lg bg-slate-950 border border-rose-500/50 space-y-1">
-                      <div className="flex items-center justify-between text-[10px] font-mono">
-                        <span className="text-rose-400 font-bold flex items-center gap-1">
-                          <span className="inline-block w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-                          📹 LIVE HALLEN-MONITOR (RÜCKFAHRKAMERA)
+                      {/* 📹 HINWEIS AUF LIVE-MONITOR IN TAB 1 */}
+                      <div className="p-2 rounded-lg bg-slate-950 border border-rose-500/40 flex items-center justify-between text-[10px] font-mono">
+                        <span className="text-rose-300 font-bold">
+                          📹 Live-Hallen-Monitor &amp; Springer-Staffel-Show in Tab 1
                         </span>
-                        <span className="text-amber-300 font-bold">
-                          STYLE-VORSCHAU: {selectedStyleTile.toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="relative w-full aspect-video rounded overflow-hidden border border-slate-700 bg-black">
-                        <canvas
-                          id="admin-live-monitor-canvas"
-                          width={384}
-                          height={216}
-                          className="w-full h-full object-cover"
-                        />
-                        <div className="pointer-events-none absolute bottom-1 left-1.5 right-1.5 flex items-center justify-between text-[9px] font-mono text-emerald-300 bg-black/65 px-1.5 py-0.5 rounded">
-                          <span>
-                            CAM 01 • LOOK: {selectedStyleTile.toUpperCase()}
-                          </span>
-                          <span>
-                            TEMPO: {telemetry.speed.toFixed(1)} km/h • RUNDEN:{' '}
-                            {telemetry.laps}
-                          </span>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAdminTab('track')}
+                          className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-bold cursor-pointer"
+                        >
+                          Zu Tab 1 🛼
+                        </button>
                       </div>
                     </div>
-                  </div>
 
                   {/* 4. WARTUNGSMODUS („Vor der Glastür mit zugezogenen Vorhängen“) */}
                   <div className="pt-2 border-t border-slate-800 space-y-1.5">
@@ -7438,11 +9086,163 @@ export function App() {
                 {/* SPALTE 3: 5. TWITCH-STREAM & DJ-PRESETS + 6. GEISTER-SKATER   */}
                 {/* ============================================================= */}
                 <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
-                  {/* 5. TWITCH-STREAM & DJ-PRESETS */}
+                  {/* 5. TWITCH-STREAM, 80ER-NEON-LEUCHTKÄSTEN & DJ-PRESETS */}
                   <div className="space-y-1.5">
                     <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
-                      5. TWITCH-STREAM &amp; DJ-PRESETS
+                      5. 80ER-NEON-LEUCHTKÄSTEN, TWITCH &amp; DJ-PRESETS
                     </h3>
+
+                    {/* ZWEI RUHIGE 80ER-NEON-LEUCHTKÄSTEN ZWISCHEN DEN LAUTSPRECHER-BOXEN */}
+                    <div className="p-2 rounded-lg bg-slate-950/95 border border-cyan-400/55 space-y-1.5">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-[10px] uppercase text-cyan-300 font-bold">
+                          🪧 80er-Neon-Leuchtkästen (Stirnwand zwischen Boxen):
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold ${
+                            adminSettings.neonLightboxesEnabled !== false
+                              ? 'bg-emerald-500/20 border border-emerald-400 text-emerald-200'
+                              : 'bg-slate-800 text-slate-400'
+                          }`}
+                        >
+                          {adminSettings.neonLightboxesEnabled !== false
+                            ? 'LEUCHTET'
+                            : 'AUS'}
+                        </span>
+                      </div>
+
+                      {/* Fertige Leuchtkasten-Texte (Direkt-Buttons) */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                        {(
+                          [
+                            {
+                              label: 'Resident DJ: DJ Magic Force (Ab 21:00 Uhr)',
+                              l1: 'RESIDENT DJ',
+                              l2: 'DJ MAGIC FORCE',
+                              l3: 'AB 21:00 UHR',
+                              family: false,
+                            },
+                            {
+                              label: 'Heute Live: DJ Magic Force',
+                              l1: 'HEUTE LIVE ON STAGE',
+                              l2: 'DJ MAGIC FORCE',
+                              l3: 'MAXI-MIX & DISCO',
+                              family: false,
+                            },
+                            {
+                              label: 'Sonntag: Großer Family-Day',
+                              l1: 'SONNTAG IM PALLADIUM',
+                              l2: 'GROSSER FAMILY-DAY',
+                              l3: 'AB 14:00 UHR',
+                              family: true,
+                            },
+                            {
+                              label: 'Schmuse- & Slow-Skate-Abend',
+                              l1: 'ROMANTIK AUF 8 ROLLEN',
+                              l2: 'SLOW-SKATE-ABEND',
+                              l3: 'SCHMUSERUNDE AKTIV',
+                              family: false,
+                            },
+                          ] as const
+                        ).map((preset) => {
+                          const isCurrent =
+                            adminSettings.neonLightboxesEnabled !== false &&
+                            adminSettings.neonLightboxLine1 === preset.l1 &&
+                            adminSettings.neonLightboxLine2 === preset.l2 &&
+                            adminSettings.neonLightboxLine3 === preset.l3;
+                          return (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() =>
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  neonLightboxesEnabled: true,
+                                  neonLightboxLine1: preset.l1,
+                                  neonLightboxLine2: preset.l2,
+                                  neonLightboxLine3: preset.l3,
+                                  familyDayActive: preset.family,
+                                }))
+                              }
+                              className={`py-1 px-1.5 rounded border font-mono text-[9.5px] font-bold text-left truncate cursor-pointer transition ${
+                                isCurrent
+                                  ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_8px_rgba(34,211,238,0.45)]'
+                                  : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-cyan-100'
+                              }`}
+                            >
+                              ✨ {preset.label}
+                            </button>
+                          );
+                        })}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              neonLightboxesEnabled: false,
+                              familyDayActive: false,
+                            }))
+                          }
+                          className={`sm:col-span-2 py-1 px-2 rounded border font-mono text-[9.5px] font-bold cursor-pointer transition ${
+                            adminSettings.neonLightboxesEnabled === false
+                              ? 'bg-rose-600 text-white border-white'
+                              : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-rose-300'
+                          }`}
+                        >
+                          🔌 Leuchtkästen AUS
+                        </button>
+                      </div>
+
+                      {/* 3 kleine Eingabefelder für eigenen Wunschtext (Zeile 1, Zeile 2, Zeile 3) */}
+                      <div className="grid grid-cols-3 gap-1 pt-1 border-t border-slate-800">
+                        <input
+                          type="text"
+                          value={adminSettings.neonLightboxLine1 ?? 'RESIDENT DJ'}
+                          onChange={(e) =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              neonLightboxesEnabled: true,
+                              neonLightboxLine1: e.target.value,
+                            }))
+                          }
+                          placeholder="Zeile 1 (groß)"
+                          maxLength={24}
+                          className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[9.5px] text-cyan-200"
+                        />
+                        <input
+                          type="text"
+                          value={
+                            adminSettings.neonLightboxLine2 ?? 'DJ MAGIC FORCE'
+                          }
+                          onChange={(e) =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              neonLightboxesEnabled: true,
+                              neonLightboxLine2: e.target.value,
+                            }))
+                          }
+                          placeholder="Zeile 2 (Hauptzeile)"
+                          maxLength={22}
+                          className="px-1.5 py-0.5 rounded bg-slate-900 border border-fuchsia-500/60 font-mono text-[9.5px] font-bold text-fuchsia-200"
+                        />
+                        <input
+                          type="text"
+                          value={
+                            adminSettings.neonLightboxLine3 ?? 'AB 21:00 UHR'
+                          }
+                          onChange={(e) =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              neonLightboxesEnabled: true,
+                              neonLightboxLine3: e.target.value,
+                            }))
+                          }
+                          placeholder="Zeile 3 (groß)"
+                          maxLength={24}
+                          className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[9.5px] text-amber-200"
+                        />
+                      </div>
+                    </div>
 
                     <div className="p-2 rounded-lg bg-slate-950/90 border border-fuchsia-500/35 space-y-1.5">
                       <span className="block font-mono text-[10px] uppercase text-fuchsia-300 font-bold">
@@ -7977,10 +9777,22 @@ export function App() {
               </div>
 
               {/* =============================================================== */}
-              {/* VOLLE BREITE DARUNTER: 🎨 BAHN-STYLES & EPOCHEN-LOOKS           */}
+              {/* TAB 3 & TAB 4 CONTAINER: BAHN-STYLES, ALPHA/BETA & BAUMENÜ      */}
               {/* =============================================================== */}
-              <div className="p-3 rounded-xl bg-slate-900/95 border-2 border-fuchsia-500/50 space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+              <div
+                className={
+                  adminTab === 'access' || adminTab === 'look_build'
+                    ? 'p-3 rounded-xl bg-slate-900/95 border-2 border-fuchsia-500/50 space-y-2'
+                    : 'hidden'
+                }
+              >
+                <div
+                  className={
+                    adminTab === 'look_build'
+                      ? 'flex flex-wrap items-center justify-between gap-2'
+                      : 'hidden'
+                  }
+                >
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
                       🎨 BAHN-STYLES &amp; EPOCHEN-LOOKS (VORSCHAU &amp; FREISCHALTUNG)
@@ -8193,9 +10005,15 @@ export function App() {
                 </div>
 
                 {/* ============================================================= */}
-                {/* 7. EXKLUSIVE HALLEN-STATISTIK NUR IM ADMINBEREICH             */}
+                {/* 7. EXKLUSIVE HALLEN-STATISTIK NUR IM ADMINBEREICH (TAB 3)     */}
                 {/* ============================================================= */}
-                <div className="pt-2 border-t border-slate-800/90 space-y-2">
+                <div
+                  className={
+                    adminTab === 'access'
+                      ? 'pt-2 border-t border-slate-800/90 space-y-2'
+                      : 'hidden'
+                  }
+                >
                   <div className="flex items-center justify-between">
                     <span className="font-mono font-bold text-xs uppercase text-cyan-300">
                       📊 Hallen-Statistik (Exklusiv im Admin-Bereich • localStorage)
@@ -8322,8 +10140,18 @@ export function App() {
                         {alphaBetaConfig.enabled ? 'AN' : 'AUS'}
                       </button>
 
-                      {/* Kompakte Zähler-Leiste */}
+                      {/* Kompakte Zähler-Leiste inkl. "Eingelöst: X / Y Keys" */}
                       <div className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-[11px] text-slate-200 flex flex-wrap items-center gap-2">
+                        <span className="text-amber-300 font-black">
+                          Eingelöst:{' '}
+                          {
+                            alphaBetaConfig.keys.filter(
+                              (k) => k.status === 'redeemed'
+                            ).length
+                          }{' '}
+                          / {alphaBetaConfig.keys.length} Keys
+                        </span>
+                        <span className="text-slate-600">|</span>
                         <span>
                           Keys erstellt/rausgegeben:{' '}
                           <strong className="text-cyan-300">
@@ -8333,7 +10161,7 @@ export function App() {
                         <span className="text-slate-600">|</span>
                         <span>
                           Registriert/Genutzt:{' '}
-                          <strong className="text-rose-300">
+                          <strong className="text-emerald-300">
                             {
                               alphaBetaConfig.keys.filter(
                                 (k) => k.status === 'redeemed'
@@ -8344,7 +10172,7 @@ export function App() {
                         <span className="text-slate-600">|</span>
                         <span>
                           Noch frei:{' '}
-                          <strong className="text-emerald-300">
+                          <strong className="text-slate-300">
                             {
                               alphaBetaConfig.keys.filter(
                                 (k) => k.status === 'free'
@@ -8390,7 +10218,7 @@ export function App() {
                     </div>
                   </div>
 
-                  {/* Kompakte Key-Liste */}
+                  {/* Kompakte Key-Liste mit runder Status-LED (dunkelgrau vs. leuchtend grün + verknüpfter Name) */}
                   {alphaBetaConfig.keys.length > 0 && (
                     <div className="max-h-36 overflow-y-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-1.5 p-2 rounded-lg bg-slate-950/90 border border-slate-800 font-mono text-[10.5px]">
                       {alphaBetaConfig.keys.map((item) => {
@@ -8400,22 +10228,35 @@ export function App() {
                             key={item.key}
                             className={`flex items-center justify-between gap-1.5 px-2 py-1 rounded border ${
                               isRedeemed
-                                ? 'bg-rose-950/35 border-rose-500/50 text-rose-100'
-                                : 'bg-emerald-950/30 border-emerald-500/40 text-emerald-100'
+                                ? 'bg-emerald-950/35 border-emerald-500/60 text-emerald-100'
+                                : 'bg-slate-900/80 border-slate-700 text-slate-300'
                             }`}
                           >
-                            <div className="truncate">
-                              <span className="font-bold mr-1.5">
+                            <div className="flex items-center gap-1.5 truncate">
+                              {/* Runde Status-LED */}
+                              <span
+                                className={`inline-block w-2.5 h-2.5 rounded-full shrink-0 ${
+                                  isRedeemed
+                                    ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.95)]'
+                                    : 'bg-slate-600 border border-slate-500'
+                                }`}
+                                title={
+                                  isRedeemed
+                                    ? `Aktiviert von ${item.redeemedBy || 'Tester'}`
+                                    : 'Ungenutzt (dunkelgrau)'
+                                }
+                              />
+                              <span className="font-bold text-amber-200 mr-1">
                                 {item.key}
                               </span>
-                              <span>
+                              <span className="truncate">
                                 {isRedeemed
-                                  ? `🔴 Eingelöst (${item.redeemedBy || 'Gast'}${
+                                  ? `🟢 ${item.redeemedBy || 'Tester'}${
                                       item.redeemedAt
-                                        ? `, ${item.redeemedAt}`
+                                        ? ` (${item.redeemedAt})`
                                         : ''
-                                    })`
-                                  : '🟢 Frei'}
+                                    }`
+                                  : '⚪ Ungenutzt'}
                               </span>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
@@ -8445,40 +10286,139 @@ export function App() {
                               >
                                 📋 Link &amp; Key kopieren
                               </button>
+                                <button
+                                  type="button"
+                                  title="Einzel-Key sperren / freigeben"
+                                  onClick={() => {
+                                    const next: AlphaBetaAccessConfig = {
+                                      ...alphaBetaConfig,
+                                      keys: alphaBetaConfig.keys.map((k) =>
+                                        k.key === item.key
+                                          ? { ...k, blocked: !k.blocked }
+                                          : k
+                                      ),
+                                    };
+                                    setAlphaBetaConfig(next);
+                                    saveAlphaBetaConfig(next);
+                                  }}
+                                  className={`px-1.5 py-0.5 rounded border text-[9.5px] font-bold cursor-pointer ${
+                                    item.blocked
+                                      ? 'bg-emerald-500 text-slate-950 border-white'
+                                      : 'bg-amber-950 hover:bg-amber-800 border-amber-400/60 text-amber-200'
+                                  }`}
+                                >
+                                  {item.blocked ? '🔓 Freigeben' : '⛔ Sperren'}
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Key löschen"
+                                  onClick={() => {
+                                    const next: AlphaBetaAccessConfig = {
+                                      ...alphaBetaConfig,
+                                      keys: alphaBetaConfig.keys.filter(
+                                        (k) => k.key !== item.key
+                                      ),
+                                    };
+                                    setAlphaBetaConfig(next);
+                                    saveAlphaBetaConfig(next);
+                                  }}
+                                  className="px-1.5 py-0.5 rounded bg-rose-950 hover:bg-rose-700 border border-rose-500/50 text-rose-200 text-[9.5px] cursor-pointer"
+                                >
+                                  🗑️
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* 💬 EINGEGANGENES TESTER-FEEDBACK LESEN & LÖSCHEN */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/90 border border-cyan-500/40 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[11px] font-bold uppercase text-cyan-300">
+                          💬 Eingegangenes Tester-Feedback ({testerFeedbackList.length})
+                        </span>
+                        {testerFeedbackList.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTesterFeedbackList([]);
+                              saveTesterFeedback([]);
+                            }}
+                            className="px-2 py-0.5 rounded bg-rose-950 hover:bg-rose-800 border border-rose-500/50 text-rose-200 font-mono text-[10px] cursor-pointer"
+                          >
+                            🗑️ Alle löschen
+                          </button>
+                        )}
+                      </div>
+                      {testerFeedbackList.length === 0 ? (
+                        <div className="text-[10.5px] font-mono text-slate-400">
+                          Noch kein Feedback eingegangen (Besucher senden es im Spind unter „💬 Tester-Feedback“).
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5 max-h-36 overflow-y-auto">
+                          {testerFeedbackList.map((fb) => (
+                            <div
+                              key={fb.id}
+                              className="p-2 rounded bg-slate-900 border border-slate-700 flex items-start justify-between gap-2 font-mono text-[10.5px]"
+                            >
+                              <div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-400/50 text-[9.5px] font-bold text-cyan-300">
+                                    {fb.category}
+                                  </span>
+                                  <strong className="text-amber-200">
+                                    {fb.author}
+                                  </strong>
+                                  {fb.keyUsed && (
+                                    <span className="text-[9.5px] text-slate-400">
+                                      ({fb.keyUsed})
+                                    </span>
+                                  )}
+                                  <span className="text-[9.5px] text-slate-500">
+                                    {fb.createdAt}
+                                  </span>
+                                </div>
+                                <p className="text-slate-200 mt-1 font-sans">
+                                  {fb.text}
+                                </p>
+                              </div>
                               <button
                                 type="button"
-                                title="Key löschen"
                                 onClick={() => {
-                                  const next: AlphaBetaAccessConfig = {
-                                    ...alphaBetaConfig,
-                                    keys: alphaBetaConfig.keys.filter(
-                                      (k) => k.key !== item.key
-                                    ),
-                                  };
-                                  setAlphaBetaConfig(next);
-                                  saveAlphaBetaConfig(next);
+                                  const next = testerFeedbackList.filter(
+                                    (it) => it.id !== fb.id
+                                  );
+                                  setTesterFeedbackList(next);
+                                  saveTesterFeedback(next);
                                 }}
-                                className="px-1.5 py-0.5 rounded bg-rose-950 hover:bg-rose-700 border border-rose-500/50 text-rose-200 text-[9.5px] cursor-pointer"
+                                className="px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 hover:bg-rose-800 text-[10px] cursor-pointer"
                               >
                                 🗑️
                               </button>
-                            </div>
-                          </div>
-                        );
-                      })}
+                              </div>
+                            ))}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
+                  </div>
 
-                {/* ============================================================= */}
-                {/* 🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER ANKERPUNKTE & HITBOX-DEBUG)*/}
-                {/* ============================================================= */}
-                <div className="pt-2.5 border-t border-slate-800/90 space-y-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
-                        🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER &amp; ROTE DEBUG-HITBOXEN)
-                      </h3>
+                  {/* ============================================================= */}
+                  {/* 🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER ANKERPUNKTE & HITBOX-DEBUG)*/}
+                  {/* ============================================================= */}
+                  <div
+                    className={
+                      adminTab === 'look_build'
+                        ? 'pt-2.5 border-t border-slate-800/90 space-y-2'
+                        : 'hidden'
+                    }
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
+                          🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER &amp; ROTE DEBUG-HITBOXEN)
+                        </h3>
                       <span className="text-[10px] font-mono text-slate-400">
                         Maus-Drag-&amp;-Drop direkt auf dem Spielfeld • Pfeiltasten{' '}
                         <strong className="text-cyan-300">1 px</strong> /{' '}

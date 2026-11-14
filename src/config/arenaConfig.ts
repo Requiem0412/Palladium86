@@ -23,6 +23,10 @@ export const DEFAULT_LAYOUT = {
     baffleLeft: { x: 516, y: 855, w: 48, h: 10, rot: 0, label: 'SCHLEUSEN-BALKEN 1 (LINKS)' },
     baffleRight: { x: 1386, y: 855, w: 48, h: 10, rot: 0, label: 'SCHLEUSEN-BALKEN 2 (RECHTS)' },
     lockers: { x: 1515, y: 982, w: 220, h: 42, rot: 0, label: 'SPINDE' },
+    bistroTable1: { x: 85, y: 922, w: 40, h: 40, rot: 0, label: 'BISTRO-TISCH 1' },
+    bistroTable2: { x: 215, y: 922, w: 40, h: 40, rot: 0, label: 'BISTRO-TISCH 2' },
+    bistroTable3: { x: 335, y: 922, w: 40, h: 40, rot: 0, label: 'BISTRO-TISCH 3' },
+    bistroTable4: { x: 150, y: 995, w: 40, h: 40, rot: 0, label: 'BISTRO-TISCH 4' },
   },
   npcAnchors: {
     'speed-1': { name: 'Paceline-Leader Kai', homeX: 1604, homeY: 329, orbitAngle: 0.48, laneRadiusX: 668, laneRadiusY: 336 },
@@ -80,7 +84,7 @@ export const DEFAULT_CREW_NAMES: CrewNamesConfig = {
   lightJockey: 'LJ Laser-Lutz',
   skateGuard: 'SKATE-ORDNER MANNI',
   rollerTeacher: 'TRAINERIN CONNY',
-  nurse: 'SANI-SANDRA',
+  nurse: 'Schwester Gudrun',
   security: 'Security-Sammy',
 };
 
@@ -582,17 +586,20 @@ export const ARENA_LAYOUT = {
     interactX: 585,
     interactY: 948,
     interactRadius: 85,
-    // 80er-Sitzgruppe im Vorbereich mit Slush-Becher-Deko und >= 75 px freien Durchgängen
+    // 80er-Sitzgruppe im Vorbereich (runde Bistro-Tische frei verschiebbar, pinke Polsterbänke entfernt)
     marbleTables: [
       { id: 'marble-table-1', x: 105, y: 942, radius: 20 },
       { id: 'marble-table-2', x: 235, y: 942, radius: 20 },
       { id: 'marble-table-3', x: 355, y: 942, radius: 20 },
+      { id: 'marble-table-4', x: 170, y: 1015, radius: 20 },
     ],
-    wallBenches: [
-      { id: 'bistro-bench-1', x: 68, y: 1024, width: 74, height: 26 },
-      { id: 'bistro-bench-2', x: 198, y: 1024, width: 74, height: 26 },
-      { id: 'bistro-bench-3', x: 318, y: 1024, width: 74, height: 26 },
-    ],
+    wallBenches: [] as {
+      id: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }[],
   },
 
   // D) 5) 80ER-SPINDREIHE („SPINDE“ — grau-blaue Metall-Schließfächer mit Lüftungsschlitzen & Nummern)
@@ -614,7 +621,11 @@ export type EditableModuleId =
   | 'djTower'
   | 'baffleLeft'
   | 'baffleRight'
-  | 'lockers';
+  | 'lockers'
+  | 'bistroTable1'
+  | 'bistroTable2'
+  | 'bistroTable3'
+  | 'bistroTable4';
 
 export interface EditableModuleRect {
   x: number;
@@ -717,6 +728,38 @@ export const DEFAULT_CUSTOM_ARENA_LAYOUT: CustomArenaLayoutState = {
       rot: DEFAULT_LAYOUT.modules.lockers.rot,
       label: DEFAULT_LAYOUT.modules.lockers.label,
     },
+    bistroTable1: {
+      x: DEFAULT_LAYOUT.modules.bistroTable1.x,
+      y: DEFAULT_LAYOUT.modules.bistroTable1.y,
+      width: DEFAULT_LAYOUT.modules.bistroTable1.w,
+      height: DEFAULT_LAYOUT.modules.bistroTable1.h,
+      rot: DEFAULT_LAYOUT.modules.bistroTable1.rot,
+      label: DEFAULT_LAYOUT.modules.bistroTable1.label,
+    },
+    bistroTable2: {
+      x: DEFAULT_LAYOUT.modules.bistroTable2.x,
+      y: DEFAULT_LAYOUT.modules.bistroTable2.y,
+      width: DEFAULT_LAYOUT.modules.bistroTable2.w,
+      height: DEFAULT_LAYOUT.modules.bistroTable2.h,
+      rot: DEFAULT_LAYOUT.modules.bistroTable2.rot,
+      label: DEFAULT_LAYOUT.modules.bistroTable2.label,
+    },
+    bistroTable3: {
+      x: DEFAULT_LAYOUT.modules.bistroTable3.x,
+      y: DEFAULT_LAYOUT.modules.bistroTable3.y,
+      width: DEFAULT_LAYOUT.modules.bistroTable3.w,
+      height: DEFAULT_LAYOUT.modules.bistroTable3.h,
+      rot: DEFAULT_LAYOUT.modules.bistroTable3.rot,
+      label: DEFAULT_LAYOUT.modules.bistroTable3.label,
+    },
+    bistroTable4: {
+      x: DEFAULT_LAYOUT.modules.bistroTable4.x,
+      y: DEFAULT_LAYOUT.modules.bistroTable4.y,
+      width: DEFAULT_LAYOUT.modules.bistroTable4.w,
+      height: DEFAULT_LAYOUT.modules.bistroTable4.h,
+      rot: DEFAULT_LAYOUT.modules.bistroTable4.rot,
+      label: DEFAULT_LAYOUT.modules.bistroTable4.label,
+    },
   },
   npcAnchors: { ...DEFAULT_LAYOUT.npcAnchors },
 };
@@ -785,6 +828,10 @@ export function formatLayoutConfigCodeBlock(
     'baffleLeft',
     'baffleRight',
     'lockers',
+    'bistroTable1',
+    'bistroTable2',
+    'bistroTable3',
+    'bistroTable4',
   ];
 
   const modLines = modOrder.map((id) => {
@@ -910,11 +957,12 @@ export function applyCustomArenaLayout(
     width: bi.width,
     height: bi.height,
   };
+  // WC-Schild fest an der äußeren Hallen-/Rückwand verankert (unabhängig vom Bistro-Modul)
   ARENA_LAYOUT.bistro.wcSign = {
-    x: Math.round(bi.x + 14 * biScaleX),
-    y: Math.round(bi.y + 7 * biScaleY),
-    width: Math.max(48, Math.round(88 * biScaleX)),
-    height: Math.max(20, Math.round(30 * biScaleY)),
+    x: 38,
+    y: 802,
+    width: 88,
+    height: 30,
   };
   ARENA_LAYOUT.bistro.counter = {
     x: Math.round(bi.x + 406 * biScaleX),
@@ -937,16 +985,45 @@ export function applyCustomArenaLayout(
   ARENA_LAYOUT.bistro.interactX = Math.round(bi.x + 561 * biScaleX);
   ARENA_LAYOUT.bistro.interactY = Math.round(bi.y + 153 * biScaleY);
   ARENA_LAYOUT.bistro.interactRadius = 85;
+  const bt1 = getModuleCollisionRect(
+    mods.bistroTable1 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.bistroTable1
+  );
+  const bt2 = getModuleCollisionRect(
+    mods.bistroTable2 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.bistroTable2
+  );
+  const bt3 = getModuleCollisionRect(
+    mods.bistroTable3 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.bistroTable3
+  );
+  const bt4 = getModuleCollisionRect(
+    mods.bistroTable4 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.bistroTable4
+  );
   ARENA_LAYOUT.bistro.marbleTables = [
-    { id: 'marble-table-1', x: Math.round(bi.x + 81 * biScaleX), y: Math.round(bi.y + 147 * biScaleY), radius: Math.max(12, Math.round(20 * Math.min(biScaleX, biScaleY))) },
-    { id: 'marble-table-2', x: Math.round(bi.x + 211 * biScaleX), y: Math.round(bi.y + 147 * biScaleY), radius: Math.max(12, Math.round(20 * Math.min(biScaleX, biScaleY))) },
-    { id: 'marble-table-3', x: Math.round(bi.x + 331 * biScaleX), y: Math.round(bi.y + 147 * biScaleY), radius: Math.max(12, Math.round(20 * Math.min(biScaleX, biScaleY))) },
+    {
+      id: 'marble-table-1',
+      x: Math.round(bt1.cx),
+      y: Math.round(bt1.cy),
+      radius: Math.max(12, Math.round(Math.min(bt1.width, bt1.height) / 2)),
+    },
+    {
+      id: 'marble-table-2',
+      x: Math.round(bt2.cx),
+      y: Math.round(bt2.cy),
+      radius: Math.max(12, Math.round(Math.min(bt2.width, bt2.height) / 2)),
+    },
+    {
+      id: 'marble-table-3',
+      x: Math.round(bt3.cx),
+      y: Math.round(bt3.cy),
+      radius: Math.max(12, Math.round(Math.min(bt3.width, bt3.height) / 2)),
+    },
+    {
+      id: 'marble-table-4',
+      x: Math.round(bt4.cx),
+      y: Math.round(bt4.cy),
+      radius: Math.max(12, Math.round(Math.min(bt4.width, bt4.height) / 2)),
+    },
   ];
-  ARENA_LAYOUT.bistro.wallBenches = [
-    { id: 'bistro-bench-1', x: Math.round(bi.x + 44 * biScaleX), y: Math.round(bi.y + 229 * biScaleY), width: Math.max(36, Math.round(74 * biScaleX)), height: Math.max(16, Math.round(26 * biScaleY)) },
-    { id: 'bistro-bench-2', x: Math.round(bi.x + 174 * biScaleX), y: Math.round(bi.y + 229 * biScaleY), width: Math.max(36, Math.round(74 * biScaleX)), height: Math.max(16, Math.round(26 * biScaleY)) },
-    { id: 'bistro-bench-3', x: Math.round(bi.x + 294 * biScaleX), y: Math.round(bi.y + 229 * biScaleY), width: Math.max(36, Math.round(74 * biScaleX)), height: Math.max(16, Math.round(26 * biScaleY)) },
-  ];
+  ARENA_LAYOUT.bistro.wallBenches = [];
 
   // 4. KASSE & EINGANG
   const caRaw = mods.cashier || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.cashier;

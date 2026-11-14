@@ -181,6 +181,29 @@ interface RollerArenaEngineProps {
   onIntroStepComplete?: (
     stepId: 'open_locker' | 'fetch_drink' | 'skate_rink' | 'try_ballspiel'
   ) => void;
+  skateDirection?: 'ccw' | 'cw';
+  springerStaffelShowActive?: boolean;
+  teleportTrigger?: {
+    x: number;
+    y: number;
+    headingRad?: number;
+    label?: string;
+    seq: number;
+  } | null;
+  onClickDjConsole?: () => void;
+  neonLightboxesEnabled?: boolean;
+  neonLightboxLine1?: string;
+  neonLightboxLine2?: string;
+  neonLightboxLine3?: string;
+  onCertificateEvent?: (
+    eventType:
+      | 'skate_rink'
+      | 'clean_slalom'
+      | 'clean_jump'
+      | 'high_speed_jump'
+  ) => void;
+  onAwardObstaclePoints?: (points: number) => void;
+  onRequestAdminPinModal?: () => void;
 }
 
 export interface TrackNpc {
@@ -302,7 +325,8 @@ function computeTrackOvalPoint(
   rx: number,
   ry: number,
   angle: number,
-  isOuterSpeedTrack: boolean
+  isOuterSpeedTrack: boolean,
+  isClockwise = false
 ): { x: number; y: number; tangentRad: number } {
   const cosA = Math.cos(angle);
   const sinA = Math.sin(angle);
@@ -321,8 +345,8 @@ function computeTrackOvalPoint(
     const rawX = centerX + cosA * rx;
     const rawY = centerY + sinA * ry;
     const cur = deflectCorner(rawX, rawY);
-    const tx = sinA * rx;
-    const ty = -cosA * ry;
+    const tx = isClockwise ? -sinA * rx : sinA * rx;
+    const ty = isClockwise ? cosA * ry : -cosA * ry;
     return { x: cur.x, y: cur.y, tangentRad: Math.atan2(ty, tx) };
   }
 
@@ -333,7 +357,7 @@ function computeTrackOvalPoint(
     centerY + Math.sign(sinA) * Math.pow(Math.abs(sinA), pExp) * ry;
   const cur = deflectCorner(rawX, rawY);
 
-  const dAngle = -0.02;
+  const dAngle = isClockwise ? 0.02 : -0.02;
   const cosNext = Math.cos(angle + dAngle);
   const sinNext = Math.sin(angle + dAngle);
   const rawNx =
@@ -1089,6 +1113,17 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   lockerDrinkBoostTrigger = 0,
   onOpenLockerModal,
   onIntroStepComplete,
+  skateDirection = 'ccw',
+  springerStaffelShowActive = false,
+  teleportTrigger = null,
+  onClickDjConsole,
+  neonLightboxesEnabled = true,
+  neonLightboxLine1 = 'RESIDENT DJ',
+  neonLightboxLine2 = 'DJ MAGIC FORCE',
+  neonLightboxLine3 = 'AB 20:00 UHR',
+  onCertificateEvent,
+  onAwardObstaclePoints,
+  onRequestAdminPinModal,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fogEnabledRef = useRef<boolean>(fogMachineEnabled);
@@ -1101,6 +1136,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   const lastDjBubbleSeqRef = useRef<number>(0);
   const pendingLockerDrinkBoostRef = useRef<boolean>(false);
   const lastLockerDrinkBoostSeqRef = useRef<number>(lockerDrinkBoostTrigger);
+  const pendingTeleportRef = useRef<{
+    x: number;
+    y: number;
+    headingRad?: number;
+    label?: string;
+  } | null>(null);
+  const lastTeleportSeqRef = useRef<number>(teleportTrigger?.seq || 0);
 
   const triggerFogBurst = () => {
     fogBurstTimerRef.current = 9.5;
@@ -1213,6 +1255,17 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     lockerDrinkBoostTrigger,
     onOpenLockerModal,
     onIntroStepComplete,
+    skateDirection,
+    springerStaffelShowActive,
+    teleportTrigger,
+    onClickDjConsole,
+    neonLightboxesEnabled,
+    neonLightboxLine1,
+    neonLightboxLine2,
+    neonLightboxLine3,
+    onCertificateEvent,
+    onAwardObstaclePoints,
+    onRequestAdminPinModal,
   });
 
   useEffect(() => {
@@ -1288,6 +1341,17 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       lockerDrinkBoostTrigger,
       onOpenLockerModal,
       onIntroStepComplete,
+      skateDirection,
+      springerStaffelShowActive,
+      teleportTrigger,
+      onClickDjConsole,
+      neonLightboxesEnabled,
+      neonLightboxLine1,
+      neonLightboxLine2,
+      neonLightboxLine3,
+      onCertificateEvent,
+      onAwardObstaclePoints,
+      onRequestAdminPinModal,
     };
   }, [
     playerName,
@@ -1358,6 +1422,17 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     lockerDrinkBoostTrigger,
     onOpenLockerModal,
     onIntroStepComplete,
+    skateDirection,
+    springerStaffelShowActive,
+    teleportTrigger,
+    onClickDjConsole,
+    neonLightboxesEnabled,
+    neonLightboxLine1,
+    neonLightboxLine2,
+    neonLightboxLine3,
+    onCertificateEvent,
+    onAwardObstaclePoints,
+    onRequestAdminPinModal,
   ]);
 
   useEffect(() => {
@@ -1366,6 +1441,16 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       pendingLockerDrinkBoostRef.current = true;
     }
   }, [lockerDrinkBoostTrigger]);
+
+  useEffect(() => {
+    if (
+      teleportTrigger &&
+      teleportTrigger.seq !== lastTeleportSeqRef.current
+    ) {
+      lastTeleportSeqRef.current = teleportTrigger.seq;
+      pendingTeleportRef.current = teleportTrigger;
+    }
+  }, [teleportTrigger]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1421,6 +1506,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       stridePhase: 0,
       crashTimer: 0,
       consecutiveCrashes: 0,
+      bumpCountSinceGudrun: 0,
+      bumpCooldownTimer: 0,
       medicRescueTimer: 0,
       afkSecondsOnTrack: 0,
       guardEscortActive: false,
@@ -1477,10 +1564,14 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     let lastFogBurstCount = propsRef.current.fogBurstCount;
     let fogBurstTimer = 0;
 
-    // Nurse / Paramedic ("SANI-SANDRA") Rescue Sequence State
+    // Nurse / Paramedic ("Schwester Gudrun") + Stretcher Team Rescue Sequence State
     // Enters and exits exclusively through one of the two offset Schleusen-Banden!
+    let topWallLogoClickCount = 0;
+    let lastTopWallLogoClickTime = 0;
+
     const saniNurse = {
       active: false,
+      withStretcherTeam: false,
       phase: 'idle' as 'idle' | 'running-in' | 'kneeling' | 'walking-out',
       x: 1410,
       y: 912,
@@ -1496,14 +1587,21 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       speechText: null as string | null,
     };
 
-    const triggerSaniNurseDispatch = (crashX: number, crashY: number) => {
+    const triggerSaniNurseDispatch = (
+      crashX: number,
+      crashY: number,
+      withStretcherTeam = false
+    ) => {
       if (saniNurse.active) return;
+      const nurseLabel =
+        propsRef.current.crewNames?.nurse || 'Schwester Gudrun';
       // Pick the nearest of the two offset Schleusen-Banden (Schleuse 1 left x=540, Schleuse 2 right x=1410)
       const useLeftSchleuse = Math.abs(crashX - 540) < Math.abs(crashX - 1410);
       const gateCenterX = useLeftSchleuse ? 540 : 1410;
       const spawnX = useLeftSchleuse ? 495 : 1362;
       const spawnY = 918;
       saniNurse.active = true;
+      saniNurse.withStretcherTeam = withStretcherTeam;
       saniNurse.phase = 'running-in';
       saniNurse.startX = spawnX;
       saniNurse.startY = spawnY;
@@ -1516,8 +1614,10 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       saniNurse.phaseTimer = 0;
       saniNurse.phaseDuration = 3.0;
       saniNurse.headingRad = -Math.PI / 2;
-      saniNurse.speechText = '🚑 Sani-Sandra eilt durch die Schleuse herbei!';
-      speakNpcBubble(saniNurse.speechText, 'SANI-SANDRA', 'female');
+      saniNurse.speechText = withStretcherTeam
+        ? `🚑 ${nurseLabel} + 2 Sanitäter mit Trage & Skate-Guard rücken an!`
+        : `🚑 ${nurseLabel} eilt durch die Schleuse herbei!`;
+      speakNpcBubble(saniNurse.speechText, nurseLabel, 'female');
     };
 
     // Unannounced Floor Wax Slip Zone (Bohnerwachs-Rutschzone)
@@ -2464,8 +2564,12 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           }
         }
 
-        // 2. Hit-test the 9 movable modules (including SPINDE / lockers; check smaller baffles first with generous 12px padding)
+        // 2. Hit-test the movable modules (including individual Bistro tables & SPINDE / lockers; check smaller items first)
         const hitOrder: EditableModuleId[] = [
+          'bistroTable1',
+          'bistroTable2',
+          'bistroTable3',
+          'bistroTable4',
           'baffleLeft',
           'baffleRight',
           'lockers',
@@ -2517,6 +2621,22 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         return;
       }
 
+      // Hidden Admin PIN Access: Double-click on the large upper back-wall "PALLADIUM HANAU • ROLLER DISCO" neon sign (center x=1075, y=10..108)
+      if (Math.abs(worldX - 1075) <= 305 && worldY >= 4 && worldY <= 114) {
+        const nowTopClick = performance.now();
+        if (nowTopClick - lastTopWallLogoClickTime < 650) {
+          topWallLogoClickCount += 1;
+        } else {
+          topWallLogoClickCount = 1;
+        }
+        lastTopWallLogoClickTime = nowTopClick;
+        if (topWallLogoClickCount >= 2) {
+          topWallLogoClickCount = 0;
+          propsRef.current.onRequestAdminPinModal?.();
+          return;
+        }
+      }
+
       // Easter-Egg: 3x click on the center Palladium logo triggers "✨ CREATED BY JÜRGEN BECKER (JR) ✨"
       if (
         Math.hypot(
@@ -2544,6 +2664,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         Math.hypot(worldX - djTower.centerX, worldY - djTower.centerY) <=
         djTower.clickRadius
       ) {
+        propsRef.current.onClickDjConsole?.();
         propsRef.current.onToggleTwitchStream?.();
         return;
       }
@@ -3201,6 +3322,24 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         soundFX.playDrinkRefresh();
       }
 
+      // Apply direct event start-position teleport triggered from Spind Tab C ("Live-Events & Shows")
+      if (pendingTeleportRef.current) {
+        const tp = pendingTeleportRef.current;
+        pendingTeleportRef.current = null;
+        player.x = tp.x;
+        player.y = tp.y;
+        player.vx = 0;
+        player.vy = 0;
+        if (typeof tp.headingRad === 'number') {
+          player.headingRad = tp.headingRad;
+        }
+        player.speechBubble = tp.label
+          ? `🎪 Direkt zum Startpunkt: ${tp.label}!`
+          : '🛼 Direkt zur Startposition auf der Bahn!';
+        player.speechTimer = 3.0;
+        soundFX.playChallengeUnlocked();
+      }
+
       // ----------------------------------------------------------------------
       // B. UPDATE PLAYER TIMERS, WAX PATCH, STAGE ANIMATION & JUMP ARC
       // ----------------------------------------------------------------------
@@ -3220,12 +3359,16 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       if (player.crashTimer > 0) {
         player.crashTimer = Math.max(0, player.crashTimer - dt);
       }
+      if (player.bumpCooldownTimer > 0) {
+        player.bumpCooldownTimer = Math.max(0, player.bumpCooldownTimer - dt);
+      }
       if (player.medicRescueTimer > 0) {
         player.medicRescueTimer = Math.max(0, player.medicRescueTimer - dt);
       }
 
-      // Update Nurse / Paramedic ("SANI-SANDRA") Rescue Sequence (via nearest Schleusen-Bande!)
+      // Update Nurse / Paramedic ("Schwester Gudrun") Rescue Sequence (via nearest Schleusen-Bande!)
       if (saniNurse.active) {
+        const nurseLabel = p.crewNames?.nurse || 'Schwester Gudrun';
         saniNurse.phaseTimer += dt;
         if (saniNurse.phase === 'running-in') {
           saniNurse.targetX = Math.max(330, Math.min(1670, player.x + 28));
@@ -3262,11 +3405,12 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             saniNurse.phase = 'kneeling';
             saniNurse.phaseTimer = 0;
             saniNurse.phaseDuration = 3.5;
-            saniNurse.speechText =
-              '🧊 Erste Hilfe: Sani-Sandra legt ein Kühlpack & Eisspray auf!';
-            speakNpcBubble(saniNurse.speechText, 'SANI-SANDRA', 'female');
+            saniNurse.speechText = saniNurse.withStretcherTeam
+              ? `🚑 ${nurseLabel}: „10x gerempelt! Ab auf die Trage zum Durchchecken!“`
+              : `🧊 Erste Hilfe: ${nurseLabel} legt ein Kühlpack & Eisspray auf!`;
+            speakNpcBubble(saniNurse.speechText, nurseLabel, 'female');
             player.crashTimer = Math.max(player.crashTimer, 3.2);
-            player.speechBubble = '🧊 Danke für das Kühlpack, Sani-Sandra!';
+            player.speechBubble = `🧊 Danke für die Pflege, ${nurseLabel}!`;
             player.speechTimer = 3.2;
           }
         } else if (saniNurse.phase === 'kneeling') {
@@ -3282,8 +3426,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             saniNurse.phaseDuration = 3.2;
             saniNurse.targetX = saniNurse.x;
             saniNurse.targetY = saniNurse.y;
-            saniNurse.speechText = '👍 Wieder fit! Gute Weiterfahrt!';
-            speakNpcBubble(saniNurse.speechText, 'SANI-SANDRA', 'female');
+            saniNurse.speechText = `👍 ${nurseLabel}: „Wieder fit! Gute Weiterfahrt!“`;
+            speakNpcBubble(saniNurse.speechText, nurseLabel, 'female');
             player.crashTimer = 0;
             player.medicRescueTimer = 0;
           }
@@ -3646,6 +3790,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
       if (onRinkFloor) {
         p.onIntroStepComplete?.('skate_rink');
+        p.onCertificateEvent?.('skate_rink');
         if (player.y < rink.centerY - 105 && player.vx < -20) {
           player.passedTopHalf = true;
         }
@@ -3747,63 +3892,22 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       }
 
       const isSlowSkating = p.lightingMode === 'slow-skating';
+      const isClockwiseSkate =
+        p.skateDirection === 'cw' || isSlowSkating;
+      const isSpringerStaffelShow =
+        p.hallGameMode === 'springerstaffel' ||
+        Boolean(p.springerStaffelShowActive);
 
       if (!p.isMultiplayerActive) {
-        // Random Barrier-Sitting Event: Every ~13–18s in free-skate (NEVER during Slow-Skating!), a regular NPC sits on the blue outer barrier
-        if (p.hallGameMode === 'free-skate' && !isSlowSkating) {
-          if (!activeBarrierSitterId) {
-            barrierSitTimer -= dt;
-            if (barrierSitTimer <= 0) {
-              const regulars = trackNpcs.filter(
-                (n) => n.role === 'regular' && n.hitOutTimer <= 0
-              );
-              if (regulars.length > 0) {
-                const chosen =
-                  regulars[Math.floor(Math.random() * regulars.length)];
-                const spot =
-                  barrierSitSpots[
-                    Math.floor(Math.random() * barrierSitSpots.length)
-                  ];
-                chosen.sittingBarrierSpot = spot;
-                chosen.speechText = 'Kurz auf der Bande sitzen...';
-                chosen.speechTimer = 4.5;
-                speakNpcBubble(chosen.speechText, chosen.name, chosen.gender);
-                activeBarrierSitterId = chosen.id;
-              }
-              barrierSitTimer = 14 + Math.random() * 6;
-            }
-          }
-        } else if (activeBarrierSitterId) {
+        // Keep all skaters on the closed oval track (no barrier-sitting criss-crossing across the rink!)
+        if (activeBarrierSitterId) {
           trackNpcs.forEach((n) => {
             n.sittingBarrierSpot = null;
           });
           activeBarrierSitterId = null;
         }
-
-        const activeSitterNpc = activeBarrierSitterId
-          ? trackNpcs.find((n) => n.id === activeBarrierSitterId)
-          : null;
-
-        // Find nearest Skate Guard to intercept any NPC sitting on the blue barrier
-        let assignedBarrierGuardId: string | null = null;
-        if (
-          !isSlowSkating &&
-          activeSitterNpc &&
-          activeSitterNpc.sittingBarrierSpot
-        ) {
-          const guards = trackNpcs.filter((n) => n.role === 'guard');
-          if (guards.length > 0) {
-            guards.sort(
-              (a, b) =>
-                Math.hypot(
-                  a.x - activeSitterNpc.x,
-                  a.y - activeSitterNpc.y
-                ) -
-                Math.hypot(b.x - activeSitterNpc.x, b.y - activeSitterNpc.y)
-            );
-            assignedBarrierGuardId = guards[0].id;
-          }
-        }
+        const activeSitterNpc: TrackNpc | null = null;
+        const assignedBarrierGuardId: string | null = null;
 
         // Romantic Slow-Skating Couples Definition (3 couples skating synchronously, 1 partner backwards facing the other at a clean fixed distance!)
         const slowSkateCouples: Record<
@@ -4071,18 +4175,19 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             return;
           }
 
-          // Check whether this NPC's anchor (homeX/homeY) was placed in the Vorbereich/Bistro outside the rink
+          // Check whether this NPC's anchor (homeX/homeY) was explicitly placed in the Vorbereich/Bistro outside the rink
           const homeX = npc.homeX ?? npc.x;
           const homeY = npc.homeY ?? npc.y;
           const isHomeOutsideRink =
             p.hallGameMode === 'free-skate' &&
-            (homeX < rink.x + 14 ||
-              homeX > rink.x + rink.width - 14 ||
-              homeY > rink.y + rink.height - 6);
+            !isSpringerStaffelShow &&
+            (homeX < rink.x + 8 ||
+              homeX > rink.x + rink.width - 8 ||
+              homeY > rink.y + rink.height + 10);
           const isNpcOutsideRink =
-            npc.x < rink.x + 14 ||
-            npc.x > rink.x + rink.width - 14 ||
-            npc.y > rink.y + rink.height - 6;
+            npc.x < rink.x + 8 ||
+            npc.x > rink.x + rink.width - 8 ||
+            npc.y > rink.y + rink.height + 10;
 
           if (isHomeOutsideRink) {
             // NPC belongs in the Vorbereich (e.g. Bistro / Foyer): if currently on the rink, route out via nearest gateLeft/gateRight first!
@@ -4128,17 +4233,16 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             return;
           }
 
-          // If an active rink skater is outside the rink barrier (in the Bistro or Foyer), route them through the nearest dynamic Schleusen waypoint (gateLeft or gateRight) onto the track!
-          if (!npc.sittingBarrierSpot && isNpcOutsideRink) {
+          // If an active rink skater was placed outside the rink barrier (y > rink.y + rink.height + 10), route them in through the nearest Schleuse!
+          if (isNpcOutsideRink) {
             const useLeft =
               Math.hypot(npc.x - gLeftWp.x, npc.y - gLeftWp.y) <
               Math.hypot(npc.x - gRightWp.x, npc.y - gRightWp.y);
             const wp = useLeft ? gLeftWp : gRightWp;
-            // First align with the gate opening X in the corridor, then roll straight up through the gate onto the rink (y = 815)
             const needsHorizontalAlign =
-              Math.abs(npc.x - wp.x) > 22 && npc.y >= wp.y - 6;
+              Math.abs(npc.x - wp.x) > 22 && npc.y >= wp.y + 4;
             const entryX = wp.x;
-            const entryY = needsHorizontalAlign ? wp.y + 24 : wp.y - 42;
+            const entryY = needsHorizontalAlign ? wp.y + 18 : rink.y + rink.height - 65;
             const dxIn = entryX - npc.x;
             const dyIn = entryY - npc.y;
             const distIn = Math.max(1, Math.hypot(dxIn, dyIn));
@@ -4268,62 +4372,6 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             return;
           }
 
-          if (!isSlowSkating && npc.sittingBarrierSpot) {
-            const spot = npc.sittingBarrierSpot;
-            npc.x += (spot.x - npc.x) * Math.min(1, dt * 4.5);
-            npc.y += (spot.y - npc.y) * Math.min(1, dt * 4.5);
-            npc.vx = 0;
-            npc.vy = 0;
-            npc.headingRad = rotateShortest(
-              npc.headingRad,
-              spot.normalRad,
-              dt * 8
-            );
-            return;
-          }
-
-          if (
-            !isSlowSkating &&
-            npc.id === assignedBarrierGuardId &&
-            activeSitterNpc &&
-            activeSitterNpc.sittingBarrierSpot
-          ) {
-            const spot = activeSitterNpc.sittingBarrierSpot;
-            const targetGuardX = spot.x + Math.cos(spot.normalRad) * 48;
-            const targetGuardY = spot.y + Math.sin(spot.normalRad) * 48;
-            const dxG = targetGuardX - npc.x;
-            const dyG = targetGuardY - npc.y;
-            const distG = Math.hypot(dxG, dyG);
-
-            if (distG > 22) {
-              const stepG = Math.min(distG, 360 * dt);
-              npc.vx = (dxG / distG) * 360;
-              npc.vy = (dyG / distG) * 360;
-              npc.x += (dxG / distG) * stepG;
-              npc.y += (dyG / distG) * stepG;
-              npc.headingRad = rotateShortest(
-                npc.headingRad,
-                Math.atan2(dyG, dxG),
-                dt * 12
-              );
-            } else {
-              if (p.skateGuardWhistleEnabled) {
-                soundFX.playSkateGuardWhistle();
-              }
-              npc.speechText = '📣 TRILLER! Nicht auf der Bande sitzen!';
-              npc.speechTimer = 3.4;
-              speakNpcBubble(npc.speechText, npc.name, npc.gender);
-              activeSitterNpc.sittingBarrierSpot = null;
-              activeSitterNpc.speechText = 'Ups, schon wieder unten!';
-              activeSitterNpc.speechTimer = 2.4;
-              activeSitterNpc.x += Math.cos(spot.normalRad) * 44;
-              activeSitterNpc.y += Math.sin(spot.normalRad) * 44;
-              activeBarrierSitterId = null;
-              barrierSitTimer = 15 + Math.random() * 6;
-            }
-            return;
-          }
-
           const coupleCfg =
             isSlowSkating && p.hallGameMode === 'free-skate'
               ? slowSkateCouples[npc.id]
@@ -4331,16 +4379,20 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
           const trainSlotIdx = shuffleTrainMemberIds.indexOf(npc.id);
 
-          if (trainSlotIdx !== -1) {
+          const orbitDirSign = isClockwiseSkate ? 1 : -1;
+
+          if (trainSlotIdx !== -1 && !isSpringerStaffelShow) {
             // Synchronized 4-skater Shuffle-Skate-Train gliding rhythmically on the middle lane!
             const trainLeader = trackNpcs.find(
               (n) => n.id === shuffleTrainMemberIds[0]
             );
             if (trainSlotIdx === 0) {
-              npc.orbitAngle = normalizeAngle(npc.orbitAngle - 0.52 * dt);
+              npc.orbitAngle = normalizeAngle(
+                npc.orbitAngle + orbitDirSign * 0.52 * dt
+              );
             } else if (trainLeader) {
               npc.orbitAngle = normalizeAngle(
-                trainLeader.orbitAngle + trainSlotIdx * 0.115
+                trainLeader.orbitAngle - orbitDirSign * trainSlotIdx * 0.115
               );
             }
             const trainSway = Math.sin(now * 0.0085 - trainSlotIdx * 0.55) * 14;
@@ -4350,21 +4402,22 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               548 + trainSway,
               274 + trainSway * 0.5,
               npc.orbitAngle,
-              false
+              false,
+              isClockwiseSkate
             );
             npc.vx = (trackPt.x - npc.x) / Math.max(0.016, dt);
             npc.vy = (trackPt.y - npc.y) / Math.max(0.016, dt);
-            npc.x = trackPt.x;
-            npc.y = trackPt.y;
+            npc.x += (trackPt.x - npc.x) * Math.min(1, dt * 14);
+            npc.y += (trackPt.y - npc.y) * Math.min(1, dt * 14);
             npc.headingRad = rotateShortest(
               npc.headingRad,
               trackPt.tangentRad,
               dt * 15
             );
-          } else if (coupleCfg) {
+          } else if (coupleCfg && !isSpringerStaffelShow) {
             if (!coupleCfg.isBackwardsPartner) {
               npc.orbitAngle = normalizeAngle(
-                npc.orbitAngle - coupleCfg.orbitSpeed * dt
+                npc.orbitAngle + orbitDirSign * coupleCfg.orbitSpeed * dt
               );
             } else {
               const leader = trackNpcs.find((n) => n.id === coupleCfg.leaderId);
@@ -4379,7 +4432,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               coupleCfg.rx,
               coupleCfg.ry,
               npc.orbitAngle,
-              coupleCfg.rx > 600
+              coupleCfg.rx > 600,
+              isClockwiseSkate
             );
 
             const tanCos = Math.cos(trackPt.tangentRad);
@@ -4397,8 +4451,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
             npc.vx = (targetX - npc.x) / Math.max(0.016, dt);
             npc.vy = (targetY - npc.y) / Math.max(0.016, dt);
-            npc.x = targetX;
-            npc.y = targetY;
+            npc.x += (targetX - npc.x) * Math.min(1, dt * 14);
+            npc.y += (targetY - npc.y) * Math.min(1, dt * 14);
 
             const desiredHeading = coupleCfg.isBackwardsPartner
               ? normalizeAngle(trackPt.tangentRad + Math.PI)
@@ -4412,6 +4466,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           } else if (
             isSlowSkating &&
             p.hallGameMode === 'free-skate' &&
+            !isSpringerStaffelShow &&
             slowFlirtPartnerId === npc.id
           ) {
             // Rule #3: Accepted Singleplayer Slow-Skate Partner skates synchronously hand-in-hand beside the player!
@@ -4428,14 +4483,73 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               player.headingRad,
               dt * 14
             );
-          } else {
-            // Strict one-way counter-clockwise skating for ALL AI skaters on the rink (including guard-1 & guard-2!)
-            const speedMult = isSlowSkating ? 0.58 : 1.0;
-            npc.orbitAngle = normalizeAngle(
-              npc.orbitAngle - npc.baseSpeed * speedMult * dt
+          } else if (isSpringerStaffelShow && npc.role !== 'guard') {
+            // Ordered Springer-Staffel-Show: Participating skaters line up one behind another on the exact high-jump approach lane (rx=525, ry=250) and jump sequentially over HOCHSPRUNG 1..4!
+            const leaderNpc = trackNpcs[0];
+            const relaySpeed = 0.72;
+            if (npcIdx === 0 || !leaderNpc) {
+              npc.orbitAngle = normalizeAngle(
+                npc.orbitAngle + orbitDirSign * relaySpeed * dt
+              );
+            } else {
+              const desiredSlotAngle = normalizeAngle(
+                leaderNpc.orbitAngle - orbitDirSign * npcIdx * 0.25
+              );
+              npc.orbitAngle = rotateShortest(
+                npc.orbitAngle,
+                desiredSlotAngle,
+                dt * 2.4
+              );
+            }
+
+            const trackPt = computeTrackOvalPoint(
+              rink.centerX,
+              rink.centerY,
+              525,
+              250,
+              npc.orbitAngle,
+              false,
+              isClockwiseSkate
             );
 
-            // Smooth lane-shifting (overtaking) so faster skaters glide past slower skaters with ~35px separation
+            // Trigger high-jump arc & short (~1.0s) height badge exclusively right at takeoff over any of the 4 Hochsprung bars!
+            const nearBarX =
+              Math.abs(npc.x - 760) < 34 || Math.abs(npc.x - 1240) < 34;
+            const nearBarY =
+              Math.abs(npc.y - 735) < 42 || Math.abs(npc.y - 235) < 42;
+            if (nearBarX && nearBarY && (npc.jumpZ || 0) === 0) {
+              npc.jumpVz =
+                255 + Math.min(90, (activeSpringerstaffelHeightCm - 60) * 0.5);
+              npc.speechText = `${activeSpringerstaffelHeightCm} cm!`;
+              npc.speechTimer = 1.0;
+            }
+
+            const blend = Math.min(1, dt * 12);
+            const nextX = npc.x + (trackPt.x - npc.x) * blend;
+            const nextY = npc.y + (trackPt.y - npc.y) * blend;
+            npc.vx = (nextX - npc.x) / Math.max(0.016, dt);
+            npc.vy = (nextY - npc.y) / Math.max(0.016, dt);
+            npc.x = nextX;
+            npc.y = nextY;
+            npc.headingRad = rotateShortest(
+              npc.headingRad === 0 ? trackPt.tangentRad : npc.headingRad,
+              trackPt.tangentRad,
+              dt * 14
+            );
+          } else {
+            // Strict closed-oval skating for ALL AI skaters on the outer oval rink (CCW in normal mode, CW & relaxed in Richtungswechsel / Slow-Skate mode!)
+            // During Slalom ('slalom'), only at most 3 designated skaters ('reg-4', 'speed-1', 'reg-12') weave through the slalom cones with wide spacing; all others stay calmly on the outer oval!
+            const isDesignatedSlalomSkater =
+              p.hallGameMode === 'slalom' &&
+              (npc.id === 'reg-4' ||
+                npc.id === 'speed-1' ||
+                npc.id === 'reg-12');
+            const speedMult = isClockwiseSkate ? 0.64 : 1.0;
+            npc.orbitAngle = normalizeAngle(
+              npc.orbitAngle + orbitDirSign * npc.baseSpeed * speedMult * dt
+            );
+
+            // Smooth lateral lane-shifting (overtaking) so faster skaters glide past slower skaters without ever turning around
             let desiredLaneShift = 0;
             for (const other of trackNpcs) {
               if (
@@ -4448,47 +4562,54 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               if (d < 85 && d > 1) {
                 const radDiff = npc.laneRadiusX - other.laneRadiusX;
                 if (Math.abs(radDiff) < 36) {
-                  desiredLaneShift += radDiff >= 0 ? 28 : -28;
+                  desiredLaneShift += radDiff >= 0 ? 26 : -26;
                 }
               }
             }
-            desiredLaneShift = Math.max(-42, Math.min(42, desiredLaneShift));
+            desiredLaneShift = Math.max(-36, Math.min(36, desiredLaneShift));
             npc.laneOffset =
               (npc.laneOffset || 0) +
               (desiredLaneShift - (npc.laneOffset || 0)) * Math.min(1, dt * 3.5);
 
             const hasCustomManni = Boolean(p.customLayout?.npcAnchors?.['guard-1']);
-            const baseRx =
+            // In Slalom mode, non-designated AI skaters stay calmly on the outer oval lanes (rx >= 585, ry >= 292) outside the slalom cones
+            const rawRx =
               npc.id === 'guard-1' && !hasCustomManni ? 596 : npc.laneRadiusX;
-            const baseRy =
+            const rawRy =
               npc.id === 'guard-1' && !hasCustomManni ? 294 : npc.laneRadiusY;
-            const effectiveRx = baseRx + (npc.laneOffset || 0);
-            const effectiveRy = baseRy + (npc.laneOffset || 0) * 0.5;
+            const baseRx = isDesignatedSlalomSkater
+              ? 515
+              : p.hallGameMode === 'slalom'
+              ? Math.max(588, rawRx)
+              : Math.max(465, rawRx);
+            const baseRy = isDesignatedSlalomSkater
+              ? 250
+              : p.hallGameMode === 'slalom'
+              ? Math.max(292, rawRy)
+              : Math.max(230, rawRy);
+            const effectiveRx = Math.min(672, baseRx + (npc.laneOffset || 0));
+            const effectiveRy = Math.min(334, baseRy + (npc.laneOffset || 0) * 0.5);
             const trackPt = computeTrackOvalPoint(
               rink.centerX,
               rink.centerY,
               effectiveRx,
               effectiveRy,
               npc.orbitAngle,
-              npc.role === 'speed' || npc.id === 'guard-1'
+              npc.role === 'speed' || npc.id === 'guard-1',
+              isClockwiseSkate
             );
 
             let targetX = trackPt.x;
             let targetY = trackPt.y;
 
-            if (npc.role === 'regular' && !isSlowSkating) {
-              const sway = Math.sin(now * 0.004 + npc.laneRadiusX) * 10;
+            if (isDesignatedSlalomSkater && (trackPt.x >= 590 && trackPt.x <= 1310)) {
+              // Smooth slalom weaving around the cones on the top/bottom straights for the 3 slalom skaters
+              const slalomWave = Math.sin((trackPt.x - 630) * (Math.PI / 160)) * 28;
+              targetY += slalomWave;
+            } else if (npc.role === 'regular' && !isClockwiseSkate) {
+              const sway = Math.sin(now * 0.004 + npc.laneRadiusX) * 8;
               targetX += Math.cos(npc.orbitAngle) * sway;
               targetY += Math.sin(npc.orbitAngle) * sway;
-            }
-
-            // In Springerstaffel mode, AI skaters perform synchronized team jumps over the relay bars (x=760 & x=1240)!
-            if (
-              p.hallGameMode === 'springerstaffel' &&
-              (npc.jumpZ || 0) === 0 &&
-              (Math.abs(npc.x - 760) < 32 || Math.abs(npc.x - 1240) < 32)
-            ) {
-              npc.jumpVz = 215;
             }
 
             if (npc.id === 'guard-1' && player.afkSecondsOnTrack >= 15) {
@@ -4511,12 +4632,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               }
             }
 
-            const dx = targetX - npc.x;
-            const dy = targetY - npc.y;
-            npc.vx = dx / Math.max(0.016, dt);
-            npc.vy = dy / Math.max(0.016, dt);
-            npc.x = targetX;
-            npc.y = targetY;
+            const blend = Math.min(1, dt * 14);
+            const nextX = npc.x + (targetX - npc.x) * blend;
+            const nextY = npc.y + (targetY - npc.y) * blend;
+            npc.vx = (nextX - npc.x) / Math.max(0.016, dt);
+            npc.vy = (nextY - npc.y) / Math.max(0.016, dt);
+            npc.x = nextX;
+            npc.y = nextY;
 
             npc.headingRad = rotateShortest(
               npc.headingRad === 0 ? trackPt.tangentRad : npc.headingRad,
@@ -4524,7 +4646,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               dt * 14
             );
 
-            if (npc.role === 'speed' && !isSlowSkating) {
+            if (npc.role === 'speed' && !isClockwiseSkate) {
               const behindX = npc.x - Math.cos(trackPt.tangentRad) * 65;
               const behindY = npc.y - Math.sin(trackPt.tangentRad) * 65;
               if (
@@ -4537,7 +4659,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           }
 
           // Clamp NPC strictly inside the rounded blue rink barrier so AI skaters never clip through corners or right barrier
-          clampPointInsideRoundedRink(npc, 24);
+          clampPointInsideRoundedRink(npc, 26);
 
           // Skate Guard wrong-way (Geisterfahrer) whistle check
           if (npc.role === 'guard' && onRinkFloor && speed > 130) {
@@ -4546,7 +4668,9 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               normalizeAngle(player.headingRad - npc.headingRad)
             );
             if (distGuard < 210 && angleDiff > 2.35 && npc.speechTimer <= 0) {
-              npc.speechText = 'Trrriiiiieeeet! Gegen den Uhrzeigersinn!';
+              npc.speechText = isClockwiseSkate
+                ? 'Trrriiiiieeeet! Richtungswechsel — jetzt im Uhrzeigersinn!'
+                : 'Trrriiiiieeeet! Gegen den Uhrzeigersinn!';
               npc.speechTimer = 2.8;
               player.cleanLapsStreak = 0;
               if (p.skateGuardWhistleEnabled) {
@@ -4629,43 +4753,36 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               player.x += nx * overlap;
               player.y += ny * overlap;
 
-              const relSpeed = Math.hypot(
-                player.vx - npc.vx,
-                player.vy - npc.vy
-              );
-              if (relSpeed > 250 && player.crashTimer <= 0) {
-                player.crashTimer = 3.4;
-                player.totalCrashes += 1;
-                player.consecutiveCrashes += 1;
-                player.vx = nx * 120;
-                player.vy = ny * 120;
-                player.speechBubble = 'Autsch! Sturz auf dem Parkett!';
-                player.speechTimer = 3.0;
-                npc.speechText = 'Uff! Alles okay?!';
-                npc.speechTimer = 2.4;
-                speakNpcBubble(npc.speechText, npc.name, npc.gender);
+              // Elastic lateral push without knockdown wait time; silent counter dispatches Schwester Gudrun + Skate-Guard + 2 Paramedics with stretcher on the 10th collision!
+              player.vx += nx * 135;
+              player.vy += ny * 135;
 
-                triggerSaniNurseDispatch(player.x, player.y);
+              if (player.bumpCooldownTimer <= 0) {
+                player.bumpCooldownTimer = 0.85;
+                player.bumpCountSinceGudrun += 1;
 
-                if (player.consecutiveCrashes >= 3) {
-                  player.consecutiveCrashes = 0;
-                  player.medicRescueTimer = 6.5;
-                  player.speechBubble =
-                    '🚑 Sanitäterin Sani-Sandra übernimmt die Erstversorgung!';
-                  player.speechTimer = 4.0;
-                  soundFX.playCrash(true);
+                if (player.bumpCountSinceGudrun >= 10) {
+                  player.bumpCountSinceGudrun = 0;
+                  player.totalCrashes += 1;
+                  player.crashTimer = 4.2;
+                  player.medicRescueTimer = 6.0;
+                  const nurseName =
+                    p.crewNames?.nurse || 'Schwester Gudrun';
+                  player.speechBubble = `🚑 10. Rempler! ${nurseName}, Skate-Guard & 2 Sanitäter mit Trage rücken an!`;
+                  player.speechTimer = 4.2;
+                  const guardNpc = trackNpcs.find((g) => g.role === 'guard');
+                  if (guardNpc) {
+                    guardNpc.speechText = `📣 TRRIIIIEEEET! Bahn frei für ${nurseName} & die Sanitäter mit Trage!`;
+                    guardNpc.speechTimer = 4.5;
+                  }
                   if (p.skateGuardWhistleEnabled) {
                     soundFX.playSkateGuardWhistle();
                   }
-                } else {
-                  soundFX.playCrash(false);
-                }
-              } else {
-                player.vx += nx * 130;
-                player.vy += ny * 130;
-                if (player.speechTimer <= 0) {
-                  player.speechBubble = Math.random() > 0.5 ? 'Ey!' : 'Uff!';
-                  player.speechTimer = 1.2;
+                  soundFX.playCrash(true);
+                  triggerSaniNurseDispatch(player.x, player.y, true);
+                } else if (player.speechTimer <= 0) {
+                  player.speechBubble = Math.random() > 0.5 ? 'Hoppla!' : 'Uff!';
+                  player.speechTimer = 1.0;
                   soundFX.playCrash(false);
                 }
               }
@@ -5101,7 +5218,19 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             cone.passed = true;
             player.slalomCombo += 1;
             soundFX.playSlalomCombo(player.slalomCombo);
+            p.onAwardObstaclePoints?.(10);
+            floatingScores.push({
+              x: player.x,
+              y: player.y - 34,
+              startY: player.y - 34,
+              text: '+10 Pkt',
+              age: 0,
+              duration: 1.15,
+            });
             p.onChallengeProgress('slalom_10_gates', player.slalomCombo, true);
+            if (player.slalomCombo >= 10) {
+              p.onCertificateEvent?.('clean_slalom');
+            }
             window.setTimeout(() => {
               cone.passed = false;
             }, 3500);
@@ -5137,6 +5266,15 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               if (!chair.clearedByPlayer) {
                 chair.clearedByPlayer = true;
                 chair.clearedInLap = true;
+                p.onAwardObstaclePoints?.(10);
+                floatingScores.push({
+                  x: player.x,
+                  y: player.y - 38,
+                  startY: player.y - 38,
+                  text: '+10 Pkt',
+                  age: 0,
+                  duration: 1.15,
+                });
                 const clearedCount = jumpChairs.filter(
                   (c) => c.clearedInLap
                 ).length;
@@ -5144,6 +5282,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
                 if (clearedCount >= jumpChairs.length) {
                   player.speechBubble = `🏆 Komplette Stuhl-Runde (${jumpChairs.length}/${jumpChairs.length}) gemeistert!`;
                   player.speechTimer = 2.6;
+                  p.onCertificateEvent?.('clean_jump');
                   jumpChairs.forEach((c) => {
                     c.clearedInLap = false;
                   });
@@ -5157,6 +5296,9 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
                 if (chair.chairCount === 3) {
                   p.onChallengeProgress('chair_jump_3', 1);
+                  if (Math.hypot(player.vx, player.vy) >= 210) {
+                    p.onCertificateEvent?.('high_speed_jump');
+                  }
                 }
 
                 trackNpcs.forEach((specNpc, sIdx) => {
@@ -5221,7 +5363,23 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
                 springerstaffelClearedIds.add(rg.id);
                 const doneCount = springerstaffelClearedIds.size;
                 soundFX.playSlalomCombo(doneCount);
+                p.onAwardObstaclePoints?.(10);
+                floatingScores.push({
+                  x: player.x,
+                  y: player.y - 38,
+                  startY: player.y - 38,
+                  text: '+10 Pkt',
+                  age: 0,
+                  duration: 1.15,
+                });
                 if (doneCount >= 4) {
+                  p.onCertificateEvent?.('clean_jump');
+                  if (
+                    activeSpringerstaffelHeightCm >= 160 ||
+                    Math.hypot(player.vx, player.vy) >= 220
+                  ) {
+                    p.onCertificateEvent?.('high_speed_jump');
+                  }
                   activeSpringerstaffelHeightCm = Math.min(
                     220,
                     activeSpringerstaffelHeightCm + 20
@@ -6103,6 +6261,12 @@ function renderCompleteScene(
     showOwnName?: boolean;
     showSpeechBubbles?: boolean;
     vipDiscoSkatesEquipped?: boolean;
+    skateDirection?: 'ccw' | 'cw';
+    springerStaffelShowActive?: boolean;
+    neonLightboxesEnabled?: boolean;
+    neonLightboxLine1?: string;
+    neonLightboxLine2?: string;
+    neonLightboxLine3?: string;
   },
   player: {
     x: number;
@@ -6140,6 +6304,7 @@ function renderCompleteScene(
   fogBurstTimer: number,
   saniNurse: {
     active: boolean;
+    withStretcherTeam?: boolean;
     phase: 'idle' | 'running-in' | 'kneeling' | 'walking-out';
     x: number;
     y: number;
@@ -6584,7 +6749,11 @@ function renderCompleteScene(
     now,
     crewAiNamesVisible,
     isBlacklight,
-    djHandsUpActive
+    djHandsUpActive,
+    p.neonLightboxesEnabled !== false,
+    p.neonLightboxLine1 ?? 'RESIDENT DJ',
+    p.neonLightboxLine2 ?? 'DJ MAGIC FORCE',
+    p.neonLightboxLine3 ?? 'AB 20:00 UHR'
   );
 
   // 5. 90°-ROTATED CENTER U-ISLANDS (`[` LEFT & `]` RIGHT), JAM-SKATERS IN BETWEEN, OR COLLAPSIBLE EVENT STAGE
@@ -6732,7 +6901,10 @@ function renderCompleteScene(
       );
       ctx.restore();
     }
-  } else if (p.hallGameMode === 'springerstaffel') {
+  } else if (
+    p.hallGameMode === 'springerstaffel' ||
+    Boolean(p.springerStaffelShowActive)
+  ) {
     // 4 Authentic 80s Hochsprung-Gestelle starting at 60 cm (+20 cm per completed round)!
     const relayBars = [
       { x: 760, y: 735, label: 'HOCHSPRUNG 1' },
@@ -7035,13 +7207,19 @@ function renderCompleteScene(
     const speechBubblesEnabled =
       p.showSpeechBubbles !== undefined ? p.showSpeechBubbles : true;
 
+    const isClockwiseRender =
+      isSlowSkating || p.skateDirection === 'cw';
     for (const npc of trackNpcs) {
       const isNpcBackward =
         p.hallGameMode !== 'ballspiel' &&
         (npc.id === 'couple-b-1' ||
-          (isSlowSkating &&
-            p.hallGameMode === 'free-skate' &&
-            (npc.id === 'reg-2' || npc.id === 'speed-2' || npc.id === 'speed-4')));
+          (isClockwiseRender &&
+            (npc.id === 'reg-2' ||
+              npc.id === 'reg-5' ||
+              npc.id === 'reg-9' ||
+              npc.id === 'reg-13' ||
+              npc.id === 'speed-2' ||
+              npc.id === 'speed-4')));
 
       const showNpcBadge = aiNamesEnabled;
 
@@ -7724,7 +7902,11 @@ function renderSloped25DBackWallAndVerticalMirror(
   now: number,
   showNames: boolean,
   isBlacklight: boolean,
-  djHandsUpActive: boolean
+  djHandsUpActive: boolean,
+  neonLightboxesEnabled = true,
+  neonLightboxLine1 = 'RESIDENT DJ',
+  neonLightboxLine2 = 'DJ MAGIC FORCE',
+  neonLightboxLine3 = 'AB 20:00 UHR'
 ): void {
   const { slopedBackWall, mirrorWall, putzraumDoor } = ARENA_LAYOUT;
   const {
@@ -7820,25 +8002,26 @@ function renderSloped25DBackWallAndVerticalMirror(
     ctx.lineTo(bottomRightX - 24, bottomY - 22);
     ctx.stroke();
 
-    // 80s geometric zig-zag / triangle ornaments Left & Right of the center neon sign
-    [630, 1480].forEach((ox) => {
-      const oy = (topY + bottomY) / 2 + 4;
-      ctx.strokeStyle = 'rgba(253, 224, 71, 0.55)';
-      ctx.beginPath();
-      ctx.moveTo(ox - 55, oy + 14);
-      ctx.lineTo(ox - 28, oy - 18);
-      ctx.lineTo(ox, oy + 14);
-      ctx.lineTo(ox + 28, oy - 18);
-      ctx.lineTo(ox + 55, oy + 14);
-      ctx.stroke();
-    });
+    // 80s geometric zig-zag / triangle ornaments Left & Right of the center neon sign (only if neon lightboxes are turned off)
+    if (!neonLightboxesEnabled) {
+      [625, 1525].forEach((ox) => {
+        const oy = (topY + bottomY) / 2 + 4;
+        ctx.strokeStyle = 'rgba(253, 224, 71, 0.55)';
+        ctx.beginPath();
+        ctx.moveTo(ox - 55, oy + 14);
+        ctx.lineTo(ox - 28, oy - 18);
+        ctx.lineTo(ox, oy + 14);
+        ctx.lineTo(ox + 28, oy - 18);
+        ctx.lineTo(ox + 55, oy + 14);
+        ctx.stroke();
+      });
+    }
     ctx.restore();
   }
 
   ctx.restore();
 
   // 2. ELEGANT 80s CUT-OUT NEON SIGN "PALLADIUM HANAU" + NEON WINGED ROLLER SKATE & PULSATING PA SPEAKER BOXES
-  // (All three poster boxes removed from the upper back wall; pure cut-out glowing neon tubes directly on the dark back wall!)
   const wallCenterY = (topY + bottomY) / 2;
 
   drawCutoutNeonPalladiumSignAndWingedSkate(
@@ -7855,6 +8038,106 @@ function renderSloped25DBackWallAndVerticalMirror(
   draw80sPASpeakerBox(ctx, 725, wallCenterY, 44, 82, 0, now, isBlacklight);
   draw80sPASpeakerBox(ctx, 1425, wallCenterY, 44, 82, 0, now, isBlacklight);
   draw80sPASpeakerBox(ctx, 1625, wallCenterY, 44, 82, -0.08, now, isBlacklight);
+
+  // ZWEI RUHIGE 80ER-NEON-LEUCHTKÄSTEN ZWISCHEN DEN LAUTSPRECHER-BOXEN (exakt in den Lücken x=625 und x=1525)
+  if (neonLightboxesEnabled) {
+    const boxW = 156;
+    const boxH = 70;
+    const l1 = (neonLightboxLine1 || '').trim();
+    const l2 = (neonLightboxLine2 || '').trim();
+    const l3 = (neonLightboxLine3 || '').trim();
+    [625, 1525].forEach((cx) => {
+      const bx = cx - boxW / 2;
+      const by = wallCenterY - boxH / 2;
+      ctx.save();
+
+      // Dark brushed 80s chrome/acrylic lightbox casing (high contrast backdrop)
+      const bgGrad = ctx.createLinearGradient(bx, by, bx, by + boxH);
+      bgGrad.addColorStop(0, '#040711');
+      bgGrad.addColorStop(0.5, '#090f20');
+      bgGrad.addColorStop(1, '#040711');
+      ctx.fillStyle = bgGrad;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, boxW, boxH, 6);
+      ctx.fill();
+
+      // Outer metallic housing border
+      ctx.lineWidth = 2.4;
+      ctx.strokeStyle = '#475569';
+      ctx.stroke();
+
+      // Calm inner 80s neon tube frame (steady cyan/magenta dual rim)
+      ctx.save();
+      ctx.shadowColor = '#00f0ff';
+      ctx.shadowBlur = isBlacklight ? 14 : 9;
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.roundRect(bx + 4, by + 4, boxW - 8, boxH - 8, 4);
+      ctx.stroke();
+      ctx.restore();
+
+      // Subtle corner mounting rivets
+      ctx.fillStyle = '#94a3b8';
+      [
+        [bx + 8, by + 8],
+        [bx + boxW - 8, by + 8],
+        [bx + 8, by + boxH - 8],
+        [bx + boxW - 8, by + boxH - 8],
+      ].forEach(([rx, ry]) => {
+        ctx.beginPath();
+        ctx.arc(rx, ry, 1.3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Zeile 1 (ca. 45 % größer & fetter, hoher Kontrast: "RESIDENT DJ")
+      if (l1) {
+        ctx.save();
+        ctx.font = '900 12px "Courier New", "JetBrains Mono", monospace';
+        ctx.lineWidth = 2.2;
+        ctx.strokeStyle = '#020617';
+        ctx.strokeText(l1.slice(0, 24), cx, by + 16, boxW - 14);
+        ctx.shadowColor = '#00f0ff';
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = '#e0f2fe';
+        ctx.fillText(l1.slice(0, 24), cx, by + 16, boxW - 14);
+        ctx.restore();
+      }
+
+      // Zeile 2 (groß, leuchtend in der Mitte: "DJ MAGIC FORCE")
+      if (l2) {
+        ctx.save();
+        ctx.font = '900 13px "Arial Black", Impact, sans-serif';
+        ctx.shadowColor = '#ff2a85';
+        ctx.shadowBlur = 11;
+        ctx.fillStyle = '#fdf2f8';
+        ctx.fillText(l2.slice(0, 22), cx, by + 35, boxW - 12);
+        ctx.strokeStyle = '#ff2a85';
+        ctx.lineWidth = 0.7;
+        ctx.strokeText(l2.slice(0, 22), cx, by + 35, boxW - 12);
+        ctx.restore();
+      }
+
+      // Zeile 3 (ca. 45 % größer & fetter, hoher Kontrast: "AB 21:00 UHR")
+      if (l3) {
+        ctx.save();
+        ctx.font = '900 12px "Courier New", "JetBrains Mono", monospace';
+        ctx.lineWidth = 2.2;
+        ctx.strokeStyle = '#020617';
+        ctx.strokeText(l3.slice(0, 24), cx, by + 54, boxW - 14);
+        ctx.shadowColor = '#fde047';
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = '#fef08a';
+        ctx.fillText(l3.slice(0, 24), cx, by + 54, boxW - 14);
+        ctx.restore();
+      }
+
+      ctx.restore();
+    });
+  }
 
   // 3. 90°-ROTATED VERTICAL MIRROR WALL FLUSH AGAINST THE LEFT HALL OUTER WALL (Below curved DJ-Tower)
   ctx.save();
@@ -7927,11 +8210,32 @@ function renderSloped25DBackWallAndVerticalMirror(
   ctx.stroke();
   ctx.restore();
 
-  // 4. FLUSH "PUTZRAUM" DOOR ON THE LEFT OUTER WALL (Between Mirror Wall and Bistro)
+  // 4. SUBTLY ILLUMINATED "PUTZRAUM" DOOR ON THE LEFT OUTER WALL (Warm-yellow frame, crisp sign & light beam under door gap)
   ctx.save();
+  const prRightX = putzraumDoor.x + putzraumDoor.width;
+  const prLightGrad = ctx.createLinearGradient(
+    prRightX,
+    putzraumDoor.y + putzraumDoor.height / 2,
+    prRightX + 54,
+    putzraumDoor.y + putzraumDoor.height / 2
+  );
+  prLightGrad.addColorStop(0, 'rgba(253, 224, 71, 0.42)');
+  prLightGrad.addColorStop(0.45, 'rgba(251, 191, 36, 0.16)');
+  prLightGrad.addColorStop(1, 'rgba(253, 224, 71, 0)');
+  ctx.fillStyle = prLightGrad;
+  ctx.beginPath();
+  ctx.moveTo(prRightX, putzraumDoor.y + 4);
+  ctx.lineTo(prRightX + 54, putzraumDoor.y - 10);
+  ctx.lineTo(prRightX + 54, putzraumDoor.y + putzraumDoor.height + 10);
+  ctx.lineTo(prRightX, putzraumDoor.y + putzraumDoor.height - 4);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.shadowColor = '#fde047';
+  ctx.shadowBlur = 10;
   ctx.fillStyle = '#1e293b';
-  ctx.strokeStyle = '#64748b';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#fde047';
+  ctx.lineWidth = 2.4;
   ctx.beginPath();
   ctx.roundRect(
     putzraumDoor.x,
@@ -7942,6 +8246,15 @@ function renderSloped25DBackWallAndVerticalMirror(
   );
   ctx.fill();
   ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Bright warm-yellow light slit along the door threshold
+  ctx.strokeStyle = '#fef08a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(prRightX + 0.5, putzraumDoor.y + 5);
+  ctx.lineTo(prRightX + 0.5, putzraumDoor.y + putzraumDoor.height - 5);
+  ctx.stroke();
 
   // Door handle & keyhole on the right inner edge
   ctx.fillStyle = '#fde047';
@@ -7949,26 +8262,28 @@ function renderSloped25DBackWallAndVerticalMirror(
   ctx.arc(
     putzraumDoor.x + putzraumDoor.width - 4,
     putzraumDoor.y + putzraumDoor.height / 2,
-    2.5,
+    2.6,
     0,
     Math.PI * 2
   );
   ctx.fill();
 
-  // Retro door plate "PUTZRAUM"
+  // High-contrast illuminated door sign "PUTZRAUM"
   ctx.save();
   ctx.translate(
     putzraumDoor.x + putzraumDoor.width / 2,
     putzraumDoor.y + putzraumDoor.height / 2
   );
   ctx.rotate(-Math.PI / 2);
-  ctx.fillStyle = '#0f172a';
-  ctx.strokeStyle = '#f59e0b';
-  ctx.lineWidth = 1.2;
-  ctx.fillRect(-34, -7, 68, 14);
-  ctx.strokeRect(-34, -7, 68, 14);
-  ctx.fillStyle = '#fde047';
-  ctx.font = 'bold 8.5px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#090d16';
+  ctx.strokeStyle = '#fde047';
+  ctx.lineWidth = 1.6;
+  ctx.fillRect(-38, -8, 76, 16);
+  ctx.strokeRect(-38, -8, 76, 16);
+  ctx.shadowColor = '#fde047';
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = '#fef08a';
+  ctx.font = 'bold 9.5px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('PUTZRAUM', 0, 0.5);
@@ -11068,12 +11383,12 @@ function renderHallTourZonesAndStaff(
     speechBubble: null,
   });
 
-  // ANIMATED AI VISITORS AT THE 80s BISTRO SEATING GROUP IN SINGLEPLAYER MODE:
+  // ANIMATED AI VISITORS AT THE BISTRO TABLES IN SINGLEPLAYER MODE (benches removed):
   if (!isMultiplayerActive) {
     const cornerTableVisitors = [
       {
-        x: 92 + bDx + Math.cos(-Math.PI * 0.75) * 28,
-        y: 942 + bDy + Math.sin(-Math.PI * 0.75) * 28,
+        x: (bistro.marbleTables[0]?.x ?? 92) + Math.cos(-Math.PI * 0.75) * 28,
+        y: (bistro.marbleTables[0]?.y ?? 942) + Math.sin(-Math.PI * 0.75) * 28,
         headingRad: Math.PI * 0.25,
         gender: 'female' as const,
         shirtColor: '#ec4899',
@@ -11081,39 +11396,6 @@ function renderHallTourZonesAndStaff(
         hairColor: '#f59e0b',
         drinkColor: '#00f0ff',
         phase: 0.4,
-      },
-      {
-        x: 92 + bDx,
-        y: 1032 + bDy,
-        headingRad: -Math.PI / 2,
-        gender: 'male' as const,
-        shirtColor: '#0284c7',
-        accentColor: '#fde047',
-        hairColor: '#451a03',
-        drinkColor: '#ff2a85',
-        phase: 1.7,
-      },
-      {
-        x: 222 + bDx,
-        y: 1032 + bDy,
-        headingRad: -Math.PI / 2,
-        gender: 'female' as const,
-        shirtColor: '#a855f7',
-        accentColor: '#39ff14',
-        hairColor: '#1e1b4b',
-        drinkColor: '#7c2d12',
-        phase: 2.9,
-      },
-      {
-        x: 352 + bDx,
-        y: 1032 + bDy,
-        headingRad: -Math.PI / 2,
-        gender: 'male' as const,
-        shirtColor: '#16a34a',
-        accentColor: '#ffffff',
-        hairColor: '#78350f',
-        drinkColor: '#00f0ff',
-        phase: 4.1,
       },
       {
         x: 1852,
@@ -11914,6 +12196,7 @@ function renderSaniNurseSprite(
   ctx: CanvasRenderingContext2D,
   now: number,
   saniNurse: {
+    withStretcherTeam?: boolean;
     phase: 'idle' | 'running-in' | 'kneeling' | 'walking-out';
     x: number;
     y: number;
@@ -11927,6 +12210,67 @@ function renderSaniNurseSprite(
   const stride = isKneeling
     ? 0
     : Math.sin(now * (isRunning ? 0.022 : 0.012)) * (isRunning ? 8 : 4.5);
+
+  // On the 10th bump gag: Render the 2 Paramedics carrying a red-cross stretcher ("Trage") + escorting Skate-Guard whistling the track clear!
+  if (saniNurse.withStretcherTeam) {
+    ctx.save();
+    ctx.translate(saniNurse.x - 44, saniNurse.y + 18);
+
+    // Stretcher frame & orange emergency mat
+    ctx.fillStyle = '#0f172a';
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(-30, -7);
+    ctx.lineTo(30, -7);
+    ctx.moveTo(-30, 7);
+    ctx.lineTo(30, 7);
+    ctx.stroke();
+
+    ctx.fillStyle = '#f97316';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.roundRect(-22, -8, 44, 16, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    // White cross on stretcher
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-5, -2, 10, 4);
+    ctx.fillRect(-2, -5, 4, 10);
+
+    // 2 Paramedics at left (-28) and right (+28) ends of the stretcher
+    [-28, 28].forEach((px) => {
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = '#dc2626';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(px - 8, -11, 16, 22, 6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fde68a';
+      ctx.beginPath();
+      ctx.arc(px, 0, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Escorting Skate-Guard whistling the lane clear
+    const gx = 54;
+    const gy = -22;
+    ctx.fillStyle = '#070a10';
+    ctx.strokeStyle = '#fde047';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(gx - 9, gy - 11, 18, 22, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fde68a';
+    ctx.beginPath();
+    ctx.arc(gx, gy, 6.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 
   ctx.save();
   ctx.translate(saniNurse.x, saniNurse.y);
@@ -11987,7 +12331,7 @@ function renderSaniNurseSprite(
     ctx.lineTo(18 - careMotion, 5);
     ctx.stroke();
 
-    // Visible cyan 80s Ice-Pack ("🧊 KÜHLPACK") applied by Sani-Sandra
+    // Visible cyan 80s Ice-Pack ("🧊 KÜHLPACK") applied by Schwester Gudrun
     ctx.fillStyle = '#00f0ff';
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1.5;
@@ -12026,7 +12370,7 @@ function renderSaniNurseSprite(
       ctx,
       saniNurse.x,
       saniNurse.y - 36,
-      `➕ ${activeCrewNames.nurse || 'SANI-SANDRA'}`,
+      `➕ ${activeCrewNames.nurse || 'Schwester Gudrun'}`,
       '#ef4444'
     );
   }

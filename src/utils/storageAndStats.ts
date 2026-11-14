@@ -45,7 +45,48 @@ const KEYS = {
   ALPHA_BETA_CONFIG: 'palladium_alpha_beta_config_v1',
   ALPHA_BETA_SESSION: 'palladium_alpha_beta_session_v1',
   ALPHA_BROWSER_ID: 'palladium_alpha_browser_id_v1',
+  TESTER_FEEDBACK: 'palladium_tester_feedback_v1',
+  CERTIFICATES: 'palladium_certificates_v1',
+  FIRST_VISIT_SLUSH: 'palladium_first_visit_slush_v1',
 };
+
+export const PALLADIUM_SPIND_COLLECTIBLES = [
+  {
+    id: 'palladium_tshirt',
+    label: 'Original Palladium-Hanau T-Shirt',
+    icon: '👕',
+  },
+  {
+    id: 'neon_cap_80s',
+    label: '80er-Neon-Mütze',
+    icon: '🧢',
+  },
+  {
+    id: 'skate_bell',
+    label: 'Rollschuh-Glöckchen',
+    icon: '🔔',
+  },
+] as const;
+
+export function loadFirstVisitSlushClaimed(): boolean {
+  try {
+    return localStorage.getItem(KEYS.FIRST_VISIT_SLUSH) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function saveFirstVisitSlushClaimed(claimed: boolean = true): void {
+  try {
+    if (claimed) {
+      localStorage.setItem(KEYS.FIRST_VISIT_SLUSH, 'true');
+    } else {
+      localStorage.removeItem(KEYS.FIRST_VISIT_SLUSH);
+    }
+  } catch {
+    // ignore
+  }
+}
 
 export const MASTER_ADMIN_KEY = 'BOSS-PALLADIUM';
 
@@ -55,6 +96,18 @@ export interface AlphaBetaKeyEntry {
   redeemedBy?: string;
   redeemedAt?: string;
   redeemedByBrowserId?: string;
+  blocked?: boolean;
+}
+
+export type TesterFeedbackCategory = 'Bug' | 'Idee' | 'Lob';
+
+export interface TesterFeedbackItem {
+  id: string;
+  category: TesterFeedbackCategory;
+  text: string;
+  author: string;
+  keyUsed?: string;
+  createdAt: string;
 }
 
 export interface AlphaBetaAccessConfig {
@@ -128,6 +181,7 @@ export interface LockerPlayerSettings {
   discoSoundEnabled: boolean;
   vipDiscoSkatesEquipped: boolean;
   drinksInLocker: number;
+  collectibles?: string[];
 }
 
 export interface AdminPersistentSettings {
@@ -154,6 +208,13 @@ export interface AdminPersistentSettings {
   fullHallPutzlichtEnabled: boolean;
   pixel16BitFiguresEnabled: boolean;
   backgroundDancersEnabled?: boolean;
+  skateDirection?: 'ccw' | 'cw';
+  neonLightboxesEnabled?: boolean;
+  neonLightboxLine1?: string;
+  neonLightboxLine2?: string;
+  neonLightboxLine3?: string;
+  familyDayActive?: boolean;
+  liveEventActive?: boolean;
   concertLightingMode: ConcertLightingMode;
   liveArenaStyle: ArenaVisualStyle;
   crewNames: CrewNamesConfig;
@@ -539,6 +600,13 @@ export function loadAdminSettings(): AdminPersistentSettings {
     fullHallPutzlichtEnabled: false,
     pixel16BitFiguresEnabled: false,
     backgroundDancersEnabled: true,
+    skateDirection: 'ccw',
+    neonLightboxesEnabled: true,
+    neonLightboxLine1: 'RESIDENT DJ',
+    neonLightboxLine2: 'DJ MAGIC FORCE',
+    neonLightboxLine3: 'AB 21:00 UHR',
+    familyDayActive: false,
+    liveEventActive: false,
     concertLightingMode: 'auto',
     liveArenaStyle: 'classic-neon',
     crewNames: { ...DEFAULT_CREW_NAMES },
@@ -554,9 +622,16 @@ export function loadAdminSettings(): AdminPersistentSettings {
       ) {
         parsed.maintenanceReopenText = '🚀 ALPHA STARTING SOON';
       }
+      if (parsed.neonLightboxLine3 === 'AB 20:00 UHR') {
+        parsed.neonLightboxLine3 = 'AB 21:00 UHR';
+      }
+      const rawCrew = parsed.crewNames || {};
+      if (rawCrew.nurse === 'SANI-SANDRA') {
+        rawCrew.nurse = 'Schwester Gudrun';
+      }
       const mergedCrewNames: CrewNamesConfig = {
         ...DEFAULT_CREW_NAMES,
-        ...(parsed.crewNames || {}),
+        ...rawCrew,
       };
       const mergedJingleSlots: DjJingleSlot[] = DEFAULT_DJ_JINGLE_SLOTS.map(
         (defSlot) => {
@@ -1051,6 +1126,7 @@ export function loadLockerPlayerSettings(): LockerPlayerSettings {
     discoSoundEnabled: true, // Standardmäßig AN
     vipDiscoSkatesEquipped: false,
     drinksInLocker: 1,
+    collectibles: [],
   };
   try {
     const raw = localStorage.getItem(KEYS.LOCKER_SETTINGS);
@@ -1079,6 +1155,9 @@ export function loadLockerPlayerSettings(): LockerPlayerSettings {
           Number.isFinite(parsed.drinksInLocker)
             ? Math.max(0, Math.round(parsed.drinksInLocker))
             : defaults.drinksInLocker,
+        collectibles: Array.isArray(parsed.collectibles)
+          ? parsed.collectibles.map(String)
+          : [],
       };
     }
   } catch {
@@ -1138,6 +1217,7 @@ export function loadAlphaBetaConfig(): AlphaBetaAccessConfig {
                 typeof k.redeemedByBrowserId === 'string'
                   ? k.redeemedByBrowserId
                   : undefined,
+              blocked: Boolean(k.blocked),
             }))
         : [];
       return {
@@ -1181,6 +1261,7 @@ export function generateAlphaBetaKeys(
     added.push({
       key: candidate,
       status: 'free',
+      blocked: false,
     });
   }
   const next: AlphaBetaAccessConfig = {
@@ -1230,3 +1311,259 @@ export function saveLocalAlphaBetaSession(
     // ignore
   }
 }
+
+export function loadTesterFeedback(): TesterFeedbackItem[] {
+  try {
+    const raw = localStorage.getItem(KEYS.TESTER_FEEDBACK);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter(
+            (it: unknown): it is Record<string, unknown> =>
+              Boolean(it) &&
+              typeof it === 'object' &&
+              typeof (it as { text?: unknown }).text === 'string'
+          )
+          .map((it: Record<string, unknown>): TesterFeedbackItem => ({
+            id:
+              typeof it.id === 'string'
+                ? it.id
+                : `fb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            category:
+              it.category === 'Bug' ||
+              it.category === 'Idee' ||
+              it.category === 'Lob'
+                ? it.category
+                : 'Idee',
+            text: String(it.text),
+            author: typeof it.author === 'string' ? it.author : 'Tester',
+            createdAt: typeof it.createdAt === 'string' ? it.createdAt : '',
+          }));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+export function saveTesterFeedback(list: TesterFeedbackItem[]): void {
+  try {
+    localStorage.setItem(KEYS.TESTER_FEEDBACK, JSON.stringify(list));
+  } catch {
+    // ignore
+  }
+}
+
+export type CertificateId =
+  | 'stammgast_7'
+  | 'treue_14'
+  | 'family_day'
+  | 'fuehrerschein'
+  | 'koenig_der_luefte'
+  | 'fleiss_25'
+  | 'allrounder_50'
+  | 'legende_100'
+  | 'dj_livestream'
+  | 'liveband_abend';
+
+export interface CertificateDefinition {
+  id: CertificateId;
+  title: string;
+  subtitle: string;
+  description: string;
+  icon: string;
+  tier: 'bronze' | 'silver' | 'gold' | 'extreme-gold';
+  hasRedWaxSeal?: boolean;
+  isMultiTierEvent?: boolean;
+}
+
+export const PALLADIUM_CERTIFICATES: CertificateDefinition[] = [
+  {
+    id: 'stammgast_7',
+    title: 'Stammgast-Urkunde (7 Tage)',
+    subtitle: '7 Besuchstage im Palladium Hanau',
+    description:
+      'Verliehen für regelmäßige Besuche an 7 Tagen in der Palladium Roller-Disco Hanau.',
+    icon: '🎟️',
+    tier: 'silver',
+  },
+  {
+    id: 'treue_14',
+    title: 'Treue-Urkunde (14 Tage)',
+    subtitle: '14 Besuchstage im Palladium Hanau',
+    description:
+      'Verliehen für unerschütterliche 80er-Rollschuh-Treue an 14 Besuchstagen.',
+    icon: '🏅',
+    tier: 'gold',
+  },
+  {
+    id: 'family_day',
+    title: 'Palladium Family-Day-Urkunde',
+    subtitle: 'Sonntags- & Family-Day-Ehrengast',
+    description:
+      'Freigeschaltet für eine gemeinsame Fahrt am großen Palladium Family-Day oder an einem Sonntag.',
+    icon: '👨‍👩‍👧‍👦',
+    tier: 'silver',
+  },
+  {
+    id: 'fuehrerschein',
+    title: 'Palladium-Rollschuh-Führerschein',
+    subtitle: 'Offizielle Bahn-Prüfung (Slalom & Sprung)',
+    description:
+      'Amtlich geprüfte Beherrschung einer fehlerfreien Slalom- und Hindernissprung-Runde.',
+    icon: '🪪',
+    tier: 'gold',
+  },
+  {
+    id: 'koenig_der_luefte',
+    title: 'König der Lüfte',
+    subtitle: 'Extrem-Gold-Urkunde • Hochsprung-Rekord bei Volltempo',
+    description:
+      'Höchste Auszeichnung mit goldenem Ehrenrahmen und rotem Wachssiegel für das Meistern eines extrem schweren Hochsprung-Rekords bei voller Geschwindigkeit!',
+    icon: '👑',
+    tier: 'extreme-gold',
+    hasRedWaxSeal: true,
+  },
+  {
+    id: 'fleiss_25',
+    title: 'Palladium-Fleißbienchen (25 Aufgaben)',
+    subtitle: 'Meilenstein: 25 Aufgaben gemeistert',
+    description:
+      'Ausgezeichnet für 25 erfolgreich abgeschlossene Hallen-Aufgaben und Rundgang-Stationen.',
+    icon: '🐝',
+    tier: 'bronze',
+  },
+  {
+    id: 'allrounder_50',
+    title: 'Hallen-Allrounder (50 Aufgaben)',
+    subtitle: 'Meilenstein: 50 Aufgaben gemeistert',
+    description:
+      'Ausgezeichnet für 50 erfolgreich abgeschlossene Aufgaben auf Parkett, Bühne und im Ballspiel.',
+    icon: '🌟',
+    tier: 'silver',
+  },
+  {
+    id: 'legende_100',
+    title: 'Palladium-Legende (100 Aufgaben)',
+    subtitle: 'Gold-Urkunde • 100 Aufgaben gemeistert',
+    description:
+      'Ehren-Gold-Urkunde für 100 abgeschlossene Aufgaben – wahrer Meister des Palladium Hanau!',
+    icon: '🏆',
+    tier: 'gold',
+    hasRedWaxSeal: true,
+  },
+  {
+    id: 'dj_livestream',
+    title: 'DJ-Livestream-Teilnahme',
+    subtitle: 'Mehrstufige Event-Urkunde • Bronze (1x), Silber (3x), Gold (5x)',
+    description:
+      'Verliehen für deine Live-Teilnahme am DJ-Livestream ab 21:00 Uhr oder bei aktivem Live-Event im Palladium Hanau.',
+    icon: '🎧',
+    tier: 'gold',
+    isMultiTierEvent: true,
+  },
+  {
+    id: 'liveband_abend',
+    title: 'Liveband-Abend',
+    subtitle: 'Mehrstufige Event-Urkunde • Bronze (1x), Silber (3x), Gold (5x)',
+    description:
+      'Verliehen für deine Teilnahme an legendären 80er-Liveband-Konzertabenden vor der geschlossenen Mittelbühne.',
+    icon: '🎸',
+    tier: 'gold',
+    isMultiTierEvent: true,
+  },
+];
+
+export interface PalladiumCertificatesState {
+  visitDates: string[];
+  totalTasksCompleted: number;
+  cleanSlalomDone: boolean;
+  cleanJumpDone: boolean;
+  highSpeedJumpDone: boolean;
+  djLivestreamCount?: number;
+  livebandCount?: number;
+  djLivestreamSessions?: string[];
+  livebandSessions?: string[];
+  unlocked: Partial<
+    Record<
+      CertificateId,
+      {
+        unlocked?: boolean;
+        unlockedAt: string;
+        holderName?: string;
+        tierLevel?: 'bronze' | 'silver' | 'gold';
+      }
+    >
+  >;
+}
+
+export function loadCertificatesState(): PalladiumCertificatesState {
+  const today = getTodayDateString();
+  const stampCard = loadStampCard();
+  const defaultDates = Array.from(
+    new Set([...(stampCard.stampedDates || []), today])
+  );
+  const fallback: PalladiumCertificatesState = {
+    visitDates: defaultDates,
+    totalTasksCompleted: 0,
+    cleanSlalomDone: false,
+    cleanJumpDone: false,
+    highSpeedJumpDone: false,
+    djLivestreamCount: 0,
+    livebandCount: 0,
+    djLivestreamSessions: [],
+    livebandSessions: [],
+    unlocked: {},
+  };
+  try {
+    const raw = localStorage.getItem(KEYS.CERTIFICATES);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const mergedDates = Array.from(
+        new Set([
+          ...defaultDates,
+          ...(Array.isArray(parsed.visitDates)
+            ? parsed.visitDates.map(String)
+            : []),
+        ])
+      );
+      return {
+        visitDates: mergedDates,
+        totalTasksCompleted: Math.max(
+          0,
+          Number(parsed.totalTasksCompleted) || 0
+        ),
+        cleanSlalomDone: Boolean(parsed.cleanSlalomDone),
+        cleanJumpDone: Boolean(parsed.cleanJumpDone),
+        highSpeedJumpDone: Boolean(parsed.highSpeedJumpDone),
+        djLivestreamCount: Math.max(0, Number(parsed.djLivestreamCount) || 0),
+        livebandCount: Math.max(0, Number(parsed.livebandCount) || 0),
+        djLivestreamSessions: Array.isArray(parsed.djLivestreamSessions)
+          ? parsed.djLivestreamSessions.map(String)
+          : [],
+        livebandSessions: Array.isArray(parsed.livebandSessions)
+          ? parsed.livebandSessions.map(String)
+          : [],
+        unlocked:
+          parsed.unlocked && typeof parsed.unlocked === 'object'
+            ? parsed.unlocked
+            : {},
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return fallback;
+}
+
+export function saveCertificatesState(state: PalladiumCertificatesState): void {
+  try {
+    localStorage.setItem(KEYS.CERTIFICATES, JSON.stringify(state));
+  } catch {
+    // ignore
+  }
+}
+
+
