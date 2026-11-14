@@ -7,9 +7,50 @@
 // 1. EDITIERBARE TOP-LEVEL KONSTANTEN (ADMIN-PIN & GEISTER-SKATER)
 // ============================================================================
 
-export const APP_VERSION_LABEL = 'Update V0.3 + V0.4 • Aktualisiert am 13.11.2026';
+export const APP_VERSION_LABEL = 'Update V0.5 • Aktualisiert am 14.11.2026';
 
 export const ADMIN_PIN = '1986';
+
+// === START LAYOUT-KONFIGURATION ===
+export const DEFAULT_LAYOUT = {
+  modules: {
+    proShop: { x: 1310, y: 978, w: 168, h: 88, rot: 0, label: 'PRO-SHOP' },
+    skateRental: { x: 930, y: 978, w: 364, h: 88, rot: 0, label: 'ROLLSCHUHVERLEIH' },
+    bistro: { x: 24, y: 795, w: 730, h: 271, rot: 0, label: 'SLUSH & BLOB' },
+    cashier: { x: 1808, y: 742, w: 94, h: 132, rot: 0, label: 'KASSE & EINGANG' },
+    centerStage: { x: 685, y: 342, w: 630, h: 284, rot: 0, label: 'MITTEL-BÜHNE' },
+    djTower: { x: 16, y: 6, w: 426, h: 254, rot: 0, label: 'DISCO-TOWER / BACKSTAGE' },
+    baffleLeft: { x: 516, y: 855, w: 48, h: 10, rot: 0, label: 'SCHLEUSEN-BALKEN 1 (LINKS)' },
+    baffleRight: { x: 1386, y: 855, w: 48, h: 10, rot: 0, label: 'SCHLEUSEN-BALKEN 2 (RECHTS)' },
+    lockers: { x: 1515, y: 982, w: 220, h: 42, rot: 0, label: 'SPINDE' },
+  },
+  npcAnchors: {
+    'speed-1': { name: 'Paceline-Leader Kai', homeX: 1604, homeY: 329, orbitAngle: 0.48, laneRadiusX: 668, laneRadiusY: 336 },
+    'speed-2': { name: 'Aero-Anja', homeX: 1641, homeY: 366, orbitAngle: 0.36, laneRadiusX: 668, laneRadiusY: 336 },
+    'speed-3': { name: 'Turbo-Marek', homeX: 1666, homeY: 404, orbitAngle: 0.24, laneRadiusX: 668, laneRadiusY: 336 },
+    'speed-4': { name: 'Sprint-Sonja', homeX: 1681, homeY: 444, orbitAngle: 0.12, laneRadiusX: 668, laneRadiusY: 336 },
+    'speed-5': { name: 'Raketen-Ralf', homeX: 1686, homeY: 484, orbitAngle: 0.0, laneRadiusX: 668, laneRadiusY: 336 },
+    'speed-6': { name: 'Blitz-Bianca', homeX: 1681, homeY: 524, orbitAngle: -0.12, laneRadiusX: 668, laneRadiusY: 336 },
+    'guard-1': { name: 'SKATE GUARD Manni', homeX: 1198, homeY: 240, orbitAngle: 1.2, laneRadiusX: 542, laneRadiusY: 262 },
+    'guard-2': { name: 'SKATE GUARD Biggi', homeX: 803, homeY: 728, orbitAngle: 4.34, laneRadiusX: 542, laneRadiusY: 262 },
+    'reg-1': { name: 'Disco-Dieter', homeX: 747, homeY: 273, orbitAngle: 2.1, laneRadiusX: 495, laneRadiusY: 245 },
+    'reg-2': { name: 'Neon-Nadine', homeX: 521, homeY: 544, orbitAngle: 3.4, laneRadiusX: 472, laneRadiusY: 234 },
+    'reg-3': { name: 'WCMX-Marco', homeX: 1197, homeY: 719, orbitAngle: 5.1, laneRadiusX: 518, laneRadiusY: 254 },
+    'reg-4': { name: 'Slalom-Steffi', homeX: 1293, homeY: 305, orbitAngle: 0.9, laneRadiusX: 462, laneRadiusY: 228 },
+    'reg-5': { name: 'Boogie-Bernd', homeX: 446, homeY: 376, orbitAngle: 2.75, laneRadiusX: 575, laneRadiusY: 284 },
+    'reg-6': { name: 'Glitter-Gabi', homeX: 625, homeY: 719, orbitAngle: 4.05, laneRadiusX: 602, laneRadiusY: 298 },
+    'reg-7': { name: 'Synth-Sven', homeX: 1013, homeY: 180, orbitAngle: 1.55, laneRadiusX: 615, laneRadiusY: 304 },
+    'reg-8': { name: 'Lady-Lisa', homeX: 1466, homeY: 647, orbitAngle: 5.65, laneRadiusX: 560, laneRadiusY: 276 },
+    'reg-9': { name: 'Retro-Rico', homeX: 1492, homeY: 372, orbitAngle: 0.45, laneRadiusX: 525, laneRadiusY: 258 },
+    'reg-10': { name: 'Disco-Dora', homeX: 468, homeY: 461, orbitAngle: 3.05, laneRadiusX: 508, laneRadiusY: 250 },
+    'reg-11': { name: 'Funky-Frank', homeX: 1022, homeY: 774, orbitAngle: 4.75, laneRadiusX: 588, laneRadiusY: 290 },
+    'reg-12': { name: 'Wave-Wendy', homeX: 874, homeY: 271, orbitAngle: 1.85, laneRadiusX: 452, laneRadiusY: 222 },
+    'reg-13': { name: 'Kassetten-Karsten', homeX: 452, homeY: 655, orbitAngle: 3.72, laneRadiusX: 632, laneRadiusY: 312 },
+    'reg-14': { name: 'Pop-Petra', homeX: 1609, homeY: 585, orbitAngle: 5.95, laneRadiusX: 622, laneRadiusY: 308 },
+    'reg-15': { name: 'Break-Boris', homeX: 577, homeY: 306, orbitAngle: 2.42, laneRadiusX: 548, laneRadiusY: 270 },
+  },
+};
+// === ENDE LAYOUT-KONFIGURATION ===
 
 /**
  * Spezial-Skater im Retro-Geisterschema (Selektives No-Clip auf der Bahn).
@@ -157,12 +198,25 @@ export type ConcertLightingMode = 'auto' | 'on' | 'off';
 export type ArenaVisualStyle = 'classic-neon' | 'palladium-1989' | 'pixel-16bit';
 export type BandSkinToneMode = 'black' | 'white' | 'mixed';
 export type BandGenderMode = 'male' | 'female' | 'mixed';
-export type HallGameMode = 'free-skate' | 'ballspiel' | 'slalom' | 'stuhlsprung';
+export type HallGameMode =
+  | 'free-skate'
+  | 'ballspiel'
+  | 'slalom'
+  | 'stuhlsprung'
+  | 'springerstaffel';
+export type NameDisplayMode = 'focus' | 'all' | 'off';
 export type CameraViewMode = 'top-down' | 'chase' | 'ego';
 export type PlayerCharacterMode = 'skater' | 'wheelchair';
 export type NeonUnderglowColor = 'pink' | 'cyan' | 'green' | 'gold';
 export type NeonWristbandColor = 'pink' | 'cyan' | 'green' | 'gold';
 export type TrickMoveId = 'spin360' | 'backward' | 'flamingo' | 'starjump';
+export type SkateCharmId = 'bell' | 'teddy' | 'pompons' | 'dice';
+export type DjSoundboardEffectId =
+  | 'airhorn'
+  | 'scratch'
+  | 'laser'
+  | 'fog-hiss'
+  | 'applause';
 
 export interface ProShopUpgradesState {
   bearingsAbec9: boolean;
@@ -178,6 +232,15 @@ export interface ProShopUpgradesState {
     flamingo: boolean;
     starjump: boolean;
   };
+  unlockedCharms?: {
+    bell: boolean;
+    teddy: boolean;
+    pompons: boolean;
+    dice: boolean;
+  };
+  activeCharm?: SkateCharmId | null;
+  spentPoints?: number;
+  bonusPoints?: number;
 }
 
 export type ChallengeId =
@@ -353,43 +416,44 @@ export const ARENA_LAYOUT = {
     },
   },
 
-  // Exakt ZWEI versetzte Schleusen-Banden (unten links & unten rechts):
-  // - Türkise Hauptbande hat jeweils eine saubere Öffnung (ohne braune Pfosten/Türen/grüne Balken)
-  // - Leicht nach außen versetzt (y = 888) steht direkt parallel vor der Lücke ein kurzes Prallschutz-Bandenstück
-  //   im selben türkisen Banden-Design, sodass man links und rechts um das versetzte Bandenstück herum ein- und ausfährt.
+  // Exakt ZWEI Schleusen-Banden (unten links & unten rechts):
+  // - 120 px breite Öffnung in der Hauptbande (y = 860)
+  // - Leuchtend cyane Schleusen-Balken direkt auf Höhe der unteren Außenbande (baffleY = 860),
+  //   sodass die untere Gerade der Bahn komplett frei befahrbar ist!
   gates: {
-    // Schleusen-Bande 2 (Unten rechts über „PRO-SHOP (PALLADIUMANER)“)
+    // Schleusen-Bande 2 (Unten rechts über „PRO-SHOP“)
     bottomRightEntrance: {
-      xStart: 1345,
-      xEnd: 1525,
+      xStart: 1344,
+      xEnd: 1476,
       y: 860,
-      width: 180,
-      baffleXStart: 1368,
-      baffleXEnd: 1502,
-      baffleY: 888,
+      width: 132,
+      baffleXStart: 1386,
+      baffleXEnd: 1434,
+      baffleY: 860,
     },
-    // (Vertikale linke Außenbande x = 290 ist jetzt komplett durchgängig geschlossen!)
+    // (Vertikale linke Außenbande x = 290 ist komplett durchgängig geschlossen!)
     topLeftBistro: {
       x: 290,
       yStart: 615,
       yEnd: 615,
       height: 0,
     },
-    // Schleusen-Bande 1 (Unten links über „SLUSH & BLOBA“)
+    // Schleusen-Bande 1 (Unten links über „SLUSH & BLOB“)
     bottomLeftSchwingtuer: {
-      xStart: 485,
-      xEnd: 655,
+      xStart: 474,
+      xEnd: 606,
       y: 860,
-      width: 170,
-      baffleXStart: 508,
-      baffleXEnd: 632,
-      baffleY: 888,
+      width: 132,
+      baffleXStart: 516,
+      baffleXEnd: 564,
+      baffleY: 860,
     },
+    // Dynamische Schleusen-Wegpunkte direkt im freien Durchgang
+    gateLeft: { x: 494, y: 860 },
+    gateRight: { x: 1456, y: 860 },
   },
 
   // 1) Leicht gebogener (viertelkreisförmig geschwungener) Eck-DJ-Tower tief hinten in der oberen linken Hallenecke:
-  // Schmiegt sich direkt ohne Leerraum an die obere (y = 6) und linke (x = 16) Hallen-Außenwand an!
-  // Seine vordere, sanft gebogene Kanzel-Kante verbindet (290, 260) und (442, 108) als harmonischer Viertelbogen.
   djTower: {
     cornerX: 16,
     cornerY: 6,
@@ -402,7 +466,6 @@ export const ARENA_LAYOUT = {
     bevelLeftY: 260,
     bevelTopX: 442,
     bevelTopY: 108,
-    // Kontrollpunkt für den nach hinten in die Ecke gewölbten Viertelkreis-Bogen der Kanzel-Front
     curveCtrlX: 308,
     curveCtrlY: 126,
     x: 16,
@@ -417,13 +480,12 @@ export const ARENA_LAYOUT = {
     egoTriggerRadius: 210,
   },
 
-  // 2) SPIEGELWAND - JAM-DANCE: Um 90° gedreht (senkrecht/hochkant) direkt bündig an der linken Hallen-Außenwand
-  // unterhalb des geschwungenen DJ-Towers (Spiegelfläche zeigt nach rechts zur Halle!)
+  // 2) SPIEGELWAND - JAM-DANCE
   mirrorWall: {
     x: 16,
     y: 274,
-    width: 28, // Hochkant an der linken Wand!
-    height: 365, // Von y = 274 bis y = 639
+    width: 28,
+    height: 365,
     danceFloorX: 128,
     danceFloorY: 455,
   },
@@ -436,9 +498,7 @@ export const ARENA_LAYOUT = {
     height: 98,
   },
 
-  // Rechte Hallenwand: Drei braune Holzlatten-Sitzbänke ganz nach hinten an die rechte Außenwand gerückt,
-  // mit Lücke in der Mitte (y = 385..545) für die breite Metall-Doppeltür ("TECHNIK & EQUIPMENT" + "NOTAUSGANG")
-  // und unten ab y = 685 schlichte 80er-Glasfront mit Eingangs-Gang zwischen Kassenhäuschen und Security-Sammy!
+  // Rechte Hallenwand: Drei braune Holzlatten-Sitzbänke ganz nach hinten an die rechte Außenwand gerückt
   rightWallBenches: [
     { id: 'right-bench-1', x: 1848, y: 132, width: 48, height: 112 },
     { id: 'right-bench-2', x: 1848, y: 262, width: 48, height: 112 },
@@ -453,24 +513,24 @@ export const ARENA_LAYOUT = {
   },
 
   // 3) Untere & rechte Hallenachse:
-  // A) 1) KOMPAKTES KASSENHÄUSCHEN MIT SEITLICHEM SCHALTER RECHTS ZUM EINGANGS-GANG & SECURITY-SPAWN GEGENÜBER:
+  // A) 1) KASSE & EINGANG GANZ AN DER RECHTEN AUSSENWAND (x = 1808..1902), Kassenfenster links nach innen zum breiten Durchgang!
   bottomEntrance: {
     cashierBooth: {
-      x: 1648,
+      x: 1808,
       y: 742,
-      width: 102,
+      width: 94,
       height: 132,
-      centerX: 1699,
+      centerX: 1855,
       centerY: 808,
-      angleRad: 0, // Kompakt, Kassenschalter auf der rechten Seite zum Eingangs-Gang!
+      angleRad: 0,
     },
     entranceSpawn: {
-      x: 1806,
+      x: 1762,
       y: 808,
-      securityX: 1862,
+      securityX: 1718,
       securityY: 808,
     },
-    spinWarmupZone: { x: 1658, y: 842, radius: 52 },
+    spinWarmupZone: { x: -999, y: -999, radius: 0 },
     woodenSlatBenches: [] as {
       id: string;
       x: number;
@@ -480,24 +540,27 @@ export const ARENA_LAYOUT = {
     }[],
   },
 
-  // B) PRO-SHOP & ROLLSCHUHVERLEIH: Deutlich weiter nach rechts gerückt, direkt bündig links neben die schräge Kasse!
+  // B) KOMPAKTER MINI-PRO-SHOP (~48% Breite) & UM ~32% VERKLEINERTER ROLLSCHUHVERLEIH (118 px breiter unterer Gang y = 860..978!)
   proShopAndRental: {
-    // 2) Pro-Shop & Tuning [E] (unten rechts direkt links neben der schrägen Kasse)
-    proShopBounds: { x: 1300, y: 928, width: 335, height: 136 },
-    proShopCounter: { x: 1320, y: 936, width: 295, height: 42 },
-    proShopInteractX: 1468,
-    proShopInteractY: 902,
-    proShopInteractRadius: 100,
+    // 2) Kompakter Mini-Stand Pro-Shop & Tuning [E] (ohne großes ovales Emblem)
+    proShopBounds: { x: 1310, y: 978, width: 168, height: 88 },
+    proShopCounter: { x: 1322, y: 984, width: 144, height: 32 },
+    proShopInteractX: 1394,
+    proShopInteractY: 948,
+    proShopInteractRadius: 82,
 
-    // Trennwand zwischen Pro-Shop (rechts) und Rollschuhverleih (links)
-    dividerWall: { x: 1280, y: 928, width: 20, height: 136 },
+    // Schmale Trennwand zwischen Pro-Shop (rechts) und Rollschuhverleih (links)
+    dividerWall: { x: 1294, y: 978, width: 16, height: 88 },
 
-    // 3) Rollschuhverleih (direkt links neben dem Pro-Shop auf derselben Grundlinie y = 928 .. 1064)
-    rentalBounds: { x: 750, y: 928, width: 530, height: 136 },
-    rentalCounter: { x: 772, y: 936, width: 486, height: 40 },
+    // 3) Um ~32% verkleinerter Rollschuhverleih mit Schuhregalen ganz an der Rückwand (mit Kollisionsschutz) & Personal im Gang davor
+    rentalBounds: { x: 930, y: 978, width: 364, height: 88 },
+    rentalCounter: { x: 946, y: 982, width: 332, height: 28 },
+    rentalInteractX: 1112,
+    rentalInteractY: 948,
+    rentalInteractRadius: 125,
     rentalShelves: [
-      { x: 772, y: 1020, width: 232, height: 32 },
-      { x: 1026, y: 1020, width: 232, height: 32 },
+      { x: 946, y: 1038, width: 158, height: 24 },
+      { x: 1120, y: 1038, width: 158, height: 24 },
     ],
 
     oppositeBenches: [] as {
@@ -509,33 +572,499 @@ export const ARENA_LAYOUT = {
     }[],
   },
 
-  // C) 4) BISTRO & GARNET-LOUNGE: In der unteren linken Ecke:
-  // - Die SLUSH & BLOBA [E]-Theke samt THEKEN-CREW ist weiter nach hinten Richtung untere Außenwand gerückt,
-  //   sodass vorne zur blauen Bahn-Bande hin ein breiter, barrierefreier Durchgang (auch für den Rollstuhl) frei bleibt!
-  // - Hinten an der Wand stehen helle 80er-Marmortische mit schwarzen Plastikstühlen (statt der langen roten Sitzbank).
-  // - Hinten in der unteren linken Ecke leuchtet ein kompaktes 80er-WC-Schild.
+  // C) 4) 80ER-BISTRO & GARNET-LOUNGE (124 px breiter Hauptgang y = 860..984 + 80er-Sitzgruppe mit mind. 75 px freien Wegen!)
   bistro: {
-    bounds: { x: 24, y: 785, width: 706, height: 279 },
-    wcSign: { x: 38, y: 796, width: 88, height: 32 },
-    // Weiter nach hinten Richtung untere Außenwand verschobene Theke -> breiter barrierefreier Durchgang vorne!
-    counter: { x: 375, y: 956, width: 335, height: 42 },
-    slushMachine: { x: 396, y: 960, width: 56, height: 34 },
-    blobaColaTap: { x: 474, y: 960, width: 58, height: 34 },
-    interactX: 542,
-    interactY: 922,
-    interactRadius: 95,
-    // Helle 80er-Marmortische mit schwarzen Plastikstühlen ganz hinten an der Wand
+    bounds: { x: 24, y: 795, width: 730, height: 271 },
+    wcSign: { x: 38, y: 802, width: 88, height: 30 },
+    counter: { x: 430, y: 984, width: 310, height: 38 },
+    slushMachine: { x: 448, y: 986, width: 52, height: 30 },
+    blobaColaTap: { x: 520, y: 986, width: 56, height: 30 },
+    interactX: 585,
+    interactY: 948,
+    interactRadius: 85,
+    // 80er-Sitzgruppe im Vorbereich mit Slush-Becher-Deko und >= 75 px freien Durchgängen
     marbleTables: [
-      { id: 'marble-table-1', x: 96, y: 906, radius: 26 },
-      { id: 'marble-table-2', x: 96, y: 1008, radius: 26 },
-      { id: 'marble-table-3', x: 242, y: 1008, radius: 26 },
+      { id: 'marble-table-1', x: 105, y: 942, radius: 20 },
+      { id: 'marble-table-2', x: 235, y: 942, radius: 20 },
+      { id: 'marble-table-3', x: 355, y: 942, radius: 20 },
     ],
-    wallBenches: [] as {
-      id: string;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    }[],
+    wallBenches: [
+      { id: 'bistro-bench-1', x: 68, y: 1024, width: 74, height: 26 },
+      { id: 'bistro-bench-2', x: 198, y: 1024, width: 74, height: 26 },
+      { id: 'bistro-bench-3', x: 318, y: 1024, width: 74, height: 26 },
+    ],
+  },
+
+  // D) 5) 80ER-SPINDREIHE („SPINDE“ — grau-blaue Metall-Schließfächer mit Lüftungsschlitzen & Nummern)
+  lockers: {
+    x: 1515,
+    y: 982,
+    width: 220,
+    height: 42,
+    rot: 0,
   },
 };
+
+export type EditableModuleId =
+  | 'proShop'
+  | 'skateRental'
+  | 'bistro'
+  | 'cashier'
+  | 'centerStage'
+  | 'djTower'
+  | 'baffleLeft'
+  | 'baffleRight'
+  | 'lockers';
+
+export interface EditableModuleRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rot?: number;
+  label: string;
+}
+
+export interface CustomNpcAnchor {
+  id?: string;
+  name?: string;
+  x?: number;
+  y?: number;
+  homeX: number;
+  homeY: number;
+  orbitAngle?: number;
+  laneRadiusX?: number;
+  laneRadiusY?: number;
+  isStationary?: boolean;
+}
+
+export interface CustomArenaLayoutState {
+  modules: Record<EditableModuleId, EditableModuleRect>;
+  npcAnchors: Record<string, CustomNpcAnchor>;
+}
+
+export const DEFAULT_CUSTOM_ARENA_LAYOUT: CustomArenaLayoutState = {
+  modules: {
+    proShop: {
+      x: DEFAULT_LAYOUT.modules.proShop.x,
+      y: DEFAULT_LAYOUT.modules.proShop.y,
+      width: DEFAULT_LAYOUT.modules.proShop.w,
+      height: DEFAULT_LAYOUT.modules.proShop.h,
+      rot: DEFAULT_LAYOUT.modules.proShop.rot,
+      label: DEFAULT_LAYOUT.modules.proShop.label,
+    },
+    skateRental: {
+      x: DEFAULT_LAYOUT.modules.skateRental.x,
+      y: DEFAULT_LAYOUT.modules.skateRental.y,
+      width: DEFAULT_LAYOUT.modules.skateRental.w,
+      height: DEFAULT_LAYOUT.modules.skateRental.h,
+      rot: DEFAULT_LAYOUT.modules.skateRental.rot,
+      label: DEFAULT_LAYOUT.modules.skateRental.label,
+    },
+    bistro: {
+      x: DEFAULT_LAYOUT.modules.bistro.x,
+      y: DEFAULT_LAYOUT.modules.bistro.y,
+      width: DEFAULT_LAYOUT.modules.bistro.w,
+      height: DEFAULT_LAYOUT.modules.bistro.h,
+      rot: DEFAULT_LAYOUT.modules.bistro.rot,
+      label: DEFAULT_LAYOUT.modules.bistro.label,
+    },
+    cashier: {
+      x: DEFAULT_LAYOUT.modules.cashier.x,
+      y: DEFAULT_LAYOUT.modules.cashier.y,
+      width: DEFAULT_LAYOUT.modules.cashier.w,
+      height: DEFAULT_LAYOUT.modules.cashier.h,
+      rot: DEFAULT_LAYOUT.modules.cashier.rot,
+      label: DEFAULT_LAYOUT.modules.cashier.label,
+    },
+    centerStage: {
+      x: DEFAULT_LAYOUT.modules.centerStage.x,
+      y: DEFAULT_LAYOUT.modules.centerStage.y,
+      width: DEFAULT_LAYOUT.modules.centerStage.w,
+      height: DEFAULT_LAYOUT.modules.centerStage.h,
+      rot: DEFAULT_LAYOUT.modules.centerStage.rot,
+      label: DEFAULT_LAYOUT.modules.centerStage.label,
+    },
+    djTower: {
+      x: DEFAULT_LAYOUT.modules.djTower.x,
+      y: DEFAULT_LAYOUT.modules.djTower.y,
+      width: DEFAULT_LAYOUT.modules.djTower.w,
+      height: DEFAULT_LAYOUT.modules.djTower.h,
+      rot: DEFAULT_LAYOUT.modules.djTower.rot,
+      label: DEFAULT_LAYOUT.modules.djTower.label,
+    },
+    baffleLeft: {
+      x: DEFAULT_LAYOUT.modules.baffleLeft.x,
+      y: DEFAULT_LAYOUT.modules.baffleLeft.y,
+      width: DEFAULT_LAYOUT.modules.baffleLeft.w,
+      height: DEFAULT_LAYOUT.modules.baffleLeft.h,
+      rot: DEFAULT_LAYOUT.modules.baffleLeft.rot,
+      label: DEFAULT_LAYOUT.modules.baffleLeft.label,
+    },
+    baffleRight: {
+      x: DEFAULT_LAYOUT.modules.baffleRight.x,
+      y: DEFAULT_LAYOUT.modules.baffleRight.y,
+      width: DEFAULT_LAYOUT.modules.baffleRight.w,
+      height: DEFAULT_LAYOUT.modules.baffleRight.h,
+      rot: DEFAULT_LAYOUT.modules.baffleRight.rot,
+      label: DEFAULT_LAYOUT.modules.baffleRight.label,
+    },
+    lockers: {
+      x: DEFAULT_LAYOUT.modules.lockers.x,
+      y: DEFAULT_LAYOUT.modules.lockers.y,
+      width: DEFAULT_LAYOUT.modules.lockers.w,
+      height: DEFAULT_LAYOUT.modules.lockers.h,
+      rot: DEFAULT_LAYOUT.modules.lockers.rot,
+      label: DEFAULT_LAYOUT.modules.lockers.label,
+    },
+  },
+  npcAnchors: { ...DEFAULT_LAYOUT.npcAnchors },
+};
+
+/**
+ * Computes the effective axis-aligned bounding box of a module accounting for its
+ * current width (`w`), height (`h`), and rotation (`rot` in degrees around its center).
+ */
+export function getModuleCollisionRect(
+  mod: Pick<EditableModuleRect, 'x' | 'y' | 'width' | 'height' | 'rot'>
+): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  cx: number;
+  cy: number;
+  rot: number;
+} {
+  const rot = ((mod.rot || 0) % 360 + 360) % 360;
+  const cx = mod.x + mod.width / 2;
+  const cy = mod.y + mod.height / 2;
+  if (rot === 0 || rot === 180) {
+    return {
+      x: Math.round(mod.x),
+      y: Math.round(mod.y),
+      width: Math.round(mod.width),
+      height: Math.round(mod.height),
+      cx,
+      cy,
+      rot,
+    };
+  }
+  const rad = (rot * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  const effW = Math.max(10, Math.round(mod.width * cos + mod.height * sin));
+  const effH = Math.max(10, Math.round(mod.width * sin + mod.height * cos));
+  return {
+    x: Math.round(cx - effW / 2),
+    y: Math.round(cy - effH / 2),
+    width: effW,
+    height: effH,
+    cx,
+    cy,
+    rot,
+  };
+}
+
+/**
+ * Generates the complete JS block between `// === START LAYOUT-KONFIGURATION ===`
+ * and `// === ENDE LAYOUT-KONFIGURATION ===` for 1-click Copy & Paste into the HTML/TS editor.
+ */
+export function formatLayoutConfigCodeBlock(
+  custom?: CustomArenaLayoutState | null
+): string {
+  const mods = custom?.modules || DEFAULT_CUSTOM_ARENA_LAYOUT.modules;
+  const anchors = custom?.npcAnchors || DEFAULT_CUSTOM_ARENA_LAYOUT.npcAnchors;
+  const modOrder: EditableModuleId[] = [
+    'proShop',
+    'skateRental',
+    'bistro',
+    'cashier',
+    'centerStage',
+    'djTower',
+    'baffleLeft',
+    'baffleRight',
+    'lockers',
+  ];
+
+  const modLines = modOrder.map((id) => {
+    const m = mods[id] || DEFAULT_CUSTOM_ARENA_LAYOUT.modules[id];
+    const x = Math.round(m.x);
+    const y = Math.round(m.y);
+    const w = Math.round(m.width);
+    const h = Math.round(m.height);
+    const rot = Math.round(m.rot || 0);
+    return `    ${id}: { x: ${x}, y: ${y}, w: ${w}, h: ${h}, rot: ${rot}, label: '${m.label}' },`;
+  });
+
+  const mergedNpcKeys = Array.from(
+    new Set([
+      ...Object.keys(DEFAULT_LAYOUT.npcAnchors),
+      ...Object.keys(anchors),
+    ])
+  );
+  const npcLines = mergedNpcKeys.map((id) => {
+    const def = (DEFAULT_LAYOUT.npcAnchors as Record<string, CustomNpcAnchor>)[id];
+    const cur = anchors[id] || def;
+    const name = cur?.name || def?.name || id;
+    const hx = Math.round(cur?.homeX ?? def?.homeX ?? 1000);
+    const hy = Math.round(cur?.homeY ?? def?.homeY ?? 484);
+    const oa = Number((cur?.orbitAngle ?? def?.orbitAngle ?? 0).toFixed(2));
+    const rx = Math.round(cur?.laneRadiusX ?? def?.laneRadiusX ?? 548);
+    const ry = Math.round(cur?.laneRadiusY ?? def?.laneRadiusY ?? 270);
+    return `    '${id}': { name: '${name}', homeX: ${hx}, homeY: ${hy}, orbitAngle: ${oa}, laneRadiusX: ${rx}, laneRadiusY: ${ry} },`;
+  });
+
+  return [
+    '// === START LAYOUT-KONFIGURATION ===',
+    'export const DEFAULT_LAYOUT = {',
+    '  modules: {',
+    ...modLines,
+    '  },',
+    '  npcAnchors: {',
+    ...npcLines,
+    '  },',
+    '};',
+    '// === ENDE LAYOUT-KONFIGURATION ===',
+  ].join('\n');
+}
+
+/**
+ * Single Source of Truth updater: dynamically recalculates all module bounds,
+ * collision boxes, sub-elements, and [E] interaction zones directly from the
+ * active CustomArenaLayoutState so zero static "ghost walls" ever remain!
+ */
+export function applyCustomArenaLayout(
+  custom?: CustomArenaLayoutState | null
+): void {
+  const mods = custom?.modules || DEFAULT_CUSTOM_ARENA_LAYOUT.modules;
+
+  // 1. PRO-SHOP
+  const psRaw = mods.proShop || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.proShop;
+  const ps = getModuleCollisionRect(psRaw);
+  ARENA_LAYOUT.proShopAndRental.proShopBounds = {
+    x: ps.x,
+    y: ps.y,
+    width: ps.width,
+    height: ps.height,
+  };
+  ARENA_LAYOUT.proShopAndRental.proShopCounter = {
+    x: ps.x + Math.round(ps.width * 0.07),
+    y: ps.y + Math.round(ps.height * 0.07),
+    width: Math.max(36, Math.round(ps.width * 0.86)),
+    height: Math.max(20, Math.round(ps.height * 0.36)),
+  };
+  ARENA_LAYOUT.proShopAndRental.proShopInteractX =
+    ps.x + Math.round(ps.width / 2);
+  ARENA_LAYOUT.proShopAndRental.proShopInteractY = ps.y - 30;
+  ARENA_LAYOUT.proShopAndRental.proShopInteractRadius = Math.max(
+    72,
+    Math.round(Math.max(ps.width, ps.height) * 0.5)
+  );
+
+  // 2. ROLLSCHUHVERLEIH
+  const srRaw =
+    mods.skateRental || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.skateRental;
+  const sr = getModuleCollisionRect(srRaw);
+  ARENA_LAYOUT.proShopAndRental.rentalBounds = {
+    x: sr.x,
+    y: sr.y,
+    width: sr.width,
+    height: sr.height,
+  };
+  ARENA_LAYOUT.proShopAndRental.rentalCounter = {
+    x: sr.x + Math.round(sr.width * 0.045),
+    y: sr.y + Math.round(sr.height * 0.05),
+    width: Math.max(50, Math.round(sr.width * 0.91)),
+    height: Math.max(20, Math.round(sr.height * 0.32)),
+  };
+  ARENA_LAYOUT.proShopAndRental.rentalInteractX =
+    sr.x + Math.round(sr.width / 2);
+  ARENA_LAYOUT.proShopAndRental.rentalInteractY = sr.y - 30;
+  ARENA_LAYOUT.proShopAndRental.rentalInteractRadius = Math.max(
+    95,
+    Math.round(Math.max(sr.width, sr.height) * 0.36)
+  );
+  const shelfW = Math.max(40, Math.round(sr.width * 0.43));
+  const shelfH = Math.max(16, Math.round(sr.height * 0.27));
+  const shelfY = sr.y + Math.max(24, sr.height - shelfH - 4);
+  ARENA_LAYOUT.proShopAndRental.rentalShelves = [
+    { x: sr.x + Math.round(sr.width * 0.045), y: shelfY, width: shelfW, height: shelfH },
+    { x: sr.x + Math.round(sr.width * 0.52), y: shelfY, width: shelfW, height: shelfH },
+  ];
+  ARENA_LAYOUT.proShopAndRental.dividerWall = {
+    x: sr.x + sr.width,
+    y: sr.y,
+    width: 16,
+    height: sr.height,
+  };
+
+  // 3. SLUSH & BLOB (inkl. Bistro-Sitzgruppe proportional zu w/h)
+  const biRaw = mods.bistro || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.bistro;
+  const bi = getModuleCollisionRect(biRaw);
+  const biScaleX = bi.width / 730;
+  const biScaleY = bi.height / 271;
+  ARENA_LAYOUT.bistro.bounds = {
+    x: bi.x,
+    y: bi.y,
+    width: bi.width,
+    height: bi.height,
+  };
+  ARENA_LAYOUT.bistro.wcSign = {
+    x: Math.round(bi.x + 14 * biScaleX),
+    y: Math.round(bi.y + 7 * biScaleY),
+    width: Math.max(48, Math.round(88 * biScaleX)),
+    height: Math.max(20, Math.round(30 * biScaleY)),
+  };
+  ARENA_LAYOUT.bistro.counter = {
+    x: Math.round(bi.x + 406 * biScaleX),
+    y: Math.round(bi.y + 189 * biScaleY),
+    width: Math.max(90, Math.round(310 * biScaleX)),
+    height: Math.max(24, Math.round(38 * biScaleY)),
+  };
+  ARENA_LAYOUT.bistro.slushMachine = {
+    x: Math.round(bi.x + 424 * biScaleX),
+    y: Math.round(bi.y + 191 * biScaleY),
+    width: Math.max(28, Math.round(52 * biScaleX)),
+    height: Math.max(18, Math.round(30 * biScaleY)),
+  };
+  ARENA_LAYOUT.bistro.blobaColaTap = {
+    x: Math.round(bi.x + 496 * biScaleX),
+    y: Math.round(bi.y + 191 * biScaleY),
+    width: Math.max(28, Math.round(56 * biScaleX)),
+    height: Math.max(18, Math.round(30 * biScaleY)),
+  };
+  ARENA_LAYOUT.bistro.interactX = Math.round(bi.x + 561 * biScaleX);
+  ARENA_LAYOUT.bistro.interactY = Math.round(bi.y + 153 * biScaleY);
+  ARENA_LAYOUT.bistro.interactRadius = 85;
+  ARENA_LAYOUT.bistro.marbleTables = [
+    { id: 'marble-table-1', x: Math.round(bi.x + 81 * biScaleX), y: Math.round(bi.y + 147 * biScaleY), radius: Math.max(12, Math.round(20 * Math.min(biScaleX, biScaleY))) },
+    { id: 'marble-table-2', x: Math.round(bi.x + 211 * biScaleX), y: Math.round(bi.y + 147 * biScaleY), radius: Math.max(12, Math.round(20 * Math.min(biScaleX, biScaleY))) },
+    { id: 'marble-table-3', x: Math.round(bi.x + 331 * biScaleX), y: Math.round(bi.y + 147 * biScaleY), radius: Math.max(12, Math.round(20 * Math.min(biScaleX, biScaleY))) },
+  ];
+  ARENA_LAYOUT.bistro.wallBenches = [
+    { id: 'bistro-bench-1', x: Math.round(bi.x + 44 * biScaleX), y: Math.round(bi.y + 229 * biScaleY), width: Math.max(36, Math.round(74 * biScaleX)), height: Math.max(16, Math.round(26 * biScaleY)) },
+    { id: 'bistro-bench-2', x: Math.round(bi.x + 174 * biScaleX), y: Math.round(bi.y + 229 * biScaleY), width: Math.max(36, Math.round(74 * biScaleX)), height: Math.max(16, Math.round(26 * biScaleY)) },
+    { id: 'bistro-bench-3', x: Math.round(bi.x + 294 * biScaleX), y: Math.round(bi.y + 229 * biScaleY), width: Math.max(36, Math.round(74 * biScaleX)), height: Math.max(16, Math.round(26 * biScaleY)) },
+  ];
+
+  // 4. KASSE & EINGANG
+  const caRaw = mods.cashier || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.cashier;
+  const ca = getModuleCollisionRect(caRaw);
+  ARENA_LAYOUT.bottomEntrance.cashierBooth = {
+    x: ca.x,
+    y: ca.y,
+    width: ca.width,
+    height: ca.height,
+    centerX: ca.x + Math.round(ca.width / 2),
+    centerY: ca.y + Math.round(ca.height / 2),
+    angleRad: ((caRaw.rot || 0) * Math.PI) / 180,
+  };
+  ARENA_LAYOUT.bottomEntrance.entranceSpawn = {
+    x: ca.x - 46,
+    y: ca.y + Math.round(ca.height / 2),
+    securityX: ca.x - 90,
+    securityY: ca.y + Math.round(ca.height / 2),
+  };
+
+  // 5. MITTEL-BÜHNE (U-Islands & Stage / Cinema proportional zu w/h/rot)
+  const csRaw =
+    mods.centerStage || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.centerStage;
+  const cs = getModuleCollisionRect(csRaw);
+  const csScaleX = cs.width / 630;
+  const csScaleY = cs.height / 284;
+  ARENA_LAYOUT.uIslands.width = Math.max(80, Math.round(175 * csScaleX));
+  ARENA_LAYOUT.uIslands.height = Math.max(120, Math.round(284 * csScaleY));
+  ARENA_LAYOUT.uIslands.leftDefaultX = cs.x;
+  ARENA_LAYOUT.uIslands.rightDefaultX = Math.round(
+    cs.x + cs.width - ARENA_LAYOUT.uIslands.width
+  );
+  ARENA_LAYOUT.uIslands.topY = cs.y;
+  ARENA_LAYOUT.uIslands.centerY = cs.y + Math.round(cs.height / 2);
+  ARENA_LAYOUT.uIslands.closedStageWidth = Math.max(
+    160,
+    Math.round(390 * csScaleX)
+  );
+  ARENA_LAYOUT.uIslands.closedStageHeight = Math.max(
+    120,
+    Math.round(296 * csScaleY)
+  );
+  ARENA_LAYOUT.uIslands.closedStageX = Math.round(
+    cs.x + (cs.width - ARENA_LAYOUT.uIslands.closedStageWidth) / 2
+  );
+  ARENA_LAYOUT.uIslands.closedStageY = Math.round(cs.y - 6 * csScaleY);
+  ARENA_LAYOUT.uIslands.cinemaScreenRect = {
+    x: Math.round(ARENA_LAYOUT.uIslands.closedStageX + 20 * csScaleX),
+    y: Math.round(ARENA_LAYOUT.uIslands.closedStageY + 20 * csScaleY),
+    width: Math.max(120, Math.round(350 * csScaleX)),
+    height: Math.max(90, Math.round(256 * csScaleY)),
+  };
+
+  // 6. DISCO-TOWER / BACKSTAGE
+  const djRaw = mods.djTower || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.djTower;
+  const dj = getModuleCollisionRect(djRaw);
+  const djScaleX = dj.width / 426;
+  const djScaleY = dj.height / 254;
+  ARENA_LAYOUT.djTower.x = dj.x;
+  ARENA_LAYOUT.djTower.y = dj.y;
+  ARENA_LAYOUT.djTower.cornerX = dj.x;
+  ARENA_LAYOUT.djTower.cornerY = dj.y;
+  ARENA_LAYOUT.djTower.centerX = Math.round(dj.x + 189 * djScaleX);
+  ARENA_LAYOUT.djTower.centerY = Math.round(dj.y + 112 * djScaleY);
+  ARENA_LAYOUT.djTower.bevelLeftX = Math.round(dj.x + 274 * djScaleX);
+  ARENA_LAYOUT.djTower.bevelLeftY = Math.round(dj.y + 254 * djScaleY);
+  ARENA_LAYOUT.djTower.bevelTopX = Math.round(dj.x + 426 * djScaleX);
+  ARENA_LAYOUT.djTower.bevelTopY = Math.round(dj.y + 102 * djScaleY);
+  ARENA_LAYOUT.djTower.curveCtrlX = Math.round(dj.x + 292 * djScaleX);
+  ARENA_LAYOUT.djTower.curveCtrlY = Math.round(dj.y + 120 * djScaleY);
+  ARENA_LAYOUT.djTower.deskX = Math.round(dj.x + 129 * djScaleX);
+  ARENA_LAYOUT.djTower.deskY = Math.round(dj.y + 99 * djScaleY);
+  ARENA_LAYOUT.djTower.deskW = Math.max(80, Math.round(215 * djScaleX));
+  ARENA_LAYOUT.djTower.deskH = Math.max(24, Math.round(42 * djScaleY));
+  ARENA_LAYOUT.djTower.egoTriggerX = Math.round(dj.x + 369 * djScaleX);
+  ARENA_LAYOUT.djTower.egoTriggerY = Math.round(dj.y + 214 * djScaleY);
+
+  // 7. SCHLEUSEN-BALKEN 1 (LINKS) & dynamischer Wegpunkt gateLeft
+  const blRaw =
+    mods.baffleLeft || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.baffleLeft;
+  const bl = getModuleCollisionRect(blRaw);
+  ARENA_LAYOUT.gates.bottomLeftSchwingtuer.baffleXStart = bl.x;
+  ARENA_LAYOUT.gates.bottomLeftSchwingtuer.baffleXEnd = bl.x + bl.width;
+  ARENA_LAYOUT.gates.bottomLeftSchwingtuer.baffleY =
+    bl.y + Math.round(bl.height / 2);
+  ARENA_LAYOUT.gates.bottomLeftSchwingtuer.xStart = bl.x - 42;
+  ARENA_LAYOUT.gates.bottomLeftSchwingtuer.xEnd = bl.x + bl.width + 42;
+  ARENA_LAYOUT.gates.bottomLeftSchwingtuer.width = bl.width + 84;
+  ARENA_LAYOUT.gates.gateLeft = {
+    x: Math.round(bl.x - 22),
+    y: Math.round(bl.y + bl.height / 2),
+  };
+
+  // 8. SCHLEUSEN-BALKEN 2 (RECHTS) & dynamischer Wegpunkt gateRight
+  const brRaw =
+    mods.baffleRight || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.baffleRight;
+  const br = getModuleCollisionRect(brRaw);
+  ARENA_LAYOUT.gates.bottomRightEntrance.baffleXStart = br.x;
+  ARENA_LAYOUT.gates.bottomRightEntrance.baffleXEnd = br.x + br.width;
+  ARENA_LAYOUT.gates.bottomRightEntrance.baffleY =
+    br.y + Math.round(br.height / 2);
+  ARENA_LAYOUT.gates.bottomRightEntrance.xStart = br.x - 42;
+  ARENA_LAYOUT.gates.bottomRightEntrance.xEnd = br.x + br.width + 42;
+  ARENA_LAYOUT.gates.bottomRightEntrance.width = br.width + 84;
+  ARENA_LAYOUT.gates.gateRight = {
+    x: Math.round(br.x + br.width + 22),
+    y: Math.round(br.y + br.height / 2),
+  };
+
+  // 9. 80ER-SPINDREIHE (SPINDE)
+  const lkRaw = mods.lockers || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.lockers;
+  const lk = getModuleCollisionRect(lkRaw);
+  ARENA_LAYOUT.lockers = {
+    x: lk.x,
+    y: lk.y,
+    width: lk.width,
+    height: lk.height,
+    rot: lk.rot,
+  };
+}
+

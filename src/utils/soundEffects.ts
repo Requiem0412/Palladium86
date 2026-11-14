@@ -822,6 +822,151 @@ class RetroSoundEffects {
       osc.stop(t + 0.34);
     });
   }
+
+  /** Delicate metallic 80s skate bell jingle for Category 6 '🔔 Klingel-Glöckchen' charm */
+  public playSkateBellJingle(): void {
+    const ctx = this.getContext();
+    const out = this.getOutputNode();
+    if (!ctx || !out) return;
+    const now = ctx.currentTime;
+    const bellFreqs = [2637, 3322, 3951];
+    bellFreqs.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      const t = now + idx * 0.04;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.045, t);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t + 0.14);
+      osc.connect(gain);
+      gain.connect(out);
+      osc.start(t);
+      osc.stop(t + 0.15);
+    });
+  }
+
+  /**
+   * 5 Web-Audio 80s DJ-Soundboard Effects for the Klecknix Twin-Decks:
+   * [1] Airhorn, [2] Vinyl-Scratch, [3] Laser-Zap, [4] Nebel-Zischen, [5] Applaus
+   */
+  public playDjSoundboardEffect(
+    effectId: 'airhorn' | 'scratch' | 'laser' | 'fog-hiss' | 'applause'
+  ): void {
+    const ctx = this.getContext();
+    const out = this.getOutputNode();
+    if (!ctx || !out) return;
+    const now = ctx.currentTime;
+
+    if (effectId === 'airhorn') {
+      // [1] Classic 80s Club Airhorn (3 blasts: short, short, long)
+      const blasts = [
+        { start: 0, dur: 0.13 },
+        { start: 0.17, dur: 0.13 },
+        { start: 0.34, dur: 0.48 },
+      ];
+      const freqs = [392.0, 493.88, 587.33];
+      blasts.forEach((b) => {
+        freqs.forEach((f, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sawtooth';
+          const t0 = now + b.start;
+          osc.frequency.setValueAtTime(f * (1 + (idx - 1) * 0.008), t0);
+          gain.gain.setValueAtTime(0.001, t0);
+          gain.gain.linearRampToValueAtTime(0.075, t0 + 0.02);
+          gain.gain.setValueAtTime(0.07, t0 + b.dur - 0.04);
+          gain.gain.exponentialRampToValueAtTime(0.001, t0 + b.dur);
+          osc.connect(gain);
+          gain.connect(out);
+          osc.start(t0);
+          osc.stop(t0 + b.dur + 0.02);
+        });
+      });
+    } else if (effectId === 'scratch') {
+      // [2] Klecknix Twin-Decks Vinyl Scratch ("Wika-Wika!")
+      for (let i = 0; i < 3; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        const t0 = now + i * 0.16;
+        osc.frequency.setValueAtTime(160, t0);
+        osc.frequency.exponentialRampToValueAtTime(980, t0 + 0.07);
+        osc.frequency.exponentialRampToValueAtTime(190, t0 + 0.15);
+        gain.gain.setValueAtTime(0.11, t0);
+        gain.gain.exponentialRampToValueAtTime(0.005, t0 + 0.15);
+        osc.connect(gain);
+        gain.connect(out);
+        osc.start(t0);
+        osc.stop(t0 + 0.155);
+      }
+    } else if (effectId === 'laser') {
+      // [3] 80s Arcade Space Laser-Zap (rapid triple pitch-drop)
+      for (let i = 0; i < 3; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        const t0 = now + i * 0.11;
+        osc.frequency.setValueAtTime(1950 - i * 180, t0);
+        osc.frequency.exponentialRampToValueAtTime(95, t0 + 0.1);
+        gain.gain.setValueAtTime(0.1, t0);
+        gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.105);
+        osc.connect(gain);
+        gain.connect(out);
+        osc.start(t0);
+        osc.stop(t0 + 0.11);
+      }
+    } else if (effectId === 'fog-hiss') {
+      // [4] CO2 Fog Machine Nozzle Hiss ("Pssssshhhh!")
+      const bufferSize = Math.floor(ctx.sampleRate * 0.85);
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = noiseBuffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(2400, now);
+      filter.frequency.exponentialRampToValueAtTime(900, now + 0.8);
+      filter.Q.value = 1.4;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.16, now + 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.84);
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(out);
+      noise.start(now);
+      noise.stop(now + 0.85);
+    } else if (effectId === 'applause') {
+      // [5] Arena Crowd Applause & Cheer
+      const bufferSize = Math.floor(ctx.sampleRate * 1.15);
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        const mod = 0.55 + 0.45 * Math.sin(i * 0.045) * Math.cos(i * 0.019);
+        data[i] = (Math.random() * 2 - 1) * mod;
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = noiseBuffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(1350, now);
+      filter.Q.value = 0.9;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.15, now + 0.12);
+      gain.gain.setValueAtTime(0.13, now + 0.7);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.14);
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(out);
+      noise.start(now);
+      noise.stop(now + 1.15);
+    }
+  }
 }
 
 export const soundFX = new RetroSoundEffects();
+

@@ -11,17 +11,23 @@ import {
   ChallengeId,
   ConcertLightingMode,
   CrewNamesConfig,
+  CustomArenaLayoutState,
   DEFAULT_80S_RADIO_PLAYLIST,
   DEFAULT_CREW_NAMES,
+  DEFAULT_CUSTOM_ARENA_LAYOUT,
   DEFAULT_DJ_JINGLE_SLOTS,
   DEFAULT_DJ_NAME,
   DEFAULT_DJ_TICKER,
   DEFAULT_SPECIAL_SKATERS,
   DEFAULT_TWITCH_CHANNEL,
   DjJingleSlot,
+  DjSoundboardEffectId,
+  EditableModuleId,
+  formatLayoutConfigCodeBlock,
   GuestDjPreset,
   HallGameMode,
   LightingMode,
+  NameDisplayMode,
   NeonUnderglowColor,
   NeonWristbandColor,
   PALLADIUM_CHALLENGES,
@@ -29,11 +35,13 @@ import {
   PlayerCharacterMode,
   ProShopUpgradesState,
   RadioTrackItem,
+  SkateCharmId,
   TrickMoveId,
 } from './config/arenaConfig';
 import Peer, { DataConnection } from 'peerjs';
 import {
   ArenaLiveTelemetry,
+  buildTrackNpcsForDifficulty,
   MultiplayerPlayerState,
   RollerArenaEngine,
 } from './components/RollerArenaEngine';
@@ -45,36 +53,57 @@ import {
   EntryPassData,
   FreeDrinkChoice,
   HallStatsData,
+  IntroStepId,
+  IntroTourState,
+  isIntroTourComplete,
   loadAdminSettings,
   loadAdminUnlockedSession,
   loadChallengesProgress,
+  loadCrtFilterEnabled,
+  loadCustomArenaLayout,
   loadEntryPass,
   loadGuestDjPresets,
   loadHallStats,
   loadHasEnteredBefore,
   loadHideChronik,
+  loadIntroTourState,
+  loadLockerPlayerSettings,
   loadPlayerProfile,
   loadProShopUpgrades,
   loadRadioPlaylist,
   loadSpecialSkaters,
+  loadStampCard,
   loadVisitorVolume,
+  LockerPlayerSettings,
+  recordDailyStampVisit,
+  recordMultiplayerSessionStart,
+  recordMultiplayerVisitorSnapshot,
   recordSessionVisit,
+  recordSoloSessionStart,
+  resetCustomArenaLayout,
   resetEntryPass,
   resetHallStats,
+  resetStampCard,
   saveAdminSettings,
   saveAdminUnlockedSession,
   saveChallengesProgress,
+  saveCrtFilterEnabled,
+  saveCustomArenaLayout,
   saveEntryPass,
   saveGuestDjPresets,
   saveHallStats,
   saveHasEnteredBefore,
   saveHideChronik,
+  saveIntroTourState,
+  saveLockerPlayerSettings,
   savePlayerProfile,
   saveProShopUpgrades,
   saveRadioPlaylist,
   saveSpecialSkaters,
+  saveStampCard,
   saveVisitorVolume,
   SingleplayerDifficulty,
+  StampCardData,
 } from './utils/storageAndStats';
 
 const MULTIPLAYER_OUTFIT_COLORS = [
@@ -86,8 +115,45 @@ const MULTIPLAYER_OUTFIT_COLORS = [
   { id: 'turbo-red', label: 'Turbo-Rot', hex: '#ef4444' },
 ] as const;
 
+// Cross-browser (Safari, iOS, Chrome, Firefox) WebRTC configuration with explicit STUN servers
+const PEER_ICE_CONFIG = {
+  secure: true,
+  pingInterval: 4000,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+    ],
+    iceCandidatePoolSize: 10,
+  },
+};
+
+const TAB_SESSION_STORAGE_KEY = 'palladium_tab_session_id_v1';
+
+function getOrCreateTabSessionId(): string {
+  if (typeof window === 'undefined') return 'server-tab';
+  try {
+    let existing = window.sessionStorage.getItem(TAB_SESSION_STORAGE_KEY);
+    if (!existing) {
+      existing = `tab-${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      window.sessionStorage.setItem(TAB_SESSION_STORAGE_KEY, existing);
+    }
+    return existing;
+  } catch {
+    return `tab-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`;
+  }
+}
+
 interface AdminSyncPayload {
   lightingMode: LightingMode;
+  blacklightTimerSec?: number;
+  autoBlacklightEnabled?: boolean;
   centerStageMode: CenterStageMode;
   activeBandName: string;
   customBandInput: string;
@@ -109,10 +175,12 @@ interface AdminSyncPayload {
   cinemaStartTime?: string;
   fullHallPutzlichtEnabled?: boolean;
   pixel16BitFiguresEnabled?: boolean;
+  backgroundDancersEnabled?: boolean;
   crewNames?: CrewNamesConfig;
   isMaintenanceMode: boolean;
   maintenanceReopenText: string;
   liveArenaStyle: ArenaVisualStyle;
+  customLayout?: CustomArenaLayoutState;
 }
 
 type MultiplayerPacket =
@@ -120,6 +188,9 @@ type MultiplayerPacket =
       type: 'guest-hello';
       state: MultiplayerPlayerState;
       freeDrinkChoice?: FreeDrinkChoice;
+      tabSessionId?: string;
+      joinedAt?: number;
+      isAdmin?: boolean;
     }
   | {
       type: 'join-accepted';
@@ -140,6 +211,32 @@ type MultiplayerPacket =
   | {
       type: 'world-players';
       players: MultiplayerPlayerState[];
+      timestamp?: number;
+    }
+  | {
+      type: 'heartbeat';
+      tabSessionId: string;
+      timestamp: number;
+      isTabHidden?: boolean;
+      isAdmin?: boolean;
+    }
+  | {
+      type: 'guest-leave';
+      peerId: string;
+      tabSessionId: string;
+    }
+  | {
+      type: 'host-handover';
+      nextHostPeerId: string;
+      nextHostTabSessionId?: string;
+      roomId: string;
+      adminSync: AdminSyncPayload;
+      players: MultiplayerPlayerState[];
+    }
+  | {
+      type: 'admin-takeover-request';
+      adminTabSessionId: string;
+      adminSync: AdminSyncPayload;
     }
   | {
       type: 'admin-sync';
@@ -151,6 +248,16 @@ type MultiplayerPacket =
     }
   | {
       type: 'room-closed';
+    }
+  | {
+      type: 'controller-pad';
+      dx: number;
+      dy: number;
+      jump?: boolean;
+      spin?: boolean;
+      interact?: boolean;
+      boost?: boolean;
+      trickMove?: TrickMoveId | null;
     };
 
 export function App() {
@@ -174,10 +281,45 @@ export function App() {
   const [isAnonymousGuest, setIsAnonymousGuest] = useState<boolean>(
     initialProfile.isAnonymousGuest
   );
-  const [showNames, setShowNames] = useState<boolean>(true);
-  const [freeDrinkChoice, setFreeDrinkChoice] =
-    useState<FreeDrinkChoice>('combo');
+  // Spind-Menü (SPINDE) Einstellungen & Pflicht-Einführung (Palladium-Rundgang)
+  const [lockerSettings, setLockerSettings] = useState<LockerPlayerSettings>(
+    () => loadLockerPlayerSettings()
+  );
+  const [showLockerModal, setShowLockerModal] = useState<boolean>(false);
+  const [lockerDrinkBoostTrigger, setLockerDrinkBoostTrigger] =
+    useState<number>(0);
+  const [introTour, setIntroTour] = useState<IntroTourState>(() =>
+    loadIntroTourState()
+  );
+  const introTourRef = useRef<IntroTourState>(introTour);
+  useEffect(() => {
+    introTourRef.current = introTour;
+  }, [introTour]);
+  const [introBannerText, setIntroBannerText] = useState<string | null>(null);
+  const [isIntroBoxMinimized, setIsIntroBoxMinimized] =
+    useState<boolean>(false);
+
+  const [nameDisplayMode, setNameDisplayMode] =
+    useState<NameDisplayMode>('focus');
+  const showNames =
+    lockerSettings.showAiNames || lockerSettings.showOwnName;
+  const [freeDrinkChoice, setFreeDrinkChoice] = useState<FreeDrinkChoice>(() => {
+    const sc = loadStampCard();
+    return sc.welcomeDrinkChoice === 'bloba' ? 'bloba' : 'slush';
+  });
   const [hallRadioBanner, setHallRadioBanner] = useState<string | null>(null);
+
+  // 10er-Stempelkarte (localStorage) & 80er-CRT-Filter (Scanlines)
+  const [stampCard, setStampCard] = useState<StampCardData>(() =>
+    recordDailyStampVisit()
+  );
+  const [showStampCardModal, setShowStampCardModal] = useState<boolean>(false);
+  const [crtFilterEnabled, setCrtFilterEnabled] = useState<boolean>(() =>
+    loadCrtFilterEnabled()
+  );
+  const [showPhoneControllerModal, setShowPhoneControllerModal] =
+    useState<boolean>(false);
+  const [phonePadConnected, setPhonePadConnected] = useState<boolean>(false);
 
   // Core Gameplay Modes
   const [characterMode, setCharacterMode] =
@@ -211,13 +353,18 @@ export function App() {
     initialEntryPass ? initialEntryPass.drinkChipAvailable : true
   );
 
-  // Public Visitor Volume & Mute Control
+  // Public Visitor Volume & Mute Control (linked with Spind Disco-Sound toggle)
   const [visitorVolume, setVisitorVolume] = useState<number>(() => {
     const v = loadVisitorVolume();
     soundFX.setVolume(v);
     return v;
   });
-  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [isMuted, setIsMuted] = useState<boolean>(() => {
+    const ls = loadLockerPlayerSettings();
+    const muted = !ls.discoSoundEnabled;
+    soundFX.setMuted(muted);
+    return muted;
+  });
 
   // 80s Webradio & Mix-Manager State
   const [radioPlaylist, setRadioPlaylist] = useState<RadioTrackItem[]>(() =>
@@ -268,6 +415,77 @@ export function App() {
     null
   );
 
+  // 🛠️ Baumenü (Admin Layout & AI Skater Anchor Editor) State
+  const [customLayout, setCustomLayout] = useState<CustomArenaLayoutState>(() =>
+    loadCustomArenaLayout()
+  );
+  const [buildModeEnabled, setBuildModeEnabled] = useState<boolean>(false);
+  const [selectedBuildItemId, setSelectedBuildItemId] = useState<string | null>(
+    'mod:proShop'
+  );
+  const [coordsCopiedToast, setCoordsCopiedToast] = useState<boolean>(false);
+
+  const handleUpdateCustomLayout = useCallback(
+    (nextLayout: CustomArenaLayoutState) => {
+      setCustomLayout(nextLayout);
+      saveCustomArenaLayout(nextLayout);
+    },
+    []
+  );
+
+  const handleResetCustomLayout = useCallback(() => {
+    const fresh = resetCustomArenaLayout();
+    setCustomLayout(fresh);
+    setStyleFeedbackToast(
+      '↩️ Standard-Layout wiederhergestellt (alle Raum-Module & KI-Skater zurückgesetzt)!'
+    );
+    window.setTimeout(() => setStyleFeedbackToast(null), 4000);
+  }, []);
+
+  const editableNpcList = useMemo(
+    () => buildTrackNpcsForDifficulty(difficulty, customLayout.npcAnchors),
+    [difficulty, customLayout.npcAnchors]
+  );
+
+  const handleCopyCustomCoordinatesJson = useCallback(() => {
+    const snippet = formatLayoutConfigCodeBlock(customLayout);
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(snippet);
+      setCoordsCopiedToast(true);
+      window.setTimeout(() => setCoordsCopiedToast(false), 3000);
+    }
+  }, [customLayout]);
+
+  const handleAdjustSelectedModuleSizeOrRot = useCallback(
+    (dw: number, dh: number, dRot = 0) => {
+      if (!selectedBuildItemId || !selectedBuildItemId.startsWith('mod:'))
+        return;
+      const modId = selectedBuildItemId.slice(4) as EditableModuleId;
+      const curMod =
+        customLayout.modules[modId] || DEFAULT_CUSTOM_ARENA_LAYOUT.modules[modId];
+      if (!curMod) return;
+      const minW = modId === 'baffleLeft' || modId === 'baffleRight' ? 24 : 32;
+      const minH = modId === 'baffleLeft' || modId === 'baffleRight' ? 8 : 20;
+      const nextW = Math.max(minW, Math.min(960, Math.round(curMod.width + dw)));
+      const nextH = Math.max(minH, Math.min(640, Math.round(curMod.height + dh)));
+      const nextRot = (((curMod.rot || 0) + dRot) % 360 + 360) % 360;
+      const nextLayout: CustomArenaLayoutState = {
+        ...customLayout,
+        modules: {
+          ...customLayout.modules,
+          [modId]: {
+            ...curMod,
+            width: nextW,
+            height: nextH,
+            rot: nextRot,
+          },
+        },
+      };
+      handleUpdateCustomLayout(nextLayout);
+    },
+    [customLayout, handleUpdateCustomLayout, selectedBuildItemId]
+  );
+
   // DJ-Jingle & Sprachmemo-Pult State (No speechSynthesis!)
   const [externalDjJingleBubble, setExternalDjJingleBubble] = useState<{
     text: string;
@@ -298,6 +516,40 @@ export function App() {
     const r = params.get('room')?.trim();
     return r && r.length > 0 ? r : null;
   }, []);
+
+  const initialControllerRoomId = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    const c = params.get('controller')?.trim();
+    return c && c.length > 0 ? c : null;
+  }, []);
+
+  const remoteControllerInputRef = useRef<{
+    dx: number;
+    dy: number;
+    jump: boolean;
+    spin: boolean;
+    interact: boolean;
+    boost: boolean;
+    trickMove: TrickMoveId | null;
+  }>({
+    dx: 0,
+    dy: 0,
+    jump: false,
+    spin: false,
+    interact: false,
+    boost: false,
+    trickMove: null,
+  });
+
+  const [controllerHostId] = useState<string>(() => {
+    const suffix = getOrCreateTabSessionId()
+      .replace(/[^a-z0-9]/gi, '')
+      .slice(-6)
+      .toLowerCase();
+    return `palladium-pad-${suffix || '86'}`;
+  });
+  const controllerHostPeerRef = useRef<Peer | null>(null);
 
   // Admin PIN Authentication (sessionStorage) — hidden for invited guests unless they unlock with Admin-PIN
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() =>
@@ -331,22 +583,58 @@ export function App() {
   // Start name field completely empty (no pre-filled "Speedy 86")
   const [guestJoinNameInput, setGuestJoinNameInput] = useState<string>('');
   const [guestJoinError, setGuestJoinError] = useState<string | null>(null);
-  const [guestFreeDrinkChoice, setGuestFreeDrinkChoice] =
-    useState<FreeDrinkChoice>('combo');
 
+  const tabSessionIdRef = useRef<string>(getOrCreateTabSessionId());
+  const myJoinedAtRef = useRef<number>(Date.now());
   const peerInstanceRef = useRef<Peer | null>(null);
   const hostConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
   const hostGuestsStateRef = useRef<Map<string, MultiplayerPlayerState>>(
     new Map()
   );
+  const hostGuestHeartbeatRef = useRef<
+    Map<string, { lastSeen: number; isTabHidden: boolean; tabSessionId?: string }>
+  >(new Map());
   const guestConnRef = useRef<DataConnection | null>(null);
+  const lastHostPacketAtRef = useRef<number>(Date.now());
+  const isTabHiddenRef = useRef<boolean>(false);
+  const isHandingOverHostRef = useRef<boolean>(false);
+  const isApplyingRemoteAdminSyncRef = useRef<boolean>(false);
+
   const playerNameRef = useRef<string>(playerName);
   useEffect(() => {
     playerNameRef.current = playerName;
   }, [playerName]);
 
+  const playerShirtColorRef = useRef<string>(playerShirtColor);
+  useEffect(() => {
+    playerShirtColorRef.current = playerShirtColor;
+  }, [playerShirtColor]);
+
+  const isAdminUnlockedRef = useRef<boolean>(isAdminUnlocked);
+  useEffect(() => {
+    isAdminUnlockedRef.current = isAdminUnlocked;
+  }, [isAdminUnlocked]);
+
+  const mpRoleRef = useRef<'solo' | 'host' | 'guest'>(mpRole);
+  useEffect(() => {
+    mpRoleRef.current = mpRole;
+  }, [mpRole]);
+
+  const mpRoomIdRef = useRef<string | null>(mpRoomId);
+  useEffect(() => {
+    mpRoomIdRef.current = mpRoomId;
+  }, [mpRoomId]);
+
+  const remotePlayersRef = useRef<MultiplayerPlayerState[]>(remotePlayers);
+  useEffect(() => {
+    remotePlayersRef.current = remotePlayers;
+  }, [remotePlayers]);
+
   const localSkaterSnapshotRef = useRef<MultiplayerPlayerState>({
     peerId: 'local',
+    tabSessionId: tabSessionIdRef.current,
+    joinedAt: myJoinedAtRef.current,
+    isAdmin: isAdminUnlocked,
     name: playerName || 'Skater',
     shirtColor: playerShirtColor,
     x: 1320,
@@ -463,6 +751,76 @@ export function App() {
   useEffect(() => {
     saveProShopUpgrades(upgrades);
   }, [upgrades]);
+
+  // Save CRT filter whenever changed
+  useEffect(() => {
+    saveCrtFilterEnabled(crtFilterEnabled);
+  }, [crtFilterEnabled]);
+
+  // Save Spind (Locker) settings whenever changed
+  useEffect(() => {
+    saveLockerPlayerSettings(lockerSettings);
+  }, [lockerSettings]);
+
+  // Record Multiplayer sessions & visitor snapshots for exclusive Admin Hallen-Statistik
+  const prevMpActiveRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (isMultiplayerActive && !prevMpActiveRef.current) {
+      prevMpActiveRef.current = true;
+      setHallStats(recordMultiplayerSessionStart());
+    } else if (!isMultiplayerActive) {
+      prevMpActiveRef.current = false;
+    }
+  }, [isMultiplayerActive]);
+
+  useEffect(() => {
+    if (!isMultiplayerActive) return;
+    const visitorIds = remotePlayers.map(
+      (p) => p.tabSessionId || p.peerId || p.name
+    );
+    const concurrentCount = remotePlayers.length + 1;
+    setHallStats(recordMultiplayerVisitorSnapshot(concurrentCount, visitorIds));
+  }, [isMultiplayerActive, remotePlayers]);
+
+  // Dedicated Smartphone-Controller PeerJS Receiver so ?controller=<ID> works in both Solo and Multiplayer
+  useEffect(() => {
+    if (initialControllerRoomId) return;
+    if (!showPhoneControllerModal && !phonePadConnected) return;
+    if (controllerHostPeerRef.current && !controllerHostPeerRef.current.destroyed) {
+      return;
+    }
+    const padPeer = new Peer(controllerHostId, PEER_ICE_CONFIG);
+    controllerHostPeerRef.current = padPeer;
+    padPeer.on('connection', (conn) => {
+      setPhonePadConnected(true);
+      conn.on('data', (raw) => {
+        const pkt = raw as MultiplayerPacket;
+        if (pkt && pkt.type === 'controller-pad') {
+          remoteControllerInputRef.current.dx = pkt.dx || 0;
+          remoteControllerInputRef.current.dy = pkt.dy || 0;
+          if (pkt.jump) remoteControllerInputRef.current.jump = true;
+          if (pkt.spin) remoteControllerInputRef.current.spin = true;
+          if (pkt.interact) remoteControllerInputRef.current.interact = true;
+          if (pkt.trickMove) {
+            remoteControllerInputRef.current.trickMove = pkt.trickMove;
+          }
+        }
+      });
+      conn.on('close', () => {
+        remoteControllerInputRef.current.dx = 0;
+        remoteControllerInputRef.current.dy = 0;
+        setPhonePadConnected(false);
+      });
+    });
+    return () => {
+      try {
+        padPeer.destroy();
+      } catch {
+        // ignore
+      }
+      controllerHostPeerRef.current = null;
+    };
+  }, [controllerHostId, initialControllerRoomId, phonePadConnected, showPhoneControllerModal]);
 
   // Save admin settings whenever changed
   useEffect(() => {
@@ -683,6 +1041,16 @@ export function App() {
       `📻 Hallenfunk: ${displayName} hat die Halle betreten (Freigetränk: ${drinkLabel})!`
     );
 
+    // Record daily stamp on the 10er-Stempelkarte (localStorage)
+    const updatedCard = recordDailyStampVisit();
+    const chosenWelcomeDrink: 'slush' | 'bloba' =
+      freeDrinkChoice === 'bloba' ? 'bloba' : 'slush';
+    if (updatedCard.welcomeDrinkChoice !== chosenWelcomeDrink) {
+      updatedCard.welcomeDrinkChoice = chosenWelcomeDrink;
+      saveStampCard(updatedCard);
+    }
+    setStampCard(updatedCard);
+
     // Lock Singleplayer Entry Stamp (palladium_entry_pass) for this visit if not already locked
     setEntryPass((prev) => {
       if (prev?.locked) return prev;
@@ -700,6 +1068,9 @@ export function App() {
       setDrinkChipAvailable(true);
       return lockedPass;
     });
+
+    // Record Solo session start in Admin Hallen-Statistik
+    setHallStats(recordSoloSessionStart());
 
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
@@ -738,6 +1109,13 @@ export function App() {
         return;
       }
 
+      // Close Spind modal with Escape key
+      if (e.key === 'Escape' && showLockerModal) {
+        e.preventDefault();
+        setShowLockerModal(false);
+        return;
+      }
+
       if (
         !isCurtainOpen &&
         (e.key === 'Enter' || e.key === ' ') &&
@@ -756,6 +1134,7 @@ export function App() {
     handleEnterHall,
     isAdminUnlocked,
     isCurtainOpen,
+    showLockerModal,
   ]);
 
   const handleRedeemDrinkChipAtRental = useCallback(() => {
@@ -841,7 +1220,9 @@ export function App() {
   }, []);
 
   const handleToggleShowNames = useCallback(() => {
-    setShowNames((prev) => !prev);
+    setNameDisplayMode((prev) =>
+      prev === 'focus' ? 'all' : prev === 'all' ? 'off' : 'focus'
+    );
   }, []);
 
   const handleToggleUnderglow = useCallback(() => {
@@ -903,6 +1284,8 @@ export function App() {
   const buildCurrentAdminSyncPayload = useCallback((): AdminSyncPayload => {
     return {
       lightingMode,
+      blacklightTimerSec,
+      autoBlacklightEnabled: adminSettings.autoBlacklightEnabled,
       centerStageMode,
       activeBandName,
       customBandInput,
@@ -924,14 +1307,18 @@ export function App() {
       cinemaStartTime: adminSettings.cinemaStartTime,
       fullHallPutzlichtEnabled: adminSettings.fullHallPutzlichtEnabled,
       pixel16BitFiguresEnabled: adminSettings.pixel16BitFiguresEnabled,
+      backgroundDancersEnabled: adminSettings.backgroundDancersEnabled ?? true,
       crewNames: adminSettings.crewNames,
       isMaintenanceMode: adminSettings.isMaintenanceMode,
       maintenanceReopenText:
         adminSettings.maintenanceReopenText || '🚀 ALPHA STARTING SOON',
       liveArenaStyle: adminSettings.liveArenaStyle || 'classic-neon',
+      customLayout,
     };
   }, [
     lightingMode,
+    blacklightTimerSec,
+    adminSettings.autoBlacklightEnabled,
     centerStageMode,
     activeBandName,
     customBandInput,
@@ -953,14 +1340,20 @@ export function App() {
     adminSettings.cinemaStartTime,
     adminSettings.fullHallPutzlichtEnabled,
     adminSettings.pixel16BitFiguresEnabled,
+    adminSettings.backgroundDancersEnabled,
     adminSettings.crewNames,
     adminSettings.isMaintenanceMode,
     adminSettings.maintenanceReopenText,
     adminSettings.liveArenaStyle,
+    customLayout,
   ]);
 
   const applyIncomingAdminSync = useCallback((s: AdminSyncPayload) => {
+    isApplyingRemoteAdminSyncRef.current = true;
     setLightingMode(s.lightingMode);
+    if (typeof s.blacklightTimerSec === 'number') {
+      setBlacklightTimerSec(s.blacklightTimerSec);
+    }
     setCenterStageMode(
       (s.centerStageMode as string) === 'live-band' ? 'band' : s.centerStageMode
     );
@@ -971,8 +1364,17 @@ export function App() {
     setHallGameMode(s.hallGameMode);
     setFogBurstCount(s.fogBurstCount);
     setAdminPreviewStyle(null);
+    if (s.liveArenaStyle) {
+      setSelectedStyleTile(s.liveArenaStyle);
+    }
+    if (s.customLayout) {
+      setCustomLayout(s.customLayout);
+      saveCustomArenaLayout(s.customLayout);
+    }
     setAdminSettings((prev) => ({
       ...prev,
+      autoBlacklightEnabled:
+        s.autoBlacklightEnabled ?? prev.autoBlacklightEnabled,
       concertLightingMode: s.concertLightingMode,
       fogMachineEnabled: s.fogMachineEnabled,
       activeDjName: s.activeDjName,
@@ -991,12 +1393,17 @@ export function App() {
         s.fullHallPutzlichtEnabled ?? prev.fullHallPutzlichtEnabled,
       pixel16BitFiguresEnabled:
         s.pixel16BitFiguresEnabled ?? prev.pixel16BitFiguresEnabled,
+      backgroundDancersEnabled:
+        s.backgroundDancersEnabled ?? prev.backgroundDancersEnabled,
       crewNames: s.crewNames ?? prev.crewNames,
       isMaintenanceMode: s.isMaintenanceMode,
       maintenanceReopenText:
         s.maintenanceReopenText || prev.maintenanceReopenText,
       liveArenaStyle: s.liveArenaStyle,
     }));
+    window.setTimeout(() => {
+      isApplyingRemoteAdminSyncRef.current = false;
+    }, 60);
   }, []);
 
   const adminSyncPayloadRef = useRef<AdminSyncPayload>(
@@ -1032,8 +1439,9 @@ export function App() {
     };
   }, [applyIncomingAdminSync]);
 
-  // Broadcast Hallenleiter-Sync to other tabs (BroadcastChannel) & connected PeerJS Guests
+  // Broadcast Hallenleiter-Sync in real-time to other tabs (BroadcastChannel) & all connected PeerJS players
   useEffect(() => {
+    if (isApplyingRemoteAdminSyncRef.current) return;
     const payload = buildCurrentAdminSyncPayload();
     if (!isApplyingBroadcastRef.current && broadcastChannelRef.current) {
       try {
@@ -1045,21 +1453,32 @@ export function App() {
         // ignore
       }
     }
-    if (mpRole !== 'host') return;
     const pkt: MultiplayerPacket = {
       type: 'admin-sync',
       payload,
     };
-    hostConnectionsRef.current.forEach((conn) => {
-      if (conn.open) {
+    if (mpRole === 'host') {
+      hostConnectionsRef.current.forEach((conn) => {
+        if (conn.open) {
+          try {
+            conn.send(pkt);
+          } catch {
+            // Ignore transient send error
+          }
+        }
+      });
+    } else if (mpRole === 'guest' && isAdminUnlocked) {
+      // Admin with PIN has Regie priority even when connected as guest
+      const conn = guestConnRef.current;
+      if (conn && conn.open) {
         try {
           conn.send(pkt);
         } catch {
-          // Ignore transient send error
+          // ignore
         }
       }
-    });
-  }, [mpRole, buildCurrentAdminSyncPayload]);
+    }
+  }, [mpRole, isAdminUnlocked, buildCurrentAdminSyncPayload]);
 
   const cleanupPeerSession = useCallback(() => {
     hostConnectionsRef.current.forEach((c) => {
@@ -1071,6 +1490,7 @@ export function App() {
     });
     hostConnectionsRef.current.clear();
     hostGuestsStateRef.current.clear();
+    hostGuestHeartbeatRef.current.clear();
     if (guestConnRef.current) {
       try {
         guestConnRef.current.close();
@@ -1096,26 +1516,147 @@ export function App() {
     };
   }, [cleanupPeerSession]);
 
-  const handleOpenHostRoom = useCallback(
-    (customRoomId?: string) => {
-      cleanupPeerSession();
-      const targetId =
-        customRoomId ||
-        `palladium-hanau-89-${Math.floor(100 + Math.random() * 900)}`;
-      setMpStatus('connecting');
-      setMpNotice('Starte Multiplayer-Host-Raum...');
+  // Forward declarations via refs so Host & Guest functions can mutually invoke each other for 24/7 auto-host & handover
+  const openHostRoomRef = useRef<
+    (
+      customRoomId?: string,
+      opts?: {
+        silentAutoHost?: boolean;
+        silentHandover?: boolean;
+        chosenName?: string;
+        chosenColor?: string;
+        preservedPlayers?: MultiplayerPlayerState[];
+      }
+    ) => void
+  >(() => {});
+  const connectAsGuestRef = useRef<
+    (
+      roomIdToJoin: string,
+      chosenName: string,
+      chosenColor: string,
+      chosenDrink?: FreeDrinkChoice,
+      retryAttempt?: number
+    ) => void
+  >(() => {});
 
-      const peer = new Peer(targetId);
+  const handleOpenHostRoom = useCallback(
+    (
+      customRoomId?: string,
+      opts?: {
+        silentAutoHost?: boolean;
+        silentHandover?: boolean;
+        chosenName?: string;
+        chosenColor?: string;
+        preservedPlayers?: MultiplayerPlayerState[];
+      }
+    ) => {
+      cleanupPeerSession();
+      const targetId = (customRoomId || 'palladium-hanau-89').trim();
+      setMpStatus('connecting');
+      if (!opts?.silentAutoHost && !opts?.silentHandover) {
+        setMpNotice(`Starte Multiplayer-Raum „${targetId}“...`);
+      }
+
+      const effectiveName = (
+        opts?.chosenName ||
+        playerNameRef.current ||
+        localSkaterSnapshotRef.current.name ||
+        'Hallenleiter'
+      ).trim();
+      const effectiveColor =
+        opts?.chosenColor || playerShirtColorRef.current || '#ff2a85';
+
+      if (opts?.chosenName) {
+        setPlayerName(effectiveName);
+        setIsAnonymousGuest(false);
+      }
+      if (opts?.chosenColor) {
+        setPlayerShirtColor(effectiveColor);
+      }
+
+      // Switch current tab directly into the hall (no second tab, no Doppelgänger clone)
+      setHasOwnSkates(true);
+      setIsCurtainOpen(true);
+      setShowChronicleModal(false);
+      setShowGuestJoinModal(false);
+      setGuestJoinError(null);
+
+      // Copy invite link immediately when Admin clicks "Multiplayer-Raum öffnen"
+      if (
+        typeof window !== 'undefined' &&
+        !opts?.silentAutoHost &&
+        !opts?.silentHandover
+      ) {
+        const base = `${window.location.origin}${window.location.pathname}`;
+        const inviteUrl = `${base}?room=${encodeURIComponent(targetId)}`;
+        try {
+          window.history.replaceState(
+            null,
+            '',
+            `?room=${encodeURIComponent(targetId)}`
+          );
+        } catch {
+          // ignore
+        }
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          navigator.clipboard
+            .writeText(inviteUrl)
+            .then(() => {
+              setInviteCopied(true);
+              window.setTimeout(() => setInviteCopied(false), 3000);
+            })
+            .catch(() => {
+              // ignore
+            });
+        }
+      }
+
+      const peer = new Peer(targetId, PEER_ICE_CONFIG);
       peerInstanceRef.current = peer;
 
       peer.on('open', (id) => {
+        isHandingOverHostRef.current = false;
         setMpRole('host');
         setMpRoomId(id);
         setMpStatus('connected');
-        setMpNotice(
-          `🌐 Multiplayer-Raum „${id}“ ist live! Teile den Einladungs-Link mit deinen Freunden.`
-        );
-        localSkaterSnapshotRef.current.peerId = id;
+        localSkaterSnapshotRef.current = {
+          ...localSkaterSnapshotRef.current,
+          peerId: id,
+          tabSessionId: tabSessionIdRef.current,
+          joinedAt: myJoinedAtRef.current,
+          isAdmin: isAdminUnlockedRef.current,
+          name: effectiveName,
+          shirtColor: effectiveColor,
+        };
+        if (opts?.silentAutoHost) {
+          soundFX.unlockAudioContext();
+          soundFX.playCurtainReveal();
+          setMpNotice(
+            `🌐 24/7-Raum „${id}“ aktiv – du bist live in der Halle!`
+          );
+          showHallAnnouncement(
+            `📻 Hallenfunk: ${effectiveName} hat den 24/7-Multiplayer-Raum betreten!`
+          );
+        } else if (opts?.silentHandover) {
+          setMpNotice(
+            `🌐 Host-Rolle für Raum „${id}“ nahtlos im Hintergrund übernommen.`
+          );
+        } else {
+          setMpNotice(
+            `🌐 Raum „${id}“ ist live & Einladungs-Link wurde kopiert!`
+          );
+        }
+      });
+
+      peer.on('disconnected', () => {
+        // Auto-reconnect signaling on brief Safari/iOS network or tab switch
+        if (peerInstanceRef.current && !peerInstanceRef.current.destroyed) {
+          try {
+            peerInstanceRef.current.reconnect();
+          } catch {
+            // ignore
+          }
+        }
       });
 
       peer.on('connection', (conn) => {
@@ -1123,8 +1664,169 @@ export function App() {
           const pkt = raw as MultiplayerPacket;
           if (!pkt || typeof pkt !== 'object') return;
 
+          if (pkt.type === 'admin-takeover-request') {
+            // An Admin with PIN wants to reclaim the primary Host ID ('palladium-hanau-89')
+            applyIncomingAdminSync(pkt.adminSync);
+            const takeoverRoomId = targetId;
+            const currentGuests = Array.from(
+              hostGuestsStateRef.current.values()
+            );
+            const handoverPkt: MultiplayerPacket = {
+              type: 'host-handover',
+              nextHostPeerId: 'admin-takeover',
+              nextHostTabSessionId: pkt.adminTabSessionId,
+              roomId: takeoverRoomId,
+              adminSync: pkt.adminSync,
+              players: currentGuests,
+            };
+            hostConnectionsRef.current.forEach((c) => {
+              if (c.open) {
+                try {
+                  c.send(handoverPkt);
+                } catch {
+                  // ignore
+                }
+              }
+            });
+            isHandingOverHostRef.current = true;
+            window.setTimeout(() => {
+              cleanupPeerSession();
+              setMpRole('guest');
+              window.setTimeout(() => {
+                connectAsGuestRef.current(
+                  takeoverRoomId,
+                  playerNameRef.current || effectiveName,
+                  playerShirtColorRef.current || effectiveColor,
+                  'combo',
+                  0
+                );
+              }, 950);
+            }, 150);
+            return;
+          }
+
+          if (pkt.type === 'guest-leave') {
+            hostConnectionsRef.current.delete(conn.peer);
+            hostGuestsStateRef.current.delete(conn.peer);
+            hostGuestHeartbeatRef.current.delete(conn.peer);
+            if (pkt.tabSessionId) {
+              hostGuestsStateRef.current.forEach((g, key) => {
+                if (g.tabSessionId === pkt.tabSessionId) {
+                  hostConnectionsRef.current.delete(key);
+                  hostGuestsStateRef.current.delete(key);
+                  hostGuestHeartbeatRef.current.delete(key);
+                }
+              });
+            }
+            const remaining = Array.from(hostGuestsStateRef.current.values());
+            setRemotePlayers(remaining);
+            const allPlayers: MultiplayerPlayerState[] = [
+              {
+                ...localSkaterSnapshotRef.current,
+                peerId: peer.id || targetId,
+                tabSessionId: tabSessionIdRef.current,
+                joinedAt: myJoinedAtRef.current,
+                isAdmin: isAdminUnlockedRef.current,
+              },
+              ...remaining,
+            ];
+            const worldPkt: MultiplayerPacket = {
+              type: 'world-players',
+              players: allPlayers,
+              timestamp: Date.now(),
+            };
+            hostConnectionsRef.current.forEach((c) => {
+              if (c.open) {
+                try {
+                  c.send(worldPkt);
+                } catch {
+                  // ignore
+                }
+              }
+            });
+            return;
+          }
+
+          if (pkt.type === 'heartbeat') {
+            hostGuestHeartbeatRef.current.set(conn.peer, {
+              lastSeen: Date.now(),
+              isTabHidden: Boolean(pkt.isTabHidden),
+              tabSessionId: pkt.tabSessionId,
+            });
+            const existing = hostGuestsStateRef.current.get(conn.peer);
+            if (existing) {
+              existing.lastSeenAt = Date.now();
+              if (typeof pkt.isAdmin === 'boolean') {
+                existing.isAdmin = pkt.isAdmin;
+              }
+            }
+            return;
+          }
+
+          if (pkt.type === 'admin-sync') {
+            // Admin connected as guest pushed a real-time Regie change -> apply & rebroadcast to all
+            applyIncomingAdminSync(pkt.payload);
+            hostConnectionsRef.current.forEach((c) => {
+              if (c.open && c.peer !== conn.peer) {
+                try {
+                  c.send(pkt);
+                } catch {
+                  // ignore
+                }
+              }
+            });
+            return;
+          }
+
+          if (pkt.type === 'controller-pad') {
+            remoteControllerInputRef.current.dx = pkt.dx || 0;
+            remoteControllerInputRef.current.dy = pkt.dy || 0;
+            if (pkt.jump) remoteControllerInputRef.current.jump = true;
+            if (pkt.spin) remoteControllerInputRef.current.spin = true;
+            if (pkt.interact) remoteControllerInputRef.current.interact = true;
+            if (pkt.trickMove) {
+              remoteControllerInputRef.current.trickMove = pkt.trickMove;
+            }
+            return;
+          }
+
           if (pkt.type === 'guest-hello') {
-            const requestedName = (pkt.state.name || '').trim();
+            const incomingTabId =
+              pkt.tabSessionId || pkt.state.tabSessionId || '';
+
+            // Anti-Doppelgänger: If this is the exact same browser tab as the Host, ignore self-join
+            if (incomingTabId && incomingTabId === tabSessionIdRef.current) {
+              try {
+                conn.close();
+              } catch {
+                // ignore
+              }
+              return;
+            }
+
+            // Anti-Doppelgänger: Remove any previous stale connection from the same tabSessionId (e.g. after reload)
+            if (incomingTabId) {
+              hostGuestsStateRef.current.forEach((existingGuest, peerKey) => {
+                if (
+                  peerKey !== conn.peer &&
+                  existingGuest.tabSessionId === incomingTabId
+                ) {
+                  const oldConn = hostConnectionsRef.current.get(peerKey);
+                  if (oldConn) {
+                    try {
+                      oldConn.close();
+                    } catch {
+                      // ignore
+                    }
+                  }
+                  hostConnectionsRef.current.delete(peerKey);
+                  hostGuestsStateRef.current.delete(peerKey);
+                  hostGuestHeartbeatRef.current.delete(peerKey);
+                }
+              });
+            }
+
+            let requestedName = (pkt.state.name || '').trim();
             const requestedNorm = requestedName.toLowerCase();
             const hostNameNorm = (
               playerNameRef.current ||
@@ -1134,19 +1836,28 @@ export function App() {
               .trim()
               .toLowerCase();
 
-            // Check duplicate name against Host and all other connected guests
+            // Check duplicate name against Host and all other connected guests (from different tabs)
             let isDuplicate =
               requestedNorm.length < 2 || requestedNorm === hostNameNorm;
             if (!isDuplicate) {
               hostGuestsStateRef.current.forEach((existingGuest, peerKey) => {
                 if (
                   peerKey !== conn.peer &&
+                  existingGuest.tabSessionId !== incomingTabId &&
                   (existingGuest.name || '').trim().toLowerCase() ===
                     requestedNorm
                 ) {
                   isDuplicate = true;
                 }
               });
+            }
+
+            // Admin with PIN always has join priority (never blocked)
+            if (isDuplicate && pkt.isAdmin) {
+              isDuplicate = false;
+              if (requestedNorm === hostNameNorm) {
+                requestedName = `${requestedName} (Regie)`;
+              }
             }
 
             if (isDuplicate) {
@@ -1166,24 +1877,31 @@ export function App() {
             // Accept Guest Join!
             const isNewPeer = !hostGuestsStateRef.current.has(conn.peer);
             hostConnectionsRef.current.set(conn.peer, conn);
+            hostGuestHeartbeatRef.current.set(conn.peer, {
+              lastSeen: Date.now(),
+              isTabHidden: false,
+              tabSessionId: incomingTabId,
+            });
             const updatedGuest: MultiplayerPlayerState = {
               ...pkt.state,
               name: requestedName,
               peerId: conn.peer,
+              tabSessionId: incomingTabId,
+              joinedAt: pkt.joinedAt || pkt.state.joinedAt || Date.now(),
+              lastSeenAt: Date.now(),
+              isAdmin: Boolean(pkt.isAdmin || pkt.state.isAdmin),
             };
             hostGuestsStateRef.current.set(conn.peer, updatedGuest);
-            setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
+            setRemotePlayers(
+              Array.from(hostGuestsStateRef.current.values()).filter(
+                (pl) => pl.tabSessionId !== tabSessionIdRef.current
+              )
+            );
             if (isNewPeer) {
               setHallStats(recordSessionVisit());
             }
 
-            const drinkText =
-              pkt.freeDrinkChoice === 'slush'
-                ? 'Slush Puppy'
-                : pkt.freeDrinkChoice === 'bloba'
-                ? 'Bloba Cola'
-                : 'Slush Puppy & Bloba Cola';
-            const radioMsg = `📻 Hallenfunk: ${requestedName} hat die Halle betreten (Freigetränk: ${drinkText})!`;
+            const radioMsg = `📻 Hallenfunk: ${requestedName} ist live in die Halle gerollt!`;
             showHallAnnouncement(radioMsg);
 
             try {
@@ -1200,12 +1918,16 @@ export function App() {
                 {
                   ...localSkaterSnapshotRef.current,
                   peerId: peer.id || targetId,
+                  tabSessionId: tabSessionIdRef.current,
+                  joinedAt: myJoinedAtRef.current,
+                  isAdmin: isAdminUnlockedRef.current,
                 },
                 ...Array.from(hostGuestsStateRef.current.values()),
               ];
               const worldPkt: MultiplayerPacket = {
                 type: 'world-players',
                 players: allPlayers,
+                timestamp: Date.now(),
               };
               hostConnectionsRef.current.forEach((c) => {
                 if (c.open) {
@@ -1227,19 +1949,41 @@ export function App() {
             }
           } else if (pkt.type === 'player-state') {
             if (!hostConnectionsRef.current.has(conn.peer)) return;
+            const prevGuest = hostGuestsStateRef.current.get(conn.peer);
+            const incomingTabId =
+              pkt.state.tabSessionId || prevGuest?.tabSessionId || '';
+            hostGuestHeartbeatRef.current.set(conn.peer, {
+              lastSeen: Date.now(),
+              isTabHidden: false,
+              tabSessionId: incomingTabId,
+            });
             const updatedGuest: MultiplayerPlayerState = {
               ...pkt.state,
               peerId: conn.peer,
+              tabSessionId: incomingTabId,
+              joinedAt:
+                pkt.state.joinedAt || prevGuest?.joinedAt || Date.now(),
+              lastSeenAt: Date.now(),
+              isAdmin: Boolean(pkt.state.isAdmin ?? prevGuest?.isAdmin),
             };
             hostGuestsStateRef.current.set(conn.peer, updatedGuest);
-            setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
+            setRemotePlayers(
+              Array.from(hostGuestsStateRef.current.values()).filter(
+                (pl) => pl.tabSessionId !== tabSessionIdRef.current
+              )
+            );
           }
         });
 
         const handleDisconnect = () => {
           hostConnectionsRef.current.delete(conn.peer);
           hostGuestsStateRef.current.delete(conn.peer);
-          setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
+          hostGuestHeartbeatRef.current.delete(conn.peer);
+          setRemotePlayers(
+            Array.from(hostGuestsStateRef.current.values()).filter(
+              (pl) => pl.tabSessionId !== tabSessionIdRef.current
+            )
+          );
         };
 
         conn.on('close', handleDisconnect);
@@ -1247,18 +1991,63 @@ export function App() {
       });
 
       peer.on('error', (err: { type?: string }) => {
-        if (err?.type === 'unavailable-id' && !customRoomId) {
-          handleOpenHostRoom(
-            `palladium-hanau-89-${Math.floor(1000 + Math.random() * 9000)}`
+        if (err?.type === 'unavailable-id') {
+          // Room ID is already held by an active Host on PeerJS
+          if (isAdminUnlockedRef.current) {
+            // Admin with PIN has priority: connect to existing substitute Host and request seamless Host takeover
+            cleanupPeerSession();
+            const tempPeer = new Peer(PEER_ICE_CONFIG);
+            peerInstanceRef.current = tempPeer;
+            tempPeer.on('open', () => {
+              const claimConn = tempPeer.connect(targetId, { reliable: true });
+              claimConn.on('open', () => {
+                try {
+                  claimConn.send({
+                    type: 'admin-takeover-request',
+                    adminTabSessionId: tabSessionIdRef.current,
+                    adminSync: adminSyncPayloadRef.current,
+                  } as MultiplayerPacket);
+                } catch {
+                  // ignore
+                }
+                window.setTimeout(() => {
+                  openHostRoomRef.current(targetId, { silentHandover: true });
+                }, 480);
+              });
+              claimConn.on('error', () => {
+                connectAsGuestRef.current(
+                  targetId,
+                  effectiveName,
+                  effectiveColor,
+                  'combo',
+                  0
+                );
+              });
+            });
+            return;
+          }
+          // Non-admin collided on auto-host promotion -> join the now-existing Host as guest
+          connectAsGuestRef.current(
+            targetId,
+            effectiveName,
+            effectiveColor,
+            'combo',
+            0
           );
           return;
         }
         setMpStatus('error');
-        setMpNotice('Verbindungsfehler beim Erstellen des Multiplayer-Raums.');
+        setMpNotice(
+          '⚠️ Verbindungsfehler. Hinweis: Falls ein strenger Adblocker oder Safari Tracking-Schutz aktiv ist, bitte WebRTC für diese Seite erlauben.'
+        );
       });
     },
-    [cleanupPeerSession, showHallAnnouncement]
+    [applyIncomingAdminSync, cleanupPeerSession, showHallAnnouncement]
   );
+
+  useEffect(() => {
+    openHostRoomRef.current = handleOpenHostRoom;
+  }, [handleOpenHostRoom]);
 
   const handleCloseHostRoom = useCallback(() => {
     const closePkt: MultiplayerPacket = { type: 'room-closed' };
@@ -1302,16 +2091,108 @@ export function App() {
     }
     hostConnectionsRef.current.delete(guestPeerId);
     hostGuestsStateRef.current.delete(guestPeerId);
+    hostGuestHeartbeatRef.current.delete(guestPeerId);
     setRemotePlayers(Array.from(hostGuestsStateRef.current.values()));
   }, []);
+
+  // Elect the most senior remaining player (Admin with PIN first, otherwise lowest joinedAt timestamp) when Host leaves
+  const electAndMigrateHost = useCallback(
+    (
+      roomId: string,
+      explicitNextTabId?: string,
+      explicitNextPeerId?: string,
+      latestSync?: AdminSyncPayload
+    ) => {
+      if (isHandingOverHostRef.current) return;
+      isHandingOverHostRef.current = true;
+
+      if (latestSync) {
+        applyIncomingAdminSync(latestSync);
+      }
+
+      const myPeerId =
+        peerInstanceRef.current?.id || localSkaterSnapshotRef.current.peerId;
+      const myTabId = tabSessionIdRef.current;
+
+      let shouldIBecomeHost = false;
+      if (explicitNextTabId && explicitNextTabId === myTabId) {
+        shouldIBecomeHost = true;
+      } else if (explicitNextPeerId && explicitNextPeerId === myPeerId) {
+        shouldIBecomeHost = true;
+      } else if (!explicitNextTabId && !explicitNextPeerId) {
+        // Deterministic election across all remaining players (excluding the departed host whose peerId === roomId)
+        const candidates: MultiplayerPlayerState[] = [
+          {
+            ...localSkaterSnapshotRef.current,
+            peerId: myPeerId,
+            tabSessionId: myTabId,
+            joinedAt: myJoinedAtRef.current,
+            isAdmin: isAdminUnlockedRef.current,
+          },
+          ...remotePlayersRef.current.filter((p) => p.peerId !== roomId),
+        ];
+        candidates.sort((a, b) => {
+          if (Boolean(a.isAdmin) !== Boolean(b.isAdmin)) {
+            return a.isAdmin ? -1 : 1;
+          }
+          const ja = a.joinedAt || Number.MAX_SAFE_INTEGER;
+          const jb = b.joinedAt || Number.MAX_SAFE_INTEGER;
+          if (ja !== jb) return ja - jb;
+          return (a.tabSessionId || a.peerId).localeCompare(
+            b.tabSessionId || b.peerId
+          );
+        });
+        const winner = candidates[0];
+        if (
+          winner &&
+          (winner.tabSessionId === myTabId || winner.peerId === myPeerId)
+        ) {
+          shouldIBecomeHost = true;
+        }
+      }
+
+      const currentName =
+        playerNameRef.current ||
+        localSkaterSnapshotRef.current.name ||
+        'Skater';
+      const currentColor =
+        playerShirtColorRef.current ||
+        localSkaterSnapshotRef.current.shirtColor ||
+        '#ff2a85';
+
+      if (shouldIBecomeHost) {
+        window.setTimeout(() => {
+          openHostRoomRef.current(roomId, {
+            silentHandover: true,
+            chosenName: currentName,
+            chosenColor: currentColor,
+          });
+        }, 220);
+      } else {
+        window.setTimeout(() => {
+          isHandingOverHostRef.current = false;
+          connectAsGuestRef.current(
+            roomId,
+            currentName,
+            currentColor,
+            'combo',
+            0
+          );
+        }, 1100);
+      }
+    },
+    [applyIncomingAdminSync]
+  );
 
   const handleConnectAsGuest = useCallback(
     (
       roomIdToJoin: string,
       chosenName: string,
       chosenColor: string,
-      chosenDrink: FreeDrinkChoice
+      chosenDrink: FreeDrinkChoice = 'combo',
+      retryAttempt = 0
     ) => {
+      const cleanRoomId = roomIdToJoin.trim();
       const cleanName = chosenName.trim();
       if (cleanName.length < 2) {
         setGuestJoinError(
@@ -1322,26 +2203,68 @@ export function App() {
       setGuestJoinError(null);
       cleanupPeerSession();
       setMpStatus('connecting');
-      setMpNotice(`Prüfe Skater-Namen & verbinde mit Raum „${roomIdToJoin}“...`);
+      setMpNotice(
+        retryAttempt > 0
+          ? `Verbindungs-Retry (${retryAttempt}/2) mit Raum „${cleanRoomId}“...`
+          : `Verbinde mit Raum „${cleanRoomId}“...`
+      );
 
-      const peer = new Peer();
+      let settled = false;
+      const peer = new Peer(PEER_ICE_CONFIG);
       peerInstanceRef.current = peer;
 
-      peer.on('open', (myPeerId) => {
-        localSkaterSnapshotRef.current.peerId = myPeerId;
-        localSkaterSnapshotRef.current.name = cleanName;
-        localSkaterSnapshotRef.current.shirtColor = chosenColor;
+      // If signaling or WebRTC connection doesn't complete within 5.5s, auto-promote to 24/7 Host or retry
+      const handshakeTimeout = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (retryAttempt < 1) {
+          handleConnectAsGuest(
+            cleanRoomId,
+            cleanName,
+            chosenColor,
+            chosenDrink,
+            retryAttempt + 1
+          );
+        } else {
+          // No active host responded -> take over 24/7 Room Host role automatically in background!
+          openHostRoomRef.current(cleanRoomId, {
+            silentAutoHost: true,
+            chosenName: cleanName,
+            chosenColor,
+          });
+        }
+      }, 5500);
 
-        const conn = peer.connect(roomIdToJoin, { reliable: true });
+      peer.on('open', (myPeerId) => {
+        localSkaterSnapshotRef.current = {
+          ...localSkaterSnapshotRef.current,
+          peerId: myPeerId,
+          tabSessionId: tabSessionIdRef.current,
+          joinedAt: myJoinedAtRef.current,
+          isAdmin: isAdminUnlockedRef.current,
+          name: cleanName,
+          shirtColor: chosenColor,
+        };
+
+        const conn = peer.connect(cleanRoomId, {
+          reliable: true,
+        });
         guestConnRef.current = conn;
 
         conn.on('open', () => {
+          lastHostPacketAtRef.current = Date.now();
           const helloPkt: MultiplayerPacket = {
             type: 'guest-hello',
             freeDrinkChoice: chosenDrink,
+            tabSessionId: tabSessionIdRef.current,
+            joinedAt: myJoinedAtRef.current,
+            isAdmin: isAdminUnlockedRef.current,
             state: {
               ...localSkaterSnapshotRef.current,
               peerId: myPeerId,
+              tabSessionId: tabSessionIdRef.current,
+              joinedAt: myJoinedAtRef.current,
+              isAdmin: isAdminUnlockedRef.current,
               name: cleanName,
               shirtColor: chosenColor,
             },
@@ -1356,8 +2279,11 @@ export function App() {
         conn.on('data', (raw) => {
           const pkt = raw as MultiplayerPacket;
           if (!pkt || typeof pkt !== 'object') return;
+          lastHostPacketAtRef.current = Date.now();
 
           if (pkt.type === 'join-rejected') {
+            settled = true;
+            window.clearTimeout(handshakeTimeout);
             setGuestJoinError(
               pkt.reason ||
                 'Dieser Skater-Name ist in der Halle bereits vergeben – bitte wähle einen anderen!'
@@ -1369,6 +2295,9 @@ export function App() {
           }
 
           if (pkt.type === 'join-accepted') {
+            settled = true;
+            window.clearTimeout(handshakeTimeout);
+            isHandingOverHostRef.current = false;
             soundFX.unlockAudioContext();
             soundFX.playCurtainReveal();
             setPlayerName(cleanName);
@@ -1381,12 +2310,38 @@ export function App() {
             setShowGuestJoinModal(false);
             setGuestJoinError(null);
             setMpRole('guest');
-            setMpRoomId(roomIdToJoin);
+            setMpRoomId(cleanRoomId);
             setMpStatus('connected');
-            setMpNotice(`🌐 Live verbunden mit Raum „${roomIdToJoin}“!`);
+            setMpNotice(`🌐 Live verbunden mit Raum „${cleanRoomId}“!`);
             if (pkt.welcomeAnnouncement) {
               showHallAnnouncement(pkt.welcomeAnnouncement);
             }
+            return;
+          }
+
+          if (pkt.type === 'host-handover') {
+            settled = true;
+            window.clearTimeout(handshakeTimeout);
+            if (pkt.nextHostPeerId === 'admin-takeover') {
+              // Admin reclaimed Host -> reconnect as guest after brief delay
+              applyIncomingAdminSync(pkt.adminSync);
+              window.setTimeout(() => {
+                connectAsGuestRef.current(
+                  pkt.roomId || cleanRoomId,
+                  cleanName,
+                  chosenColor,
+                  chosenDrink,
+                  0
+                );
+              }, 900);
+              return;
+            }
+            electAndMigrateHost(
+              pkt.roomId || cleanRoomId,
+              pkt.nextHostTabSessionId,
+              pkt.nextHostPeerId,
+              pkt.adminSync
+            );
             return;
           }
 
@@ -1397,12 +2352,16 @@ export function App() {
 
           if (pkt.type === 'world-players') {
             const others = (pkt.players || []).filter(
-              (pl) => pl.peerId !== myPeerId
+              (pl) =>
+                pl.peerId !== myPeerId &&
+                (!pl.tabSessionId || pl.tabSessionId !== tabSessionIdRef.current)
             );
             setRemotePlayers(others);
           } else if (pkt.type === 'admin-sync') {
             applyIncomingAdminSync(pkt.payload);
           } else if (pkt.type === 'kicked') {
+            settled = true;
+            window.clearTimeout(handshakeTimeout);
             cleanupPeerSession();
             setMpRole('solo');
             setMpStatus('idle');
@@ -1410,6 +2369,8 @@ export function App() {
               '🛑 Du wurdest vom Hallenleiter aus dem Multiplayer-Raum entfernt.'
             );
           } else if (pkt.type === 'room-closed') {
+            settled = true;
+            window.clearTimeout(handshakeTimeout);
             cleanupPeerSession();
             setMpRole('solo');
             setMpStatus('idle');
@@ -1420,30 +2381,284 @@ export function App() {
         });
 
         conn.on('close', () => {
-          cleanupPeerSession();
-          setMpRole('solo');
-          setMpStatus('idle');
+          window.clearTimeout(handshakeTimeout);
+          // Do not disconnect on brief Safari/iOS background tab switch
+          if (isTabHiddenRef.current) return;
+          if (mpRoleRef.current === 'guest') {
+            electAndMigrateHost(cleanRoomId);
+          }
         });
 
         conn.on('error', () => {
-          setMpStatus('error');
-          setGuestJoinError(
-            `Raum „${roomIdToJoin}“ ist aktuell nicht erreichbar.`
-          );
-          setMpRole('solo');
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(handshakeTimeout);
+          if (retryAttempt < 1) {
+            handleConnectAsGuest(
+              cleanRoomId,
+              cleanName,
+              chosenColor,
+              chosenDrink,
+              retryAttempt + 1
+            );
+          } else {
+            openHostRoomRef.current(cleanRoomId, {
+              silentAutoHost: true,
+              chosenName: cleanName,
+              chosenColor,
+            });
+          }
         });
       });
 
-      peer.on('error', () => {
+      peer.on('disconnected', () => {
+        if (peerInstanceRef.current && !peerInstanceRef.current.destroyed) {
+          try {
+            peerInstanceRef.current.reconnect();
+          } catch {
+            // ignore
+          }
+        }
+      });
+
+      peer.on('error', (err: { type?: string }) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(handshakeTimeout);
+
+        // 24/7 Room: If Host is absent ('peer-unavailable'), visitor automatically takes over Host role in background!
+        if (err?.type === 'peer-unavailable') {
+          openHostRoomRef.current(cleanRoomId, {
+            silentAutoHost: true,
+            chosenName: cleanName,
+            chosenColor,
+          });
+          return;
+        }
+
+        if (retryAttempt < 2) {
+          window.setTimeout(() => {
+            handleConnectAsGuest(
+              cleanRoomId,
+              cleanName,
+              chosenColor,
+              chosenDrink,
+              retryAttempt + 1
+            );
+          }, 600);
+          return;
+        }
+
         setMpStatus('error');
         setGuestJoinError(
-          `Raum „${roomIdToJoin}“ konnte nicht erreicht werden.`
+          `Raum „${cleanRoomId}“ konnte nicht erreicht werden. Hinweis: Falls du Safari/iOS oder einen strengen Adblocker / Tracking-Schutz (z. B. Brave Shield, uBlock, Firewall) nutzt, deaktiviere bitte den Schutz für diese Seite, damit WebRTC-Verbindungen zugelassen werden.`
         );
         setMpRole('solo');
       });
     },
-    [applyIncomingAdminSync, cleanupPeerSession, showHallAnnouncement]
+    [
+      applyIncomingAdminSync,
+      cleanupPeerSession,
+      electAndMigrateHost,
+      showHallAnnouncement,
+    ]
   );
+
+  useEffect(() => {
+    connectAsGuestRef.current = handleConnectAsGuest;
+  }, [handleConnectAsGuest]);
+
+  // 5s Heartbeat, Stale Avatar Cleanup, Safari/iOS visibilitychange protection & beforeunload Host-Handover / Leave
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      if (mpRoleRef.current === 'host') {
+        let removedAny = false;
+        hostGuestHeartbeatRef.current.forEach((info, peerKey) => {
+          // 5s timeout for active/closed tabs; 35s grace window if Safari/iOS tab is briefly backgrounded
+          const timeoutMs = info.isTabHidden ? 35000 : 5000;
+          if (now - info.lastSeen > timeoutMs) {
+            const staleConn = hostConnectionsRef.current.get(peerKey);
+            if (staleConn) {
+              try {
+                staleConn.close();
+              } catch {
+                // ignore
+              }
+            }
+            hostConnectionsRef.current.delete(peerKey);
+            hostGuestsStateRef.current.delete(peerKey);
+            hostGuestHeartbeatRef.current.delete(peerKey);
+            removedAny = true;
+          }
+        });
+
+        const guests = Array.from(hostGuestsStateRef.current.values()).filter(
+          (pl) => pl.tabSessionId !== tabSessionIdRef.current
+        );
+        if (removedAny) {
+          setRemotePlayers(guests);
+        }
+
+        const hostId = peerInstanceRef.current?.id || mpRoomIdRef.current || 'local';
+        const allPlayers: MultiplayerPlayerState[] = [
+          {
+            ...localSkaterSnapshotRef.current,
+            peerId: hostId,
+            tabSessionId: tabSessionIdRef.current,
+            joinedAt: myJoinedAtRef.current,
+            isAdmin: isAdminUnlockedRef.current,
+          },
+          ...guests,
+        ];
+        const worldPkt: MultiplayerPacket = {
+          type: 'world-players',
+          players: allPlayers,
+          timestamp: now,
+        };
+        hostConnectionsRef.current.forEach((conn) => {
+          if (conn.open) {
+            try {
+              conn.send(worldPkt);
+            } catch {
+              // ignore
+            }
+          }
+        });
+      } else if (mpRoleRef.current === 'guest') {
+        const conn = guestConnRef.current;
+        if (conn && conn.open) {
+          try {
+            conn.send({
+              type: 'heartbeat',
+              tabSessionId: tabSessionIdRef.current,
+              timestamp: now,
+              isTabHidden: isTabHiddenRef.current,
+              isAdmin: isAdminUnlockedRef.current,
+            } as MultiplayerPacket);
+          } catch {
+            // ignore
+          }
+        }
+        // If Host hasn't sent a packet for > 5s while tab is visible -> automatic Host handover!
+        if (
+          !isTabHiddenRef.current &&
+          !isHandingOverHostRef.current &&
+          now - lastHostPacketAtRef.current > 5200 &&
+          mpRoomIdRef.current
+        ) {
+          electAndMigrateHost(mpRoomIdRef.current);
+        }
+      }
+    }, 1500);
+
+    const handleVisibilityChange = () => {
+      const hidden = document.visibilityState === 'hidden';
+      isTabHiddenRef.current = hidden;
+      if (!hidden) {
+        lastHostPacketAtRef.current = Date.now();
+        if (
+          peerInstanceRef.current &&
+          peerInstanceRef.current.disconnected &&
+          !peerInstanceRef.current.destroyed
+        ) {
+          try {
+            peerInstanceRef.current.reconnect();
+          } catch {
+            // ignore
+          }
+        }
+        if (
+          mpRoleRef.current === 'guest' &&
+          (!guestConnRef.current || !guestConnRef.current.open) &&
+          mpRoomIdRef.current
+        ) {
+          connectAsGuestRef.current(
+            mpRoomIdRef.current,
+            playerNameRef.current || 'Skater',
+            playerShirtColorRef.current || '#ff2a85',
+            'combo',
+            0
+          );
+        }
+      } else if (mpRoleRef.current === 'guest' && guestConnRef.current?.open) {
+        try {
+          guestConnRef.current.send({
+            type: 'heartbeat',
+            tabSessionId: tabSessionIdRef.current,
+            timestamp: Date.now(),
+            isTabHidden: true,
+            isAdmin: isAdminUnlockedRef.current,
+          } as MultiplayerPacket);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const handleUnload = () => {
+      if (mpRoleRef.current === 'guest' && guestConnRef.current?.open) {
+        try {
+          guestConnRef.current.send({
+            type: 'guest-leave',
+            peerId: peerInstanceRef.current?.id || 'local',
+            tabSessionId: tabSessionIdRef.current,
+          } as MultiplayerPacket);
+          guestConnRef.current.close();
+        } catch {
+          // ignore
+        }
+      } else if (mpRoleRef.current === 'host') {
+        const guests = Array.from(hostGuestsStateRef.current.values());
+        if (guests.length > 0) {
+          const sorted = [...guests].sort((a, b) => {
+            if (Boolean(a.isAdmin) !== Boolean(b.isAdmin)) {
+              return a.isAdmin ? -1 : 1;
+            }
+            return (
+              (a.joinedAt || Number.MAX_SAFE_INTEGER) -
+              (b.joinedAt || Number.MAX_SAFE_INTEGER)
+            );
+          });
+          const eldest = sorted[0];
+          const handoverPkt: MultiplayerPacket = {
+            type: 'host-handover',
+            nextHostPeerId: eldest.peerId,
+            nextHostTabSessionId: eldest.tabSessionId,
+            roomId: mpRoomIdRef.current || 'palladium-hanau-89',
+            adminSync: adminSyncPayloadRef.current,
+            players: guests,
+          };
+          hostConnectionsRef.current.forEach((c) => {
+            if (c.open) {
+              try {
+                c.send(handoverPkt);
+              } catch {
+                // ignore
+              }
+            }
+          });
+        }
+      }
+      if (peerInstanceRef.current) {
+        try {
+          peerInstanceRef.current.destroy();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
+    };
+  }, [electAndMigrateHost]);
 
   // Called ~18x per second (every 55ms) by RollerArenaEngine when in Multiplayer
   const handleLocalMultiplayerState = useCallback(
@@ -1452,15 +2667,21 @@ export function App() {
       const fullState: MultiplayerPlayerState = {
         ...stateNoId,
         peerId: myPeerId,
+        tabSessionId: tabSessionIdRef.current,
+        joinedAt: myJoinedAtRef.current,
+        isAdmin: isAdminUnlockedRef.current,
       };
       localSkaterSnapshotRef.current = fullState;
 
       if (mpRole === 'host') {
-        const guests = Array.from(hostGuestsStateRef.current.values());
+        const guests = Array.from(hostGuestsStateRef.current.values()).filter(
+          (pl) => pl.tabSessionId !== tabSessionIdRef.current
+        );
         const allPlayers: MultiplayerPlayerState[] = [fullState, ...guests];
         const worldPkt: MultiplayerPacket = {
           type: 'world-players',
           players: allPlayers,
+          timestamp: Date.now(),
         };
         hostConnectionsRef.current.forEach((conn) => {
           if (conn.open) {
@@ -1495,8 +2716,68 @@ export function App() {
     return `${base}?room=${encodeURIComponent(mpRoomId)}`;
   }, [mpRoomId]);
 
+  const handleIntroStepComplete = useCallback((stepId: IntroStepId) => {
+    const current = introTourRef.current;
+    if (current[stepId]) return;
+
+    const nextTour: IntroTourState = {
+      ...current,
+      [stepId]: true,
+    };
+    const allDone = isIntroTourComplete(nextTour);
+    const claimBonusNow = allDone && !current.bonusClaimed;
+    if (claimBonusNow) {
+      nextTour.bonusClaimed = true;
+    }
+
+    introTourRef.current = nextTour;
+    setIntroTour(nextTour);
+    saveIntroTourState(nextTour);
+    soundFX.playChallengeUnlocked();
+
+    if (stepId === 'fetch_drink') {
+      setLockerSettings((prev) => ({
+        ...prev,
+        drinksInLocker: Math.min(9, (prev.drinksInLocker || 0) + 1),
+      }));
+    }
+
+    if (claimBonusNow) {
+      setLockerSettings((prev) => ({
+        ...prev,
+        vipDiscoSkatesEquipped: true,
+      }));
+      const msg =
+        '🎉 Einführung komplett! +20 Bonus-Punkte & VIP Disco-Rollschuhe!';
+      setIntroBannerText(msg);
+      window.setTimeout(() => {
+        setIntroBannerText((curr) => (curr === msg ? null : curr));
+      }, 4200);
+    } else {
+      const msg = '✅ Aufgabe erledigt! +20 Punkte';
+      setIntroBannerText(msg);
+      window.setTimeout(() => {
+        setIntroBannerText((curr) => (curr === msg ? null : curr));
+      }, 2600);
+    }
+  }, []);
+
+  const handleDrinkFromLocker = useCallback(() => {
+    setLockerSettings((prev) => {
+      if ((prev.drinksInLocker || 0) <= 0) return prev;
+      return {
+        ...prev,
+        drinksInLocker: prev.drinksInLocker - 1,
+      };
+    });
+    setLockerDrinkBoostTrigger((c) => c + 1);
+  }, []);
+
   const handleChallengeProgress = useCallback(
     (id: ChallengeId, amount: number, isAbsolute = false) => {
+      // Other challenges are locked and only count after the 4-step introduction is completed
+      if (!isIntroTourComplete(introTourRef.current)) return;
+
       setChallengesProgress((prev) => {
         const def = PALLADIUM_CHALLENGES.find((c) => c.id === id);
         if (!def) return prev;
@@ -1622,9 +2903,137 @@ export function App() {
         flamingo: true,
         starjump: true,
       },
+      unlockedCharms: {
+        bell: true,
+        teddy: true,
+        pompons: true,
+        dice: true,
+      },
+      activeCharm: upgrades.activeCharm || 'bell',
+      bonusPoints: (upgrades.bonusPoints || 0) + 5000,
     });
     soundFX.playChallengeUnlocked();
   };
+
+  // Player Points for Pro-Shop Category 6 ("80er-Rollschuh-Anhänger")
+  const totalEarnedPoints = useMemo(() => {
+    const baseWelcomePts = 600;
+    const lapPts = Math.max(hallStats.bestLapRecord, telemetry.laps) * 120;
+    const challengePts = completedChallengesCount * 350;
+    const gamePts =
+      telemetry.ballspielScore * 15 + telemetry.slalomCombo * 80;
+    const stampPts = stampCard.stamps * 100;
+    const bonusPts = upgrades.bonusPoints || 0;
+    const introCompletedStepsCount =
+      (introTour.open_locker ? 1 : 0) +
+      (introTour.fetch_drink ? 1 : 0) +
+      (introTour.skate_rink ? 1 : 0) +
+      (introTour.try_ballspiel ? 1 : 0);
+    const introPts =
+      introCompletedStepsCount * 20 + (introTour.bonusClaimed ? 20 : 0);
+    return (
+      baseWelcomePts +
+      lapPts +
+      challengePts +
+      gamePts +
+      stampPts +
+      bonusPts +
+      introPts
+    );
+  }, [
+    completedChallengesCount,
+    hallStats.bestLapRecord,
+    introTour,
+    stampCard.stamps,
+    telemetry.ballspielScore,
+    telemetry.laps,
+    telemetry.slalomCombo,
+    upgrades.bonusPoints,
+  ]);
+
+  const availableProShopPoints = Math.max(
+    0,
+    totalEarnedPoints - (upgrades.spentPoints || 0)
+  );
+  const hasFreeProShopStampReward =
+    stampCard.freeProShopVoucherAvailable || stampCard.stamps >= 10;
+
+  const handleBuyOrEquipCharm = (
+    charmId: SkateCharmId,
+    cost: number,
+    useStampVoucher = false
+  ) => {
+    const isUnlocked = Boolean(upgrades.unlockedCharms?.[charmId]);
+    if (isUnlocked) {
+      const nextCharm = upgrades.activeCharm === charmId ? null : charmId;
+      setUpgrades((u) => ({
+        ...u,
+        activeCharm: nextCharm,
+      }));
+      if (nextCharm === 'bell') {
+        soundFX.playSkateBellJingle();
+      } else {
+        soundFX.playChallengeUnlocked();
+      }
+      return;
+    }
+
+    if (useStampVoucher && hasFreeProShopStampReward) {
+      const nextCard: StampCardData = {
+        ...stampCard,
+        stamps: 1,
+        freeProShopVoucherAvailable: false,
+        completedCardsCount: (stampCard.completedCardsCount || 0) + 1,
+      };
+      setStampCard(nextCard);
+      saveStampCard(nextCard);
+      setUpgrades((u) => ({
+        ...u,
+        unlockedCharms: {
+          bell: Boolean(u.unlockedCharms?.bell),
+          teddy: Boolean(u.unlockedCharms?.teddy),
+          pompons: Boolean(u.unlockedCharms?.pompons),
+          dice: Boolean(u.unlockedCharms?.dice),
+          [charmId]: true,
+        },
+        activeCharm: charmId,
+      }));
+      if (charmId === 'bell') soundFX.playSkateBellJingle();
+      else soundFX.playChallengeUnlocked();
+      return;
+    }
+
+    if (availableProShopPoints < cost) return;
+    setUpgrades((u) => ({
+      ...u,
+      spentPoints: (u.spentPoints || 0) + cost,
+      unlockedCharms: {
+        bell: Boolean(u.unlockedCharms?.bell),
+        teddy: Boolean(u.unlockedCharms?.teddy),
+        pompons: Boolean(u.unlockedCharms?.pompons),
+        dice: Boolean(u.unlockedCharms?.dice),
+        [charmId]: true,
+      },
+      activeCharm: charmId,
+    }));
+    if (charmId === 'bell') soundFX.playSkateBellJingle();
+    else soundFX.playChallengeUnlocked();
+  };
+
+  const handleTriggerDjSoundboard = useCallback(
+    (effectId: DjSoundboardEffectId, label: string) => {
+      soundFX.unlockAudioContext();
+      soundFX.playDjSoundboardEffect(effectId);
+      if (effectId === 'fog-hiss') {
+        setFogBurstCount((c) => c + 1);
+      }
+      setExternalDjJingleBubble((prev) => ({
+        text: `🎛️ DJ-SOUNDBOARD: ${label}!`,
+        seq: (prev?.seq || 0) + 1,
+      }));
+    },
+    []
+  );
 
   const todayDateStr = useMemo(() => {
     const d = new Date();
@@ -1740,21 +3149,30 @@ export function App() {
             </span>
           </button>
 
-          {/* Checkbox [X] Namen anzeigen */}
-          <label className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-900/90 border border-slate-700/80 hover:border-cyan-400/60 cursor-pointer text-[11px]">
-            <input
-              type="checkbox"
-              checked={showNames}
-              onChange={(e) => {
-                setShowNames(e.target.checked);
-                e.target.blur();
-              }}
-              className="accent-cyan-400 rounded cursor-pointer"
-            />
-            <span className="font-medium text-slate-200">
-              Namen <span className="text-slate-400 font-mono">[N]</span>
-            </span>
-          </label>
+          {/* Kompaktes Spind-Menü (SPINDE) Button für Spieler */}
+          <button
+            type="button"
+            onClick={() => {
+              handleIntroStepComplete('open_locker');
+              setShowLockerModal((v) => !v);
+            }}
+            title="Mein Spind (SPINDE): Inventar, VIP Disco-Rollschuhe, Getränke & Anzeige-/Sound-Regler"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border cursor-pointer text-[11px] font-mono transition ${
+              showLockerModal || telemetry.nearLockers
+                ? 'bg-cyan-950/90 border-cyan-400 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.4)]'
+                : 'bg-slate-900/90 hover:bg-slate-800 border-cyan-500/50 text-cyan-200'
+            }`}
+          >
+            <span>🗄️ Spind</span>
+            {lockerSettings.vipDiscoSkatesEquipped && (
+              <span className="text-amber-300 text-[10px]">🪩</span>
+            )}
+            {lockerSettings.drinksInLocker > 0 && (
+              <span className="px-1 rounded bg-cyan-500/20 text-cyan-200 text-[10px]">
+                🥤{lockerSettings.drinksInLocker}
+              </span>
+            )}
+          </button>
 
           {/* Gamepad Active Badge */}
           {telemetry.gamepadConnected && (
@@ -1946,12 +3364,55 @@ export function App() {
             type="button"
             onClick={() => setShowProShopModal(true)}
             className={`px-2.5 py-1 rounded border font-medium transition cursor-pointer ${
-              telemetry.nearProShop
+              telemetry.nearProShop || hasFreeProShopStampReward
                 ? 'bg-cyan-950 border-cyan-400 text-cyan-200 animate-pulse'
                 : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
             }`}
           >
             🛠️ Pro-Shop
+            {hasFreeProShopStampReward ? ' (🎁 Gratis!)' : ''}
+          </button>
+
+          {/* 10er-Stempelkarte Button in Top HUD */}
+          <button
+            type="button"
+            onClick={() => setShowStampCardModal(true)}
+            title="Digitale 10er-Stempelkarte (1x Start-Freigetränk nach Wahl + Gratis-Pro-Shop-Prämie bei 10/10)"
+            className={`px-2.5 py-1 rounded border font-mono font-bold transition cursor-pointer ${
+              hasFreeProShopStampReward
+                ? 'bg-amber-950/90 border-amber-400 text-amber-200 shadow-[0_0_12px_rgba(251,191,36,0.45)] animate-pulse'
+                : 'bg-slate-900 hover:bg-slate-800 border-amber-400/50 text-amber-200'
+            }`}
+          >
+            🎫 Stempel: {stampCard.stamps} / 10
+          </button>
+
+          {/* 📱 Handy-Controller QR-Code Button */}
+          <button
+            type="button"
+            onClick={() => setShowPhoneControllerModal(true)}
+            title="Smartphone als 80er-Touch-Gamepad per QR-Code verbinden (?controller=ROOM_ID)"
+            className={`px-2.5 py-1 rounded border font-mono font-medium transition cursor-pointer ${
+              phonePadConnected
+                ? 'bg-emerald-950/90 border-emerald-400 text-emerald-200 shadow-[0_0_10px_rgba(16,185,129,0.4)]'
+                : 'bg-slate-900 hover:bg-slate-800 border-cyan-500/40 text-cyan-200'
+            }`}
+          >
+            📱 Handy-Controller{phonePadConnected ? ' (AKTIV)' : ''}
+          </button>
+
+          {/* 📺 80er-CRT-Filter (Scanlines) Quick Toggle */}
+          <button
+            type="button"
+            onClick={() => setCrtFilterEnabled((v) => !v)}
+            title="Optionaler 80er-CRT-Filter (Scanlines & Röhrenmonitor-Look) ein-/ausschalten"
+            className={`px-2 py-1 rounded border font-mono text-[11px] transition cursor-pointer ${
+              crtFilterEnabled
+                ? 'bg-fuchsia-950/90 border-fuchsia-400 text-fuchsia-200 shadow-[0_0_10px_rgba(232,121,249,0.4)]'
+                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-300'
+            }`}
+          >
+            📺 CRT: {crtFilterEnabled ? 'AN' : 'AUS'}
           </button>
 
           {/* Public Visitor Volume Slider + Mute Toggle */}
@@ -1965,6 +3426,10 @@ export function App() {
                 const nextMuted = !isMuted;
                 setIsMuted(nextMuted);
                 soundFX.setMuted(nextMuted);
+                setLockerSettings((prev) => ({
+                  ...prev,
+                  discoSoundEnabled: !nextMuted,
+                }));
               }}
               className={`font-mono text-[11px] cursor-pointer ${
                 isMuted ? 'text-rose-300' : 'text-emerald-300'
@@ -1987,6 +3452,10 @@ export function App() {
                 if (norm > 0 && isMuted) {
                   setIsMuted(false);
                   soundFX.setMuted(false);
+                  setLockerSettings((prev) => ({
+                    ...prev,
+                    discoSoundEnabled: true,
+                  }));
                 }
               }}
               className="w-16 h-1.5 accent-cyan-400 cursor-pointer"
@@ -2037,6 +3506,107 @@ export function App() {
           </div>
         )}
 
+        {/* 16-BIT SOFORT-FEEDBACK BANNER FÜR PFLICHT-EINFÜHRUNG (+20 PUNKTE / BONUS) */}
+        {introBannerText && (
+          <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-50 px-5 py-2 rounded-lg bg-[#0c1428]/95 border-2 border-emerald-400 text-emerald-200 font-mono text-xs sm:text-sm font-black tracking-wide shadow-[0_0_28px_rgba(16,185,129,0.75)] animate-bounce">
+            {introBannerText}
+          </div>
+        )}
+
+        {/* KOMPAKTE AUFGABENBOX OBEN RECHTS (PFLICHT-EINFÜHRUNG: PALLADIUM-RUNDGANG) */}
+        {isCurtainOpen && !isBlockedByMaintenance && (
+          <div className="absolute top-3 right-3 z-30 w-64 rounded-xl bg-[#0e1324]/92 border-2 border-amber-400/75 p-2.5 text-white shadow-[0_0_20px_rgba(0,0,0,0.7)] backdrop-blur-sm">
+            <div className="flex items-center justify-between gap-1 border-b border-slate-700/80 pb-1.5">
+              <button
+                type="button"
+                onClick={() => setShowChallengesModal(true)}
+                className="text-left font-mono text-[11px] font-extrabold text-amber-300 hover:text-amber-200 cursor-pointer flex items-center gap-1"
+              >
+                <span>🧭 Einführung: Palladium-Rundgang</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsIntroBoxMinimized((v) => !v)}
+                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-[9px] cursor-pointer"
+                title="Aufgabenbox ein-/ausklappen"
+              >
+                {isIntroBoxMinimized ? '▼' : '▲'}
+              </button>
+            </div>
+
+            {!isIntroBoxMinimized && (
+              <div className="mt-1.5 space-y-1 font-mono text-[10.5px]">
+                {(
+                  [
+                    {
+                      id: 'open_locker' as IntroStepId,
+                      label: 'Spind öffnen',
+                      hint: 'Klick auf SPINDE / [E]',
+                    },
+                    {
+                      id: 'fetch_drink' as IntroStepId,
+                      label: 'Getränk an der Gastro holen',
+                      hint: 'Bistro-Theke nutzen',
+                    },
+                    {
+                      id: 'skate_rink' as IntroStepId,
+                      label: 'Runde auf der Bahn drehen',
+                      hint: 'Durch Schleuse fahren',
+                    },
+                    {
+                      id: 'try_ballspiel' as IntroStepId,
+                      label: 'Ballspiel ausprobieren',
+                      hint: 'Werfen oder passen',
+                    },
+                  ] as const
+                ).map((st) => {
+                  const done = introTour[st.id];
+                  return (
+                    <div
+                      key={st.id}
+                      className={`flex items-center justify-between px-1.5 py-1 rounded border ${
+                        done
+                          ? 'bg-emerald-950/50 border-emerald-400/60 text-emerald-200'
+                          : 'bg-slate-900/85 border-slate-700/80 text-slate-200'
+                      }`}
+                    >
+                      <span className="truncate">
+                        {done ? '✅' : '⬜'} {st.label}
+                      </span>
+                      <span
+                        className={`text-[9px] ml-1 shrink-0 ${
+                          done ? 'text-emerald-300 font-bold' : 'text-amber-300'
+                        }`}
+                      >
+                        {done ? '+20 Pkt' : st.hint}
+                      </span>
+                    </div>
+                  );
+                })}
+
+                <div className="pt-1 flex items-center justify-between text-[10px] border-t border-slate-800">
+                  {isIntroTourComplete(introTour) ? (
+                    <span className="text-emerald-300 font-bold">
+                      🎉 Komplett! Alle Aufgaben frei
+                    </span>
+                  ) : (
+                    <span className="text-amber-200/90">
+                      🔒 Weitere Aufgaben nach Rundgang
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowChallengesModal(true)}
+                    className="text-cyan-300 hover:underline cursor-pointer font-bold"
+                  >
+                    Alle ({completedChallengesCount}/{PALLADIUM_CHALLENGES.length})
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* COMPACT TOP STATUS BAR FOR ACTIVE ADMIN PREVIEW */}
         {previewStyle && (
           <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-1.5 rounded-full bg-amber-950/95 border-2 border-amber-400 text-amber-100 font-mono text-xs font-bold shadow-[0_0_24px_rgba(251,191,36,0.55)] backdrop-blur-md">
@@ -2067,11 +3637,131 @@ export function App() {
           </div>
         )}
 
+        {/* COMPACT TOP BAR FOR ACTIVE BUILD MODE ("🛠️ BAUMENÜ") WHEN ADMIN MODAL IS CLOSED */}
+        {isAdminUnlocked && buildModeEnabled && !showAdminTerminal && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950/95 border-2 border-amber-400 text-amber-100 font-mono text-[10.5px] shadow-[0_0_25px_rgba(251,191,36,0.5)] backdrop-blur-md">
+            <span className="font-bold text-amber-300">
+              🛠️ BAUMENÜ (Drag • Zieh-Eck • Pfeil 1/10px • [R] Drehen)
+            </span>
+            <span className="px-2 py-0.5 rounded bg-slate-900 border border-cyan-400/50 text-cyan-200 text-[10px]">
+              Auswahl:{' '}
+              <strong>
+                {selectedBuildItemId?.startsWith('mod:')
+                  ? customLayout.modules[
+                      selectedBuildItemId.slice(4) as EditableModuleId
+                    ]?.label || selectedBuildItemId
+                  : selectedBuildItemId?.startsWith('npc:')
+                  ? editableNpcList.find(
+                      (n) => n.id === selectedBuildItemId.slice(4)
+                    )?.name || selectedBuildItemId.slice(4)
+                  : 'Klicke Objekt auf Spielfeld'}
+              </strong>
+            </span>
+            {selectedBuildItemId?.startsWith('mod:') && (
+              <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900 border border-amber-400/50 text-[10px]">
+                <span className="text-slate-300">B:</span>
+                <button
+                  type="button"
+                  onClick={() => handleAdjustSelectedModuleSizeOrRot(-8, 0, 0)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-200 font-bold cursor-pointer"
+                  title="Breite (w) -8 px"
+                >
+                  −
+                </button>
+                <span className="text-cyan-300 font-bold">
+                  {Math.round(
+                    customLayout.modules[
+                      selectedBuildItemId.slice(4) as EditableModuleId
+                    ]?.width || 0
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleAdjustSelectedModuleSizeOrRot(8, 0, 0)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-200 font-bold cursor-pointer"
+                  title="Breite (w) +8 px"
+                >
+                  +
+                </button>
+                <span className="text-slate-300 ml-1">H:</span>
+                <button
+                  type="button"
+                  onClick={() => handleAdjustSelectedModuleSizeOrRot(0, -8, 0)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-200 font-bold cursor-pointer"
+                  title="Höhe (h) -8 px"
+                >
+                  −
+                </button>
+                <span className="text-cyan-300 font-bold">
+                  {Math.round(
+                    customLayout.modules[
+                      selectedBuildItemId.slice(4) as EditableModuleId
+                    ]?.height || 0
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleAdjustSelectedModuleSizeOrRot(0, 8, 0)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-200 font-bold cursor-pointer"
+                  title="Höhe (h) +8 px"
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAdjustSelectedModuleSizeOrRot(0, 0, 45)}
+                  className="ml-1 px-1.5 py-0.5 rounded bg-amber-400/20 hover:bg-amber-400/35 border border-amber-300 text-amber-200 font-bold cursor-pointer"
+                  title="Modul um 45° drehen (Taste R)"
+                >
+                  ↻ Drehen (
+                  {Math.round(
+                    customLayout.modules[
+                      selectedBuildItemId.slice(4) as EditableModuleId
+                    ]?.rot || 0
+                  )}
+                  °)
+                </button>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={handleCopyCustomCoordinatesJson}
+              className="px-2 py-0.5 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-[10px] cursor-pointer"
+            >
+              {coordsCopiedToast
+                ? '✅ Code-Block kopiert!'
+                : '📋 Code-Block kopieren'}
+            </button>
+            <button
+              type="button"
+              onClick={handleResetCustomLayout}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[10px] cursor-pointer"
+            >
+              ↩️ Standard-Layout
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAdminTerminal(true)}
+              className="px-2 py-0.5 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white font-bold text-[10px] cursor-pointer"
+            >
+              🎛️ Regie
+            </button>
+            <button
+              type="button"
+              onClick={() => setBuildModeEnabled(false)}
+              className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-bold text-[10px] cursor-pointer"
+            >
+              ✕ Baumenü AUS
+            </button>
+          </div>
+        )}
+
         <RollerArenaEngine
           playerName={playerName}
           playerShirtColor={playerShirtColor}
           isAnonymousGuest={isAnonymousGuest}
           showNames={showNames}
+          nameDisplayMode={nameDisplayMode}
           characterMode={characterMode}
           cameraMode={cameraMode}
           lightingMode={lightingMode}
@@ -2105,6 +3795,9 @@ export function App() {
           monitorPreviewStyle={showAdminTerminal ? selectedStyleTile : null}
           fullHallPutzlichtEnabled={adminSettings.fullHallPutzlichtEnabled}
           pixel16BitFiguresEnabled={adminSettings.pixel16BitFiguresEnabled}
+          backgroundDancersEnabled={
+            adminSettings.backgroundDancersEnabled ?? true
+          }
           cinemaCountdownEnabled={adminSettings.cinemaCountdownEnabled}
           cinemaCountdownTitle={adminSettings.cinemaCountdownTitle}
           cinemaCountdownTargetIso={adminSettings.cinemaCountdownTargetIso}
@@ -2121,7 +3814,13 @@ export function App() {
           isCurtainOpen={isCurtainOpen && !isBlockedByMaintenance}
           isMultiplayerActive={isMultiplayerActive}
           remotePlayers={remotePlayers}
+          remoteControllerInputRef={remoteControllerInputRef}
           onLocalPlayerState={handleLocalMultiplayerState}
+          buildModeEnabled={isAdminUnlocked && buildModeEnabled}
+          customLayout={customLayout}
+          selectedBuildItemId={selectedBuildItemId}
+          onSelectBuildItem={setSelectedBuildItemId}
+          onUpdateCustomLayout={handleUpdateCustomLayout}
           onToggleCamera={handleToggleCamera}
           onToggleCharacterMode={handleToggleCharacterMode}
           onToggleShowNames={handleToggleShowNames}
@@ -2134,6 +3833,13 @@ export function App() {
           onRedeemDrinkChipAtRental={handleRedeemDrinkChipAtRental}
           onRedeemDrinkChipAtBistro={handleRedeemDrinkChipAtBistro}
           onChallengeProgress={handleChallengeProgress}
+          showAiNames={lockerSettings.showAiNames}
+          showOwnName={lockerSettings.showOwnName}
+          showSpeechBubbles={lockerSettings.showSpeechBubbles}
+          vipDiscoSkatesEquipped={lockerSettings.vipDiscoSkatesEquipped}
+          lockerDrinkBoostTrigger={lockerDrinkBoostTrigger}
+          onOpenLockerModal={() => setShowLockerModal(true)}
+          onIntroStepComplete={handleIntroStepComplete}
           onTelemetry={setTelemetry}
         />
 
@@ -2144,8 +3850,20 @@ export function App() {
           cameraMode === 'top-down' && (
             <div
               style={{
-                left: `${(825 / 1920) * 100}%`,
-                top: `${(356 / 1080) * 100}%`,
+                left: `${
+                  (((customLayout?.modules?.centerStage?.x ??
+                    DEFAULT_CUSTOM_ARENA_LAYOUT.modules.centerStage.x) +
+                    85) /
+                    1920) *
+                  100
+                }%`,
+                top: `${
+                  (((customLayout?.modules?.centerStage?.y ??
+                    DEFAULT_CUSTOM_ARENA_LAYOUT.modules.centerStage.y) +
+                    38) /
+                    1080) *
+                  100
+                }%`,
                 width: `${(350 / 1920) * 100}%`,
                 height: `${(256 / 1080) * 100}%`,
               }}
@@ -2225,7 +3943,33 @@ export function App() {
           </div>
         )}
 
-        {/* CONTEXTUAL INTERACTION PROMPTS NEAR PRO-SHOP / SKATE RENTAL */}
+        {/* CONTEXTUAL INTERACTION PROMPTS NEAR PRO-SHOP / SKATE RENTAL / DJ-TOWER */}
+        {isCurtainOpen && telemetry.nearDjTower && (
+          <div className="absolute top-14 left-4 z-30 flex flex-wrap items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-950/95 border-2 border-fuchsia-400 shadow-[0_0_20px_rgba(232,121,249,0.45)] text-xs font-mono">
+            <span className="text-fuchsia-300 font-bold mr-1">
+              🎛️ DJ-SOUNDBOARD:
+            </span>
+            {(
+              [
+                { id: 'airhorn' as DjSoundboardEffectId, label: '[1] 📯 Airhorn' },
+                { id: 'scratch' as DjSoundboardEffectId, label: '[2] 💿 Vinyl-Scratch' },
+                { id: 'laser' as DjSoundboardEffectId, label: '[3] ⚡ Laser-Zap' },
+                { id: 'fog-hiss' as DjSoundboardEffectId, label: '[4] 💨 Nebel-Zischen' },
+                { id: 'applause' as DjSoundboardEffectId, label: '[5] 👏 Applaus' },
+              ] as const
+            ).map((snd) => (
+              <button
+                key={snd.id}
+                type="button"
+                onClick={() => handleTriggerDjSoundboard(snd.id, snd.label)}
+                className="px-2 py-1 rounded bg-fuchsia-950 hover:bg-fuchsia-800 border border-fuchsia-400/70 text-fuchsia-100 text-[11px] font-bold cursor-pointer transition"
+              >
+                {snd.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {isCurtainOpen && telemetry.nearProShop && !showProShopModal && (
           <div className="absolute bottom-14 left-6 z-30 flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-950/95 border border-cyan-400 shadow-lg text-xs">
             <span className="text-cyan-300 font-bold">
@@ -2929,7 +4673,7 @@ export function App() {
                 </label>
               </div>
 
-              {/* Cashier Entry & Guest Mode Configuration + Experience Levels + Free Drink Choice */}
+              {/* Streamlined Cashier Entry: 1. DEIN SKATER-NAME & EINSTIEG (top) + 2. ROLLSCHUH-CHECK (directly below) */}
               <div className="p-4 rounded-xl bg-slate-950/90 border border-slate-700/80 flex flex-col gap-3.5">
                 {entryPass?.locked && (
                   <div className="px-3.5 py-2 rounded-lg bg-amber-950/90 border border-amber-400/80 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-amber-200 shadow-[0_0_15px_rgba(251,191,36,0.25)]">
@@ -2942,190 +4686,11 @@ export function App() {
                   </div>
                 )}
 
-                {/* Singleplayer Experience Levels */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="font-mono text-xs text-fuchsia-300 uppercase font-bold">
-                      🏁 1. Singleplayer-Erfahrungsstufe &amp; Start-Bahn wählen:
-                    </label>
-                    <span className="font-mono text-[11px] text-slate-400">
-                      Bestimmt KI-Dichte, Grundtempo &amp; Startspur
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-                    {(
-                      [
-                        {
-                          id: 'beginner' as SingleplayerDifficulty,
-                          title: '🟢 Anfänger',
-                          subtitle: 'Wenig Betrieb · Start auf der Innenbahn',
-                          desc: 'Reduzierte KI-Skater-Anzahl, ruhigeres Grundtempo und sicherer Start innen nahe der Mittelbühne.',
-                          activeClass:
-                            'bg-emerald-950/90 border-emerald-400 text-emerald-100 shadow-[0_0_16px_rgba(52,211,153,0.35)]',
-                        },
-                        {
-                          id: 'intermediate' as SingleplayerDifficulty,
-                          title: '🟡 Fortgeschrittener',
-                          subtitle: 'Normaler Disco-Abend · Mittelbahn',
-                          desc: 'Ausgewogene Hallenfülle, normales Disco-Tempo und klassischer Einstieg auf der mittleren Spur.',
-                          activeClass:
-                            'bg-amber-950/90 border-amber-400 text-amber-100 shadow-[0_0_16px_rgba(251,191,36,0.35)]',
-                        },
-                        {
-                          id: 'pro' as SingleplayerDifficulty,
-                          title: '🔴 Profi',
-                          subtitle:
-                            'Samstagabend Volles Haus · Außenbahn & hohes Tempo',
-                          desc: 'Volle Halle, schnelleres Grundtempo, aktive Speed-Skater-Kette außen und Start mitten im Geschehen.',
-                          activeClass:
-                            'bg-rose-950/90 border-rose-400 text-rose-100 shadow-[0_0_16px_rgba(244,63,94,0.35)]',
-                        },
-                      ] as const
-                    ).map((lvl) => {
-                      const isSelected = difficulty === lvl.id;
-                      const isLocked = Boolean(entryPass?.locked);
-                      return (
-                        <button
-                          key={lvl.id}
-                          type="button"
-                          disabled={isLocked}
-                          onClick={() => {
-                            if (isLocked) return;
-                            setDifficulty(lvl.id);
-                          }}
-                          className={`p-3 rounded-xl border text-left transition ${
-                            isSelected
-                              ? lvl.activeClass
-                              : 'bg-slate-900/90 border-slate-700/80 text-slate-300 hover:border-slate-500'
-                          } ${
-                            isLocked
-                              ? 'opacity-65 cursor-not-allowed'
-                              : 'cursor-pointer'
-                          }`}
-                        >
-                          <div className="font-display font-extrabold text-sm flex items-center justify-between">
-                            <span>{lvl.title}</span>
-                            {isSelected && (
-                              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-black/40 border border-white/30">
-                                AKTIV
-                              </span>
-                            )}
-                          </div>
-                          <div className="font-mono text-[11px] font-bold text-cyan-300 mt-0.5">
-                            {lvl.subtitle}
-                          </div>
-                          <p className="text-[11px] text-slate-300/90 mt-1 leading-snug">
-                            {lvl.desc}
-                          </p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Checkbox "🛼 Ich habe eigene Rollschuhe" vs. Rollschuh-Verleih */}
-                <div className="p-3 rounded-xl bg-[#141024] border border-cyan-500/40 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-                  <label
-                    className={`flex items-start md:items-center gap-2.5 select-none ${
-                      entryPass?.locked
-                        ? 'opacity-65 cursor-not-allowed'
-                        : 'cursor-pointer'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={hasOwnSkates}
-                      disabled={Boolean(entryPass?.locked)}
-                      onChange={(e) => {
-                        if (entryPass?.locked) return;
-                        setHasOwnSkates(e.target.checked);
-                      }}
-                      className="accent-emerald-400 w-4 h-4 mt-0.5 md:mt-0 rounded cursor-pointer disabled:cursor-not-allowed"
-                    />
-                    <div>
-                      <span className="font-mono font-bold text-xs md:text-sm text-emerald-300">
-                        🛼 Ich habe eigene Rollschuhe
-                      </span>
-                      <p className="text-[11px] text-slate-300 mt-0.5">
-                        {hasOwnSkates ? (
-                          <>
-                            <strong>Aktiv:</strong> Du startest direkt auf eigenen
-                            Custom-Skates (+10% Antritt/Kurvenlage) und behältst
-                            deinen <strong>1× Freigetränk-Chip</strong> fürs Bistro!
-                          </>
-                        ) : (
-                          <>
-                            <strong>Keine eigenen Rollschuhe:</strong> Du betrittst
-                            die Halle auf Straßenschuhen und tauscht deinen{' '}
-                            <strong>Freigetränk-Chip am Rollschuh-Verleih [E]</strong>{' '}
-                            verbindlich gegen 80er-Leih-Rollschuhe ein.
-                          </>
-                        )}
-                      </p>
-                    </div>
-                  </label>
-                  <span
-                    className={`shrink-0 px-2.5 py-1 rounded font-mono text-[11px] font-bold border ${
-                      hasOwnSkates
-                        ? 'bg-emerald-950/90 border-emerald-400/70 text-emerald-200'
-                        : 'bg-amber-950/90 border-amber-400/70 text-amber-200'
-                    }`}
-                  >
-                    {hasOwnSkates
-                      ? '🪙 Chip bleibt fürs Bistro'
-                      : '🪙 Chip → Leih-Rollschuhe [E]'}
-                  </span>
-                </div>
-
-                {/* Interactive Welcome Free-Drink Selection */}
-                <div className="p-3 rounded-xl bg-gradient-to-r from-amber-950/60 via-fuchsia-950/60 to-cyan-950/60 border border-dashed border-amber-300/80 space-y-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-mono text-xs md:text-sm font-bold text-amber-200">
-                      🎁 WILLKOMMENSGESCHENK AN DER KASSE: 1x Slush Puppy &amp; 1x
-                      Bloba Cola gratis beim Eintritt!
-                    </span>
-                    <span className="font-mono text-[10px] text-cyan-300">
-                      Wähle dein Start-Gedeck fürs Bistro:
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    {(
-                      [
-                        {
-                          id: 'combo' as FreeDrinkChoice,
-                          label: '🎁 Kombi-Bon: 1x Slush + 1x Bloba Cola',
-                        },
-                        {
-                          id: 'slush' as FreeDrinkChoice,
-                          label: '🍧 Fokus: Eiskalter Slush Puppy',
-                        },
-                        {
-                          id: 'bloba' as FreeDrinkChoice,
-                          label: '🥤 Fokus: Prickelnde Bloba Cola',
-                        },
-                      ] as const
-                    ).map((dr) => (
-                      <button
-                        key={dr.id}
-                        type="button"
-                        onClick={() => setFreeDrinkChoice(dr.id)}
-                        className={`py-1.5 px-2.5 rounded-lg font-mono text-xs font-bold border transition cursor-pointer ${
-                          freeDrinkChoice === dr.id
-                            ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.45)]'
-                            : 'bg-slate-900/90 text-slate-200 border-slate-700 hover:border-amber-300/60'
-                        }`}
-                      >
-                        {dr.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="flex flex-col md:flex-row items-center justify-between gap-4 pt-1 border-t border-slate-800">
+                {/* 1. DEIN SKATER-NAME & EINSTIEG (GANZ OBEN) */}
+                <div className="p-3.5 rounded-xl bg-[#101322] border border-cyan-500/40 flex flex-col md:flex-row items-center justify-between gap-4">
                   <div className="flex-1 w-full">
-                    <label className="block font-mono text-xs text-cyan-300 uppercase mb-1">
-                      🎟️ Kasse &amp; Einstieg — Dein Skater-Name (Pflichtfeld ab 2
-                      Zeichen oder Anonym-Gast):
+                    <label className="block font-mono text-xs md:text-sm font-bold text-cyan-300 uppercase mb-1.5">
+                      1. DEIN SKATER-NAME &amp; EINSTIEG (Pflichtfeld ab 2 Zeichen oder Anonym-Gast):
                     </label>
                     <div className="flex flex-wrap items-center gap-3">
                       <input
@@ -3151,8 +4716,7 @@ export function App() {
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1">
                       Bitte mindestens 2 Zeichen eingeben (oder „Als Gast rollen“
-                      aktivieren), um durch den Samtvorhang in die Halle zu
-                      rollen.
+                      aktivieren), um an der Kasse vorbei in die Halle zu starten.
                     </p>
                   </div>
 
@@ -3168,6 +4732,119 @@ export function App() {
                       }`}
                     >
                       🛼 HALLE BETRETEN [ENTER]
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. ROLLSCHUH-CHECK (DIREKT DARUNTER) */}
+                <div className="p-3.5 rounded-xl bg-[#141024] border border-fuchsia-500/40 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+                  <label
+                    className={`flex items-start md:items-center gap-2.5 select-none ${
+                      entryPass?.locked
+                        ? 'opacity-65 cursor-not-allowed'
+                        : 'cursor-pointer'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={hasOwnSkates}
+                      disabled={Boolean(entryPass?.locked)}
+                      onChange={(e) => {
+                        if (entryPass?.locked) return;
+                        setHasOwnSkates(e.target.checked);
+                      }}
+                      className="accent-emerald-400 w-4 h-4 mt-0.5 md:mt-0 rounded cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <div>
+                      <span className="font-mono font-bold text-xs md:text-sm text-emerald-300 uppercase">
+                        2. ROLLSCHUH-CHECK — 🛼 Ich habe eigene Rollschuhe
+                      </span>
+                      <p className="text-[11px] text-slate-300 mt-0.5">
+                        {hasOwnSkates ? (
+                          <>
+                            <strong>Eigene Rollschuhe aktiv:</strong> Du startest
+                            direkt auf eigenen Custom-Skates (+10% Antritt/Kurvenlage)
+                            und darfst sofort durch die Schleusen-Bande auf die Bahn!
+                          </>
+                        ) : (
+                          <>
+                            <strong>Keine eigenen Rollschuhe:</strong> Du spawnt in
+                            Straßenschuhen und musst dir zuerst am{' '}
+                            <strong>ROLLSCHUHVERLEIH [E]</strong> Leih-Skates holen,
+                            bevor du auf die Bahn darfst!
+                          </>
+                        )}
+                      </p>
+                    </div>
+                  </label>
+                  <span
+                    className={`shrink-0 px-2.5 py-1 rounded font-mono text-[11px] font-bold border ${
+                      hasOwnSkates
+                        ? 'bg-emerald-950/90 border-emerald-400/70 text-emerald-200'
+                        : 'bg-amber-950/90 border-amber-400/70 text-amber-200'
+                    }`}
+                  >
+                    {hasOwnSkates
+                      ? '🛼 Eigene Skates (Direktstart)'
+                      : '👟 Straßenschuhe → Verleih [E]'}
+                  </span>
+                </div>
+
+                {/* 3. DIGITALE 10ER-STEMPELKARTE & 1x START-FREIGETRÄNK NACH WAHL */}
+                <div className="p-3.5 rounded-xl bg-[#161228] border border-amber-400/50 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono font-bold text-xs md:text-sm text-amber-300 uppercase">
+                        3. DIGITALE 10er-STEMPELKARTE — 🎫 Stempel: {stampCard.stamps} / 10
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 font-mono text-[10px] text-amber-200">
+                        {stampCard.stamps >= 10
+                          ? '🎁 10/10 VOLL: 1x Gratis-Zubehör im PRO-SHOP [E]!'
+                          : 'Pro Besuchstag +1 Stempel • Bei 10/10 1x Gratis-Zubehör im PRO-SHOP'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 mt-0.5">
+                      Wähle dein <strong>1x Start-Freigetränk nach Wahl</strong> für die Bistro-Theke:
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFreeDrinkChoice('slush');
+                        const next = {
+                          ...stampCard,
+                          welcomeDrinkChoice: 'slush' as const,
+                        };
+                        setStampCard(next);
+                        saveStampCard(next);
+                      }}
+                      className={`px-3 py-1.5 rounded-lg font-mono text-xs font-bold border transition cursor-pointer ${
+                        freeDrinkChoice === 'slush'
+                          ? 'bg-cyan-500 text-slate-950 border-white shadow-[0_0_12px_rgba(34,211,238,0.45)]'
+                          : 'bg-slate-900 text-cyan-200 border-slate-700 hover:border-cyan-400'
+                      }`}
+                    >
+                      🍧 Slush Puppy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFreeDrinkChoice('bloba');
+                        const next = {
+                          ...stampCard,
+                          welcomeDrinkChoice: 'bloba' as const,
+                        };
+                        setStampCard(next);
+                        saveStampCard(next);
+                      }}
+                      className={`px-3 py-1.5 rounded-lg font-mono text-xs font-bold border transition cursor-pointer ${
+                        freeDrinkChoice === 'bloba'
+                          ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.45)]'
+                          : 'bg-slate-900 text-amber-200 border-slate-700 hover:border-amber-400'
+                      }`}
+                    >
+                      🥤 Bloba Cola
                     </button>
                   </div>
                 </div>
@@ -3484,6 +5161,159 @@ export function App() {
                     ))}
                   </div>
                 </div>
+
+                {/* 6. 80er-Rollschuh-Anhänger (Pro-Shop Kategorie 6) */}
+                <div className="p-3.5 rounded-xl bg-slate-900/95 border-2 border-amber-400/60 flex flex-col justify-between md:col-span-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="font-bold text-sm text-amber-300">
+                        6. 80er-Rollschuh-Anhänger (Sichtbar an deinen Rollschuhen!)
+                      </h3>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        Kultige 80er-Anhänger direkt am Schnürsenkel deiner Skates – oder bei{' '}
+                        <strong className="text-amber-300">10 / 10 Stempeln</strong> 1x komplett gratis einlösen!
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2.5 py-1 rounded bg-slate-950 border border-cyan-400/60 font-mono text-xs font-bold text-cyan-300">
+                        ⭐ Punkte-Konto: {availableProShopPoints.toLocaleString('de-DE')} Pkt
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setUpgrades((u) => ({
+                            ...u,
+                            bonusPoints: (u.bonusPoints || 0) + 1000,
+                          }))
+                        }
+                        title="1.000 Bonus-Punkte zum direkten Testen gutschreiben"
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-amber-400/50 font-mono text-[10px] text-amber-200 cursor-pointer"
+                      >
+                        +1.000 Pkt (Test)
+                      </button>
+                      {hasFreeProShopStampReward && (
+                        <span className="px-2.5 py-1 rounded bg-amber-400 text-slate-950 font-mono text-xs font-black animate-pulse">
+                          🎫 10/10 Stempel-Gutschein: 1x Anhänger GRATIS!
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mt-3">
+                    {(
+                      [
+                        {
+                          id: 'bell' as SkateCharmId,
+                          title: '🔔 Klingel-Glöckchen',
+                          cost: 500,
+                          costLabel: '500 Pkt + Sound',
+                          desc: 'Goldenes Glöckchen am Rollschuh – klingelt rhythmisch beim Rollen & Springen!',
+                        },
+                        {
+                          id: 'teddy' as SkateCharmId,
+                          title: '🧸 Mini-Teddybärchen',
+                          cost: 1000,
+                          costLabel: '1.000 Pkt',
+                          desc: 'Kuscheliger 80er-Mini-Teddy direkt an beiden Schnürsenkeln.',
+                        },
+                        {
+                          id: 'pompons' as SkateCharmId,
+                          title: '🎀 Neon-Plüsch-Pompons',
+                          cost: 1500,
+                          costLabel: '1.500 Pkt',
+                          desc: 'Zweifarbige Pink/Cyan-Plüschbommel im originalen 80s Roller-Disco-Stil.',
+                        },
+                        {
+                          id: 'dice' as SkateCharmId,
+                          title: '🎲 Retro-Plüschwürfel',
+                          cost: 2000,
+                          costLabel: '2.000 Pkt',
+                          desc: 'Legendäre weiß-pinke 80er-Plüschwürfel an deinen Skates.',
+                        },
+                      ] as const
+                    ).map((ch) => {
+                      const unlocked = Boolean(upgrades.unlockedCharms?.[ch.id]);
+                      const active = upgrades.activeCharm === ch.id;
+                      const canAfford = availableProShopPoints >= ch.cost;
+                      return (
+                        <div
+                          key={ch.id}
+                          className={`p-3 rounded-xl border flex flex-col justify-between ${
+                            active
+                              ? 'bg-amber-950/45 border-2 border-amber-400 shadow-[0_0_14px_rgba(251,191,36,0.3)]'
+                              : unlocked
+                              ? 'bg-slate-950/90 border-emerald-400/60'
+                              : 'bg-slate-950/80 border-slate-800'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-bold text-xs text-white">
+                                {ch.title}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-slate-800 font-mono text-[10px] text-amber-300 font-bold">
+                                {unlocked ? '✓ Im Besitz' : ch.costLabel}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-300 mt-1">
+                              {ch.desc}
+                            </p>
+                          </div>
+
+                          <div className="mt-2.5 flex flex-col gap-1">
+                            {unlocked ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleBuyOrEquipCharm(ch.id, ch.cost, false)
+                                }
+                                className={`w-full py-1.5 rounded font-mono text-[11px] font-bold cursor-pointer transition ${
+                                  active
+                                    ? 'bg-amber-400 text-slate-950'
+                                    : 'bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-400/50'
+                                }`}
+                              >
+                                {active ? '✓ Am Rollschuh aktiv' : 'Anlegen'}
+                              </button>
+                            ) : (
+                              <>
+                                {hasFreeProShopStampReward && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleBuyOrEquipCharm(ch.id, ch.cost, true)
+                                    }
+                                    className="w-full py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono text-[10px] font-black cursor-pointer"
+                                  >
+                                    🎫 Gratis mit 10er-Stempelkarte!
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={!canAfford}
+                                  onClick={() =>
+                                    handleBuyOrEquipCharm(ch.id, ch.cost, false)
+                                  }
+                                  className={`w-full py-1.5 rounded font-mono text-[11px] font-bold transition ${
+                                    canAfford
+                                      ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 cursor-pointer'
+                                      : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                                  }`}
+                                >
+                                  {canAfford
+                                    ? `Kaufen (${ch.costLabel})`
+                                    : `Noch ${(
+                                        ch.cost - availableProShopPoints
+                                      ).toLocaleString('de-DE')} Pkt nötig`}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
 
               {/* 🕺 80er-Trick-Moves Section */}
@@ -3604,7 +5434,217 @@ export function App() {
         )}
 
         {/* ===================================================================== */}
-        {/* 3. PALLADIUM CHALLENGES MODAL (9 AUFGABEN)                            */}
+        {/* 2B. KOMPAKTES INTERAKTIVES 16-BIT SPIND-MENÜ ("SPINDE", MAX ~320 PX)  */}
+        {/* ===================================================================== */}
+        {showLockerModal && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-xs"
+            onClick={() => setShowLockerModal(false)}
+          >
+            <div
+              className="w-full max-w-[320px] rounded-xl bg-[#10172A] border-2 border-cyan-400 shadow-[0_0_30px_rgba(34,211,238,0.45)] p-3.5 text-white font-mono"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-slate-700 pb-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-base">🗄️</span>
+                  <div>
+                    <h3 className="font-bold text-xs text-cyan-300 uppercase tracking-wider">
+                      SPIND #86 • PALLADIUM
+                    </h3>
+                    <p className="text-[9.5px] text-slate-400">
+                      16-Bit Schließfach (Schließen mit × oder ESC)
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowLockerModal(false)}
+                  className="w-6 h-6 rounded bg-slate-800 hover:bg-rose-900 border border-slate-600 text-slate-200 text-xs font-bold cursor-pointer flex items-center justify-center"
+                  title="Schließen [ESC]"
+                >
+                  ×
+                </button>
+              </div>
+
+              {/* SEKTION 1: MEIN SPIND (INVENTAR) */}
+              <div className="mt-2.5 space-y-2">
+                <div className="text-[10px] font-bold uppercase text-amber-300 tracking-wider">
+                  🎒 Mein Spind (Inventar)
+                </div>
+
+                {/* Punktestand */}
+                <div className="flex items-center justify-between px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-700 text-[11px]">
+                  <span className="text-slate-300">⭐ Punkte-Konto:</span>
+                  <span className="font-bold text-amber-300">
+                    {availableProShopPoints} Pkt
+                  </span>
+                </div>
+
+                {/* Aktuelle Rollschuhe + VIP Disco-Rollschuhe Umschalter */}
+                <div className="p-2 rounded bg-slate-900/90 border border-slate-700 space-y-1.5 text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-300">🛼 Rollschuhe:</span>
+                    <span className="font-bold text-cyan-200">
+                      {lockerSettings.vipDiscoSkatesEquipped
+                        ? '🪩 VIP Disco-Rollschuhe'
+                        : hasOwnSkates
+                        ? 'Eigene 80s Quads'
+                        : hasRentedSkates
+                        ? 'Leih-Rollschuhe'
+                        : 'Straßenschuhe'}
+                    </span>
+                  </div>
+                  {isIntroTourComplete(introTour) ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setLockerSettings((prev) => ({
+                          ...prev,
+                          vipDiscoSkatesEquipped: !prev.vipDiscoSkatesEquipped,
+                        }))
+                      }
+                      className={`w-full py-1 px-2 rounded border text-[10.5px] font-bold transition cursor-pointer ${
+                        lockerSettings.vipDiscoSkatesEquipped
+                          ? 'bg-amber-500/25 border-amber-300 text-amber-200'
+                          : 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-slate-200'
+                      }`}
+                    >
+                      {lockerSettings.vipDiscoSkatesEquipped
+                        ? '✓ VIP Disco-Rollschuhe angelegt (+Speed & Gold-Glanz)'
+                        : '🪩 VIP Disco-Rollschuhe anziehen'}
+                    </button>
+                  ) : (
+                    <div className="text-[9.5px] text-slate-400">
+                      🔒 VIP Disco-Rollschuhe: Schließe die 4 Schritte der
+                      Einführung ab!
+                    </div>
+                  )}
+                </div>
+
+                {/* Getränke im Spind mit Trinken-Button */}
+                <div className="p-2 rounded bg-slate-900/90 border border-slate-700 flex items-center justify-between gap-2 text-[11px]">
+                  <div>
+                    <div className="text-slate-200 font-bold">
+                      🥤 Getränke: {lockerSettings.drinksInLocker || 0}x
+                    </div>
+                    <div className="text-[9.5px] text-slate-400">
+                      Slush &amp; Bloba Speed-Boost
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={(lockerSettings.drinksInLocker || 0) <= 0}
+                    onClick={handleDrinkFromLocker}
+                    className={`px-2.5 py-1 rounded border text-[10.5px] font-bold transition ${
+                      (lockerSettings.drinksInLocker || 0) > 0
+                        ? 'bg-cyan-500 hover:bg-cyan-400 border-white text-slate-950 cursor-pointer shadow-[0_0_10px_rgba(34,211,238,0.4)]'
+                        : 'bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed'
+                    }`}
+                  >
+                    🥤 Trinken
+                  </button>
+                </div>
+              </div>
+
+              {/* SEKTION 2: ANZEIGE & SOUND (SCHIEBEREGLER / TOGGLES) */}
+              <div className="mt-3 pt-2.5 border-t border-slate-700 space-y-1.5">
+                <div className="text-[10px] font-bold uppercase text-cyan-300 tracking-wider">
+                  🎛️ Anzeige &amp; Sound (localStorage)
+                </div>
+
+                {(
+                  [
+                    {
+                      key: 'showAiNames' as const,
+                      label: 'KI-Namen',
+                      desc: 'Standard: AUS (aufgeräumte Bahn)',
+                      value: lockerSettings.showAiNames,
+                      onToggle: () =>
+                        setLockerSettings((prev) => ({
+                          ...prev,
+                          showAiNames: !prev.showAiNames,
+                        })),
+                    },
+                    {
+                      key: 'showOwnName' as const,
+                      label: 'Eigener Name (JR)',
+                      desc: 'Standard: AN',
+                      value: lockerSettings.showOwnName,
+                      onToggle: () =>
+                        setLockerSettings((prev) => ({
+                          ...prev,
+                          showOwnName: !prev.showOwnName,
+                        })),
+                    },
+                    {
+                      key: 'showSpeechBubbles' as const,
+                      label: 'Sprechblasen',
+                      desc: 'Standard: AN',
+                      value: lockerSettings.showSpeechBubbles,
+                      onToggle: () =>
+                        setLockerSettings((prev) => ({
+                          ...prev,
+                          showSpeechBubbles: !prev.showSpeechBubbles,
+                        })),
+                    },
+                    {
+                      key: 'discoSoundEnabled' as const,
+                      label: 'Disco-Sound',
+                      desc: 'Standard: AN',
+                      value: lockerSettings.discoSoundEnabled && !isMuted,
+                      onToggle: () => {
+                        const nextSound = !(
+                          lockerSettings.discoSoundEnabled && !isMuted
+                        );
+                        setLockerSettings((prev) => ({
+                          ...prev,
+                          discoSoundEnabled: nextSound,
+                        }));
+                        setIsMuted(!nextSound);
+                        soundFX.setMuted(!nextSound);
+                      },
+                    },
+                  ] as const
+                ).map((item) => (
+                  <div
+                    key={item.key}
+                    className="flex items-center justify-between px-2.5 py-1.5 rounded bg-slate-900/90 border border-slate-700/90"
+                  >
+                    <div>
+                      <div className="text-[11px] font-bold text-slate-100">
+                        {item.label}
+                      </div>
+                      <div className="text-[9px] text-slate-400">
+                        {item.desc}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={item.value}
+                      onClick={item.onToggle}
+                      className={`relative w-11 h-5 rounded-full transition cursor-pointer border ${
+                        item.value
+                          ? 'bg-emerald-500/90 border-emerald-300'
+                          : 'bg-slate-800 border-slate-600'
+                      }`}
+                    >
+                      <span
+                        className={`block w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                          item.value ? 'translate-x-6' : 'translate-x-0.5'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 3. PALLADIUM CHALLENGES MODAL (EINFÜHRUNG + 9 AUFGABEN)               */}
         {/* ===================================================================== */}
         {showChallengesModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
@@ -3612,10 +5652,10 @@ export function App() {
               <div className="flex items-center justify-between border-b border-slate-700 pb-3">
                 <div>
                   <span className="font-mono text-xs text-amber-300 uppercase">
-                    Kleine 80er-Aufgaben ohne Zwang • Pro-Shop &amp; Trick-Moves
+                    Pflicht-Einführung (+20 Pkt je Schritt) • Pro-Shop &amp; Trick-Moves
                   </span>
                   <h2 className="font-display font-extrabold text-2xl text-white">
-                    🏆 PALLADIUM-CHALLENGES ({completedChallengesCount}/
+                    🏆 AUFGABENBOX ({completedChallengesCount}/
                     {PALLADIUM_CHALLENGES.length})
                   </h2>
                 </div>
@@ -3628,8 +5668,94 @@ export function App() {
                 </button>
               </div>
 
+              {/* PFLICHT-EINFÜHRUNG GANZ OBEN IN DER AUFGABENBOX */}
+              <div className="my-4 p-4 rounded-xl bg-gradient-to-r from-indigo-950/90 via-slate-900/95 to-emerald-950/80 border-2 border-emerald-400/80 shadow-[0_0_20px_rgba(16,185,129,0.25)]">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                  <div>
+                    <div className="font-mono text-[11px] text-emerald-300 uppercase font-bold">
+                      Schritt-für-Schritt Start-Tour • Sofort +20 Punkte pro Station
+                    </div>
+                    <h3 className="font-display font-extrabold text-lg text-white">
+                      🧭 Einführung: Palladium-Rundgang
+                    </h3>
+                  </div>
+                  <span
+                    className={`px-2.5 py-1 rounded font-mono text-xs font-bold border ${
+                      isIntroTourComplete(introTour)
+                        ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                        : 'bg-amber-500/20 border-amber-400 text-amber-200'
+                    }`}
+                  >
+                    {isIntroTourComplete(introTour)
+                      ? '🎉 Komplett (+20 Bonus-Pkt & VIP Disco-Rollschuhe!)'
+                      : `${
+                          (introTour.open_locker ? 1 : 0) +
+                          (introTour.fetch_drink ? 1 : 0) +
+                          (introTour.skate_rink ? 1 : 0) +
+                          (introTour.try_ballspiel ? 1 : 0)
+                        } / 4 erledigt`}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {(
+                    [
+                      {
+                        id: 'open_locker' as IntroStepId,
+                        title: '1. Spind öffnen',
+                        desc: 'Einmal auf die SPINDE klicken oder daran [E] drücken.',
+                      },
+                      {
+                        id: 'fetch_drink' as IntroStepId,
+                        title: '2. Getränk an der Gastro holen',
+                        desc: 'Einmal die Gastro/Bar (SLUSH & BLOB) nutzen.',
+                      },
+                      {
+                        id: 'skate_rink' as IntroStepId,
+                        title: '3. Runde auf der Bahn drehen',
+                        desc: 'Durch eine Schleuse auf die Rollfläche fahren.',
+                      },
+                      {
+                        id: 'try_ballspiel' as IntroStepId,
+                        title: '4. Ballspiel ausprobieren',
+                        desc: 'Einmal im Ballspiel per [Space] oder Linksklick werfen/passen.',
+                      },
+                    ] as const
+                  ).map((step) => {
+                    const done = introTour[step.id];
+                    return (
+                      <div
+                        key={step.id}
+                        className={`p-2.5 rounded-lg border font-mono ${
+                          done
+                            ? 'bg-emerald-950/55 border-emerald-400 text-emerald-100'
+                            : 'bg-slate-900/90 border-slate-700 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between text-xs font-bold">
+                          <span>
+                            {done ? '✅' : '⬜'} {step.title}
+                          </span>
+                          <span
+                            className={
+                              done ? 'text-emerald-300' : 'text-amber-300'
+                            }
+                          >
+                            {done ? 'Erledigt (+20 Pkt)' : '+20 Punkte'}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-300 mt-1 font-sans">
+                          {step.desc}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 my-4">
                 {PALLADIUM_CHALLENGES.map((ch, idx) => {
+                  const introDone = isIntroTourComplete(introTour);
                   const st = challengesProgress[ch.id] || {
                     progress: 0,
                     completed: false,
@@ -3641,22 +5767,31 @@ export function App() {
                   return (
                     <div
                       key={ch.id}
-                      className={`p-3.5 rounded-xl border ${
-                        st.completed
+                      className={`p-3.5 rounded-xl border transition ${
+                        !introDone
+                          ? 'bg-slate-950/75 border-slate-800 opacity-75'
+                          : st.completed
                           ? 'bg-emerald-950/35 border-emerald-400/60'
                           : 'bg-slate-900/90 border-slate-700'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-2">
                         <span className="font-bold text-sm text-white">
+                          {!introDone ? '🔒 ' : ''}
                           {idx + 1}. {ch.title}
                         </span>
                         <span
                           className={`font-mono text-xs font-bold ${
-                            st.completed ? 'text-emerald-300' : 'text-amber-300'
+                            !introDone
+                              ? 'text-rose-300'
+                              : st.completed
+                              ? 'text-emerald-300'
+                              : 'text-amber-300'
                           }`}
                         >
-                          {st.completed
+                          {!introDone
+                            ? '🔒 Erst Einführung abschließen'
+                            : st.completed
                             ? '✓ ERFÜLLT'
                             : `${st.progress} / ${ch.target}`}
                         </span>
@@ -3669,7 +5804,7 @@ export function App() {
                           className={`h-full ${
                             st.completed ? 'bg-emerald-400' : 'bg-amber-400'
                           }`}
-                          style={{ width: `${pct}%` }}
+                          style={{ width: `${introDone ? pct : 0}%` }}
                         />
                       </div>
                       <div className="text-[11px] font-mono text-cyan-300">
@@ -3716,18 +5851,23 @@ export function App() {
                   },
                   {
                     mode: 'ballspiel' as HallGameMode,
-                    title: '🟠 1. „Ballspiel“ (Abwerfen mit den Guards)',
-                    desc: 'Schlüpfe ins schwarze SKATE GUARD-Shirt! Wirf mit [E]/[F], Mausklick oder Pad-X/RB leuchtende Neon-Softbälle (prallen 1x an Banden ab).',
+                    title: '🟠 1. „Ballspiel“ (Abwerfen als Skate-Guard)',
+                    desc: 'Du übernimmst sofort den Ball mit 16-Bit-Neon-Fadenkreuz! Wirf per [Space] oder Linksklick – liegende Bälle rollen nach 2,5s zu dir zurück.',
                   },
                   {
                     mode: 'slalom' as HallGameMode,
-                    title: '锥 2. „Slalom“ (Pylonen-Parcours)',
+                    title: '🚧 2. „Slalom“ (Pylonen-Parcours)',
                     desc: 'Auf der oberen und unteren Geraden stehen leuchtende 80er-Slalom-Hütchen. Schlängle dich fehlerfrei für Combo-Punkte hindurch!',
                   },
                   {
                     mode: 'stuhlsprung' as HallGameMode,
                     title: '🪑 3. „Stuhl- & Hindernissprung“',
-                    desc: 'Auf der unteren Geraden stehen 1er-, 2er- und 3er-Klappstuhlreihen. Springe mit [J], [Shift] oder Pad-A rechtzeitig darüber!',
+                    desc: 'Auf der Bahn stehen 1er-, 2er- und 3er-Klappstuhlreihen. Springe mit [J], [Shift] oder Pad-A darüber – bei einem Sturz eilt Sani-Sandra mit Kühlpack zur Hilfe!',
+                  },
+                  {
+                    mode: 'springerstaffel' as HallGameMode,
+                    title: '🤸‍♂️ 4. „Springerstaffel“ (Hochsprung-Gestell ab 60 cm)',
+                    desc: 'Überspringe die 4 Hochsprung-Gestelle auf der Bahn! Startet bei 60 cm und steigt nach jeder fehlerfreien Runde um +20 cm.',
                   },
                 ].map((item) => (
                   <button
@@ -3928,11 +6068,29 @@ export function App() {
                     {APP_VERSION_LABEL}
                   </span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextState = !buildModeEnabled;
+                      setBuildModeEnabled(nextState);
+                      if (nextState) {
+                        setShowAdminTerminal(false);
+                      }
+                    }}
+                    className={`min-h-[34px] px-3 py-1 rounded font-mono text-xs font-bold border cursor-pointer transition ${
+                      buildModeEnabled
+                        ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.6)]'
+                        : 'bg-amber-950/90 hover:bg-amber-900 border-amber-400/70 text-amber-200'
+                    }`}
+                  >
+                    🛠️ Baumenü: {buildModeEnabled ? 'AN (Live bearbeiten)' : 'AUS'}
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
                       setIsAdminUnlocked(false);
+                      setBuildModeEnabled(false);
                       saveAdminUnlockedSession(false);
                       setShowAdminTerminal(false);
                     }}
@@ -4110,6 +6268,33 @@ export function App() {
                             </button>
                           ))}
                         </div>
+                      </div>
+
+                      <div className="pt-1 border-t border-slate-800/90 flex items-center justify-between gap-2">
+                        <span className="font-mono text-[10px] uppercase text-pink-300 font-bold">
+                          💃 Background-Tänzer:
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              backgroundDancersEnabled: !(
+                                s.backgroundDancersEnabled ?? true
+                              ),
+                            }))
+                          }
+                          className={`py-0.5 px-2.5 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                            adminSettings.backgroundDancersEnabled ?? true
+                              ? 'bg-pink-500 border-white text-white shadow-[0_0_10px_rgba(236,72,153,0.45)]'
+                              : 'bg-slate-800 border-slate-700 text-slate-300'
+                          }`}
+                        >
+                          💃 Background-Tänzer:{' '}
+                          {(adminSettings.backgroundDancersEnabled ?? true)
+                            ? 'AN'
+                            : 'AUS'}
+                        </button>
                       </div>
                     </div>
 
@@ -4653,6 +6838,50 @@ export function App() {
                         })}
                       </div>
 
+                      {/* 🎛️ 5 WEB-AUDIO DJ-SOUNDBOARD BUTTONS IM DJ-PULT */}
+                      <div className="pt-1.5 border-t border-slate-800 space-y-1">
+                        <span className="block font-mono text-[9.5px] font-bold uppercase text-fuchsia-300">
+                          🎛️ DJ-Soundboard (5 Live Web-Audio-Sounds):
+                        </span>
+                        <div className="grid grid-cols-5 gap-1">
+                          {(
+                            [
+                              {
+                                id: 'airhorn' as DjSoundboardEffectId,
+                                label: '[1] Airhorn',
+                              },
+                              {
+                                id: 'scratch' as DjSoundboardEffectId,
+                                label: '[2] Scratch',
+                              },
+                              {
+                                id: 'laser' as DjSoundboardEffectId,
+                                label: '[3] Laser-Zap',
+                              },
+                              {
+                                id: 'fog-hiss' as DjSoundboardEffectId,
+                                label: '[4] Nebel',
+                              },
+                              {
+                                id: 'applause' as DjSoundboardEffectId,
+                                label: '[5] Applaus',
+                              },
+                            ] as const
+                          ).map((sb) => (
+                            <button
+                              key={sb.id}
+                              type="button"
+                              onClick={() =>
+                                handleTriggerDjSoundboard(sb.id, sb.label)
+                              }
+                              className="min-h-[28px] px-1 py-0.5 rounded bg-fuchsia-950 hover:bg-fuchsia-800 border border-fuchsia-400/60 text-fuchsia-100 font-mono text-[9px] font-bold cursor-pointer truncate transition"
+                            >
+                              {sb.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
                       {editingJingleSlotId && (
                         <div className="p-1.5 rounded bg-slate-900 border border-fuchsia-400/50 space-y-1 text-[10px] font-mono">
                           {(() => {
@@ -4763,11 +6992,11 @@ export function App() {
                       )}
                     </div>
 
-                    {/* 3. HALLEN-SPIEL / EVENT */}
-                    <div className="pt-1 border-t border-slate-800">
-                      <div className="flex items-center justify-between mb-1">
+                    {/* 3. HALLEN-SPIEL / EVENT & HALLENDICHTE / TEMPO */}
+                    <div className="pt-1 border-t border-slate-800 space-y-1.5">
+                      <div className="flex items-center justify-between">
                         <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
-                          3. HALLEN-SPIEL / EVENT (Bahn-Spots &amp; 15er-Counter)
+                          3. HALLEN-SPIEL / EVENT &amp; HALLENDICHTE
                         </h3>
                         {hallGameMode === 'ballspiel' && (
                           <span className="px-1.5 py-0.5 rounded bg-amber-950 border border-amber-400 font-mono text-[10px] text-amber-200 font-bold">
@@ -4776,20 +7005,21 @@ export function App() {
                           </span>
                         )}
                       </div>
-                      <div className="grid grid-cols-4 gap-1">
+                      <div className="grid grid-cols-5 gap-1">
                         {(
                           [
                             { id: 'free-skate', label: 'Frei' },
                             { id: 'ballspiel', label: 'Ballspiel' },
-                            { id: 'slalom', label: 'Slalom' },
+                            { id: 'slalom', label: '🚧 Slalom' },
                             { id: 'stuhlsprung', label: 'Stuhlsprung' },
+                            { id: 'springerstaffel', label: '🤸‍♂️ Springerstaffel' },
                           ] as { id: HallGameMode; label: string }[]
                         ).map((g) => (
                           <button
                             key={g.id}
                             type="button"
                             onClick={() => setHallGameMode(g.id)}
-                            className={`min-h-[32px] py-1 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                            className={`min-h-[30px] py-1 px-1 rounded font-mono text-[9.5px] font-bold border cursor-pointer truncate ${
                               hallGameMode === g.id
                                 ? 'bg-fuchsia-500 text-white border-white'
                                 : 'bg-slate-800 text-slate-300 border-slate-700'
@@ -4798,6 +7028,34 @@ export function App() {
                             {g.label}
                           </button>
                         ))}
+                      </div>
+                      {/* 3er-Schalter HALLENDICHTE / TEMPO kompakt in der Hallenleiter-Regie */}
+                      <div className="flex items-center justify-between gap-1.5 pt-0.5">
+                        <span className="font-mono text-[10px] font-bold text-cyan-300 uppercase shrink-0">
+                          🏁 HALLENDICHTE / TEMPO:
+                        </span>
+                        <div className="grid grid-cols-3 gap-1 flex-1">
+                          {(
+                            [
+                              { id: 'beginner' as SingleplayerDifficulty, label: '🟢 Anfänger' },
+                              { id: 'intermediate' as SingleplayerDifficulty, label: '🟡 Mittel' },
+                              { id: 'pro' as SingleplayerDifficulty, label: '🔴 Profi' },
+                            ] as const
+                          ).map((lvl) => (
+                            <button
+                              key={lvl.id}
+                              type="button"
+                              onClick={() => setDifficulty(lvl.id)}
+                              className={`min-h-[26px] py-0.5 px-1.5 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                                difficulty === lvl.id
+                                  ? 'bg-cyan-500 text-slate-950 border-white'
+                                  : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-cyan-400/50'
+                              }`}
+                            >
+                              {lvl.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
@@ -5560,6 +7818,18 @@ export function App() {
                         ? 'AN'
                         : 'AUS'}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => setCrtFilterEnabled((v) => !v)}
+                      className={`min-h-[34px] px-2.5 py-1 rounded-lg font-mono font-bold text-xs border cursor-pointer transition ${
+                        crtFilterEnabled
+                          ? 'bg-cyan-500 text-slate-950 border-white shadow-[0_0_12px_rgba(34,211,238,0.4)]'
+                          : 'bg-slate-800 text-slate-300 border-slate-600'
+                      }`}
+                    >
+                      📺 80er-CRT-Filter (Scanlines):{' '}
+                      {crtFilterEnabled ? 'AN' : 'AUS'}
+                    </button>
                     {styleFeedbackToast && (
                       <span className="text-[10px] font-mono text-cyan-300">
                         {styleFeedbackToast}
@@ -5617,14 +7887,26 @@ export function App() {
                 </div>
 
                 {/* ============================================================= */}
-                {/* 7. KOMPAKTE BESUCHER-ZÄHLER (4 KACHELN OHNE BALKENDIAGRAMM)   */}
+                {/* 7. EXKLUSIVE HALLEN-STATISTIK NUR IM ADMINBEREICH             */}
                 {/* ============================================================= */}
-                <div className="pt-2 border-t border-slate-800/90">
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div className="pt-2 border-t border-slate-800/90 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono font-bold text-xs uppercase text-cyan-300">
+                      📊 Hallen-Statistik (Exklusiv im Admin-Bereich • localStorage)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setHallStats(resetHallStats())}
+                      className="px-2.5 py-0.5 rounded bg-rose-950/90 hover:bg-rose-900 border border-rose-400/60 text-rose-200 font-mono text-[10px] font-bold cursor-pointer"
+                    >
+                      🗑️ Statistik zurücksetzen
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
                     <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-emerald-400/50 flex items-center justify-between">
                       <div>
                         <div className="text-[10px] font-mono uppercase text-slate-400">
-                          Aktuell auf der Bahn
+                          Aktuell auf Bahn
                         </div>
                         <div className="font-display font-black text-lg text-emerald-300 leading-tight">
                           {activePlayersOnRink}
@@ -5638,9 +7920,52 @@ export function App() {
                     <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-cyan-400/50 flex items-center justify-between">
                       <div>
                         <div className="text-[10px] font-mono uppercase text-slate-400">
-                          Besucher heute
+                          Gestartete Solositzungen
                         </div>
                         <div className="font-display font-black text-lg text-cyan-300 leading-tight">
+                          {hallStats.soloSessionsStarted ?? hallStats.totalSessions}
+                        </div>
+                      </div>
+                      <span className="font-mono text-[9px] text-slate-500">
+                        Solo
+                      </span>
+                    </div>
+
+                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-indigo-400/50 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-slate-400">
+                          Multiplayer-Sitzungen
+                        </div>
+                        <div className="font-display font-black text-lg text-indigo-300 leading-tight">
+                          {hallStats.multiplayerSessionsStarted ?? 0}
+                        </div>
+                      </div>
+                      <span className="font-mono text-[9px] text-indigo-300/80">
+                        🌐 Runden
+                      </span>
+                    </div>
+
+                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-fuchsia-400/50 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-slate-400">
+                          MP-Besucher &amp; Peak
+                        </div>
+                        <div className="font-display font-black text-base text-fuchsia-300 leading-tight">
+                          {hallStats.totalMultiplayerVisitorsSeen ?? 0} Ges. /{' '}
+                          {hallStats.peakConcurrentMultiplayerPlayers ?? 1} Max
+                        </div>
+                      </div>
+                      <span className="font-mono text-[9px] text-slate-500">
+                        Gäste
+                      </span>
+                    </div>
+
+                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-sky-400/50 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-slate-400">
+                          Besucher heute
+                        </div>
+                        <div className="font-display font-black text-lg text-sky-300 leading-tight">
                           {visitsToday}
                         </div>
                       </div>
@@ -5649,32 +7974,251 @@ export function App() {
                       </span>
                     </div>
 
-                    <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-fuchsia-400/50 flex items-center justify-between">
-                      <div>
-                        <div className="text-[10px] font-mono uppercase text-slate-400">
-                          Besuche gesamt
-                        </div>
-                        <div className="font-display font-black text-lg text-fuchsia-300 leading-tight">
-                          {hallStats.totalSessions}
-                        </div>
-                      </div>
-                      <span className="font-mono text-[9px] text-slate-500">
-                        localStorage
-                      </span>
-                    </div>
-
                     <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-amber-400/50 flex items-center justify-between">
                       <div>
                         <div className="text-[10px] font-mono uppercase text-slate-400">
-                          Meiste Besucher (Peak)
+                          Stoßzeit (Peak)
                         </div>
-                        <div className="font-mono font-bold text-sm sm:text-base text-amber-300 leading-tight">
+                        <div className="font-mono font-bold text-xs sm:text-sm text-amber-300 leading-tight">
                           {peakHourText}
                         </div>
                       </div>
                       <span className="font-mono text-[9px] text-amber-300/80">
-                        ⏰ Stoßzeit
+                        ⏰
                       </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ============================================================= */}
+                {/* 🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER ANKERPUNKTE & HITBOX-DEBUG)*/}
+                {/* ============================================================= */}
+                <div className="pt-2.5 border-t border-slate-800/90 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
+                        🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER &amp; ROTE DEBUG-HITBOXEN)
+                      </h3>
+                      <span className="text-[10px] font-mono text-slate-400">
+                        Maus-Drag-&amp;-Drop direkt auf dem Spielfeld • Pfeiltasten{' '}
+                        <strong className="text-cyan-300">1 px</strong> /{' '}
+                        <strong className="text-cyan-300">Shift + Pfeil 10 px</strong> •
+                        Single-Source-of-Truth Kollision
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setBuildModeEnabled((v) => !v)}
+                        className={`min-h-[30px] px-3 py-1 rounded font-mono text-[11px] font-bold border cursor-pointer transition ${
+                          buildModeEnabled
+                            ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.5)]'
+                            : 'bg-slate-800 text-slate-200 border-slate-600 hover:border-amber-400'
+                        }`}
+                      >
+                        🛠️ Baumenü-Modus: {buildModeEnabled ? 'AN' : 'AUS'}
+                      </button>
+
+                      {buildModeEnabled && (
+                        <button
+                          type="button"
+                          onClick={() => setShowAdminTerminal(false)}
+                          className="min-h-[30px] px-2.5 py-1 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono text-[10px] font-bold cursor-pointer"
+                        >
+                          🎯 Auf Spielfeld verschieben (Regie ausblenden)
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={handleCopyCustomCoordinatesJson}
+                        className="min-h-[30px] px-2.5 py-1 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono text-[10px] font-bold cursor-pointer"
+                        title="Kopiert den kompletten DEFAULT_LAYOUT Code-Block (inkl. START/ENDE Kommentarzeilen) für deinen HTML-Editor"
+                      >
+                        {coordsCopiedToast
+                          ? '✅ DEFAULT_LAYOUT Code-Block kopiert!'
+                          : '📋 Code-Block kopieren'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleResetCustomLayout}
+                        className="min-h-[30px] px-2.5 py-1 rounded bg-rose-950 hover:bg-rose-900 border border-rose-400/60 text-rose-200 font-mono text-[10px] font-bold cursor-pointer"
+                      >
+                        ↩️ Standard-Layout
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Compact Grid of all 9 Movable Room Modules (incl. SPINDE, w/h +/- & ↻ Drehen) + AI Skaters & Crew Anchors */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 text-[10px] font-mono">
+                    {/* A) 9 Raum-Module (inkl. SPINDE, Skalieren w/h, Drehen rot & dynamischer Hitbox) */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-cyan-500/40 space-y-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-1 text-cyan-300 font-bold">
+                        <span>
+                          📦 9 Raum-Module (inkl. SPINDE • Zieh-Eck • [R] Drehen):
+                        </span>
+                        <span className="text-[9px] text-rose-300">
+                          ■ Rot = Hitbox • ⚓ Grün = gateLeft/gateRight
+                        </span>
+                      </div>
+
+                      {/* Compact W / H (+/-) & ↻ Drehen toolbar for the currently selected Room Module */}
+                      {selectedBuildItemId?.startsWith('mod:') && (() => {
+                        const selModId = selectedBuildItemId.slice(4) as EditableModuleId;
+                        const selMod = customLayout.modules[selModId];
+                        if (!selMod) return null;
+                        return (
+                          <div className="flex flex-wrap items-center justify-between gap-1.5 p-1.5 rounded bg-slate-900/95 border border-amber-400/60 text-[10px]">
+                            <span className="font-bold text-amber-300 truncate">
+                              🎯 {selMod.label} ({Math.round(selMod.x)}, {Math.round(selMod.y)})
+                            </span>
+                            <div className="flex flex-wrap items-center gap-1">
+                              <span className="text-slate-300">Breite (w):</span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustSelectedModuleSizeOrRot(-8, 0, 0)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 font-bold cursor-pointer"
+                              >
+                                −
+                              </button>
+                              <span className="text-cyan-300 font-bold min-w-[28px] text-center">
+                                {Math.round(selMod.width)}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustSelectedModuleSizeOrRot(8, 0, 0)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 font-bold cursor-pointer"
+                              >
+                                +
+                              </button>
+
+                              <span className="text-slate-300 ml-1">Höhe (h):</span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustSelectedModuleSizeOrRot(0, -8, 0)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 font-bold cursor-pointer"
+                              >
+                                −
+                              </button>
+                              <span className="text-cyan-300 font-bold min-w-[28px] text-center">
+                                {Math.round(selMod.height)}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustSelectedModuleSizeOrRot(0, 8, 0)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 font-bold cursor-pointer"
+                              >
+                                +
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustSelectedModuleSizeOrRot(0, 0, 45)}
+                                className="ml-1 px-2 py-0.5 rounded bg-amber-400/20 hover:bg-amber-400/35 border border-amber-300 text-amber-200 font-bold cursor-pointer"
+                                title="Um 45° drehen (oder Taste R auf dem Spielfeld)"
+                              >
+                                ↻ Drehen ({Math.round(selMod.rot || 0)}°)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustSelectedModuleSizeOrRot(0, 0, 90)}
+                                className="px-1.5 py-0.5 rounded bg-cyan-950 hover:bg-cyan-900 border border-cyan-400/60 text-cyan-200 font-bold cursor-pointer"
+                                title="Um 90° drehen (Shift+R)"
+                              >
+                                +90°
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+                        {(
+                          Object.keys(
+                            customLayout.modules
+                          ) as EditableModuleId[]
+                        ).map((modId) => {
+                          const m = customLayout.modules[modId];
+                          const itemKey = `mod:${modId}`;
+                          const isSelected = selectedBuildItemId === itemKey;
+                          return (
+                            <button
+                              key={modId}
+                              type="button"
+                              onClick={() => {
+                                setSelectedBuildItemId(itemKey);
+                                if (!buildModeEnabled) {
+                                  setBuildModeEnabled(true);
+                                }
+                              }}
+                              className={`p-1.5 rounded border text-left transition cursor-pointer ${
+                                isSelected
+                                  ? 'bg-amber-400/20 border-amber-300 text-amber-200 font-bold'
+                                  : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-300'
+                              }`}
+                            >
+                              <div className="truncate text-[9.5px] font-bold">
+                                {m.label}
+                              </div>
+                              <div className="text-[8.5px] text-cyan-300">
+                                {Math.round(m.x)},{Math.round(m.y)} • {Math.round(m.width)}×{Math.round(m.height)}
+                                {m.rot ? ` • ${Math.round(m.rot)}°` : ''}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* B) KI-Skater & Crew feste Ankerpunkte (homeX / homeY) */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-fuchsia-500/40 space-y-1.5">
+                      <div className="flex items-center justify-between text-fuchsia-300 font-bold">
+                        <span>
+                          🛼 KI-Skater &amp; Crew Ankerpunkte (homeX / homeY):
+                        </span>
+                        <span className="text-[9px] text-emerald-300">
+                          Dauerhaft bei Reload &amp; Event-Ende
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 max-h-28 overflow-y-auto pr-0.5">
+                        {editableNpcList.map((npc) => {
+                          const saved = customLayout.npcAnchors[npc.id];
+                          const hx = Math.round(
+                            saved ? saved.homeX : npc.homeX ?? npc.x
+                          );
+                          const hy = Math.round(
+                            saved ? saved.homeY : npc.homeY ?? npc.y
+                          );
+                          const itemKey = `npc:${npc.id}`;
+                          const isSelected = selectedBuildItemId === itemKey;
+                          return (
+                            <button
+                              key={npc.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedBuildItemId(itemKey);
+                                if (!buildModeEnabled) {
+                                  setBuildModeEnabled(true);
+                                }
+                              }}
+                              className={`p-1 rounded border text-left transition cursor-pointer ${
+                                isSelected
+                                  ? 'bg-amber-400/20 border-amber-300 text-amber-200 font-bold'
+                                  : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-300'
+                              }`}
+                            >
+                              <div className="truncate text-[9px] font-bold">
+                                {npc.name}
+                              </div>
+                              <div className="text-[8.5px] text-fuchsia-300">
+                                X:{hx} • Y:{hy}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -5694,11 +8238,10 @@ export function App() {
                   🌐 Live-Einladung • Raum: {initialUrlRoomId} • {APP_VERSION_LABEL}
                 </span>
                 <h2 className="font-display font-black text-lg text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-amber-200 to-fuchsia-400">
-                  Willkommen im Palladium Hanau! Gib deinen Skater-Namen ein &amp;
-                  wähle dein Freigetränk an der Kasse
+                  Willkommen im Palladium Hanau!
                 </h2>
                 <p className="text-xs text-slate-300">
-                  Du betrittst die echte Multiplayer-Bahn – rolle live mit
+                  Du betrittst die echte 24/7-Multiplayer-Bahn – rolle live mit
                   deinen Freunden zur 80er-Show!
                 </p>
               </div>
@@ -5716,6 +8259,19 @@ export function App() {
                       setGuestJoinNameInput(e.target.value);
                       if (guestJoinError) setGuestJoinError(null);
                     }}
+                    onKeyDown={(e) => {
+                      if (
+                        e.key === 'Enter' &&
+                        guestJoinNameInput.trim().length >= 2 &&
+                        mpStatus !== 'connecting'
+                      ) {
+                        handleConnectAsGuest(
+                          initialUrlRoomId,
+                          guestJoinNameInput,
+                          playerShirtColor
+                        );
+                      }
+                    }}
                     placeholder="Dein Name oder Spitzname..."
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-cyan-400/60 font-mono text-sm text-white focus:outline-none focus:border-amber-300"
                   />
@@ -5724,34 +8280,6 @@ export function App() {
                       ⚠️ {guestJoinError}
                     </div>
                   )}
-                </div>
-
-                <div>
-                  <span className="block font-mono text-xs text-amber-300 mb-1">
-                    🎁 Dein Willkommens-Freigetränk an der Kasse:
-                  </span>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {(
-                      [
-                        { id: 'combo' as FreeDrinkChoice, label: '🎁 Slush + Bloba' },
-                        { id: 'slush' as FreeDrinkChoice, label: '🍧 Slush Puppy' },
-                        { id: 'bloba' as FreeDrinkChoice, label: '🥤 Bloba Cola' },
-                      ] as const
-                    ).map((dr) => (
-                      <button
-                        key={dr.id}
-                        type="button"
-                        onClick={() => setGuestFreeDrinkChoice(dr.id)}
-                        className={`py-1.5 px-2 rounded-lg font-mono text-xs font-bold border transition cursor-pointer ${
-                          guestFreeDrinkChoice === dr.id
-                            ? 'bg-amber-400 text-slate-950 border-white'
-                            : 'bg-slate-950 border-slate-700 text-slate-300'
-                        }`}
-                      >
-                        {dr.label}
-                      </button>
-                    ))}
-                  </div>
                 </div>
 
                 <div>
@@ -5795,8 +8323,7 @@ export function App() {
                     handleConnectAsGuest(
                       initialUrlRoomId,
                       guestJoinNameInput,
-                      playerShirtColor,
-                      guestFreeDrinkChoice
+                      playerShirtColor
                     )
                   }
                   className={`flex-1 py-2.5 px-4 rounded-xl font-mono font-black text-sm transition ${
@@ -5814,7 +8341,484 @@ export function App() {
             </div>
           </div>
         )}
+
+        {/* ===================================================================== */}
+        {/* 10. DIGITALE 10er-STEMPELKARTE MODAL (localStorage)                   */}
+        {/* ===================================================================== */}
+        {showStampCardModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-xl rounded-2xl bg-[#140F26] border-2 border-amber-400 shadow-[0_0_50px_rgba(251,191,36,0.35)] p-5 text-white space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-700 pb-3">
+                <div>
+                  <span className="font-mono text-xs text-amber-300 uppercase">
+                    Palladium Hanau Treuepass • Gespeichert im localStorage
+                  </span>
+                  <h2 className="font-display font-black text-2xl text-white">
+                    🎫 DIGITALE 10er-STEMPELKARTE ({stampCard.stamps} / 10)
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowStampCardModal(false)}
+                  className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
+                >
+                  Schließen
+                </button>
+              </div>
+
+              <div className="grid grid-cols-5 gap-2">
+                {Array.from({ length: 10 }, (_, idx) => {
+                  const num = idx + 1;
+                  const stamped = num <= stampCard.stamps;
+                  return (
+                    <div
+                      key={num}
+                      className={`p-2.5 rounded-xl border text-center font-mono transition ${
+                        stamped
+                          ? 'bg-amber-400/20 border-2 border-amber-400 text-amber-200 shadow-[0_0_12px_rgba(251,191,36,0.3)]'
+                          : 'bg-slate-900/80 border-slate-700 text-slate-500'
+                      }`}
+                    >
+                      <div className="text-[10px]">BESUCH #{num}</div>
+                      <div className="text-lg font-black mt-0.5">
+                        {stamped ? (num === 10 ? '🎁' : '🛼') : '○'}
+                      </div>
+                      <div className="text-[9px] mt-0.5">
+                        {num === 1
+                          ? 'Freigetränk'
+                          : num === 10
+                          ? 'Pro-Shop Gratis'
+                          : stamped
+                          ? 'Gestempelt'
+                          : 'Offen'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-500/40 space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="font-mono font-bold text-cyan-300">
+                    🍹 1x Start-Freigetränk nach Wahl (Stempel #1 im Bistro):
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFreeDrinkChoice('slush');
+                        const next: StampCardData = {
+                          ...stampCard,
+                          welcomeDrinkChoice: 'slush',
+                        };
+                        setStampCard(next);
+                        saveStampCard(next);
+                      }}
+                      className={`px-2.5 py-1 rounded font-mono text-xs font-bold border cursor-pointer ${
+                        stampCard.welcomeDrinkChoice === 'slush'
+                          ? 'bg-cyan-400 text-slate-950 border-white'
+                          : 'bg-slate-900 text-cyan-200 border-slate-700'
+                      }`}
+                    >
+                      🍧 Slush Puppy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFreeDrinkChoice('bloba');
+                        const next: StampCardData = {
+                          ...stampCard,
+                          welcomeDrinkChoice: 'bloba',
+                        };
+                        setStampCard(next);
+                        saveStampCard(next);
+                      }}
+                      className={`px-2.5 py-1 rounded font-mono text-xs font-bold border cursor-pointer ${
+                        stampCard.welcomeDrinkChoice === 'bloba'
+                          ? 'bg-amber-400 text-slate-950 border-white'
+                          : 'bg-slate-900 text-amber-200 border-slate-700'
+                      }`}
+                    >
+                      🥤 Bloba Cola
+                    </button>
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-300">
+                  Pro Besuchstag kommt automatisch <strong>1 Stempel</strong> dazu. Bei{' '}
+                  <strong className="text-amber-300">10 / 10 Stempeln</strong> erhältst du{' '}
+                  <strong>1x Gratis-Zubehör oder Rollschuh-Anhänger</strong> im{' '}
+                  <strong>PRO-SHOP [E]</strong>!
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextStamps = Math.min(10, stampCard.stamps + 1);
+                      const next: StampCardData = {
+                        ...stampCard,
+                        stamps: nextStamps,
+                        freeProShopVoucherAvailable:
+                          stampCard.freeProShopVoucherAvailable ||
+                          nextStamps >= 10,
+                      };
+                      setStampCard(next);
+                      saveStampCard(next);
+                      soundFX.playChallengeUnlocked();
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-amber-400/50 text-amber-200 font-mono text-xs font-bold cursor-pointer"
+                  >
+                    +1 Besuchs-Stempel simulieren (Test)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStampCard(resetStampCard())}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-400 font-mono text-xs cursor-pointer"
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowStampCardModal(false);
+                    setShowProShopModal(true);
+                  }}
+                  className="px-4 py-1.5 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono text-xs font-black cursor-pointer"
+                >
+                  🛠️ Zum Pro-Shop öffnen
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 11. 📱 HANDY-CONTROLLER QR-CODE MODAL (?controller=ROOM_ID)            */}
+        {/* ===================================================================== */}
+        {showPhoneControllerModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-lg rounded-2xl bg-[#101526] border-2 border-cyan-400 shadow-[0_0_50px_rgba(34,211,238,0.4)] p-5 text-white space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-700 pb-3">
+                <div>
+                  <span className="font-mono text-xs text-cyan-300 uppercase">
+                    80s Smartphone Touch-Gamepad • WebRTC Live-Koppeln
+                  </span>
+                  <h2 className="font-display font-black text-xl text-white">
+                    📱 HANDY-CONTROLLER KOPPELN
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPhoneControllerModal(false)}
+                  className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
+                >
+                  Schließen
+                </button>
+              </div>
+
+              {(() => {
+                const targetPadId = mpRoomId || controllerHostId;
+                const base =
+                  typeof window !== 'undefined'
+                    ? `${window.location.origin}${window.location.pathname}`
+                    : '';
+                const controllerUrl = `${base}?controller=${encodeURIComponent(
+                  targetPadId
+                )}`;
+                const qrImgUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&margin=8&data=${encodeURIComponent(
+                  controllerUrl
+                )}`;
+                return (
+                  <div className="space-y-3">
+                    <div className="flex flex-col sm:flex-row items-center gap-4 p-3.5 rounded-xl bg-slate-950 border border-cyan-500/40">
+                      <div className="p-2 rounded-xl bg-white shrink-0 shadow-lg">
+                        <img
+                          src={qrImgUrl}
+                          alt="QR-Code für Smartphone-Controller"
+                          width={148}
+                          height={148}
+                          className="w-36 h-36 block"
+                        />
+                      </div>
+                      <div className="space-y-2 text-xs">
+                        <div className="inline-block px-2 py-0.5 rounded bg-cyan-950 border border-cyan-400/50 font-mono text-[10px] text-cyan-300">
+                          Raum-ID: {targetPadId}
+                        </div>
+                        <p className="text-slate-200 leading-relaxed">
+                          Scanne den <strong>QR-Code</strong> mit deinem Smartphone oder öffne den Link, um dein Handy als{' '}
+                          <strong className="text-fuchsia-300">
+                            80er-Touch-Gamepad
+                          </strong>{' '}
+                          (Steuerkreuz, Sprung, 360°-Spin &amp; Moves) zu nutzen!
+                        </p>
+                        <div className="font-mono text-[11px] text-emerald-300">
+                          Status:{' '}
+                          {phonePadConnected
+                            ? '🟢 Smartphone-Gamepad live verbunden!'
+                            : '⏳ Wartet auf Smartphone-Verbindung...'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        readOnly
+                        value={controllerUrl}
+                        className="flex-1 px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-200"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (
+                            typeof navigator !== 'undefined' &&
+                            navigator.clipboard
+                          ) {
+                            navigator.clipboard.writeText(controllerUrl);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono text-xs font-bold cursor-pointer"
+                      >
+                        📋 Kopieren
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 12. 📺 OPTIONALER 80er-CRT-FILTER (SCANLINES & VIGNETTE OVERLAY)      */}
+        {/* ===================================================================== */}
+        {crtFilterEnabled && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none fixed inset-0 z-40 overflow-hidden"
+            style={{
+              background:
+                'repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.24) 0px, rgba(0, 0, 0, 0.24) 1px, transparent 1px, transparent 3px), radial-gradient(circle at center, transparent 62%, rgba(0, 0, 0, 0.48) 100%)',
+              mixBlendMode: 'multiply',
+            }}
+          />
+        )}
+
+        {/* ===================================================================== */}
+        {/* 13. 📱 FULLSCREEN 80s SMARTPHONE TOUCH-GAMEPAD (?controller=ROOM_ID)  */}
+        {/* ===================================================================== */}
+        {initialControllerRoomId && (
+          <SmartphoneTouchGamepadOverlay targetRoomId={initialControllerRoomId} />
+        )}
       </main>
+    </div>
+  );
+}
+
+function SmartphoneTouchGamepadOverlay({
+  targetRoomId,
+}: {
+  targetRoomId: string;
+}) {
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>(
+    'connecting'
+  );
+  const connRef = useRef<DataConnection | null>(null);
+  const joyRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+  const [knobPos, setKnobPos] = useState<{ x: number; y: number }>({
+    x: 0,
+    y: 0,
+  });
+
+  useEffect(() => {
+    const peer = new Peer(PEER_ICE_CONFIG);
+    peer.on('open', () => {
+      const conn = peer.connect(targetRoomId, { reliable: true });
+      connRef.current = conn;
+      conn.on('open', () => {
+        setStatus('connected');
+      });
+      conn.on('error', () => setStatus('error'));
+      conn.on('close', () => setStatus('error'));
+    });
+    peer.on('error', () => setStatus('error'));
+
+    const interval = window.setInterval(() => {
+      const c = connRef.current;
+      if (c && c.open) {
+        try {
+          c.send({
+            type: 'controller-pad',
+            dx: joyRef.current.dx,
+            dy: joyRef.current.dy,
+          } as MultiplayerPacket);
+        } catch {
+          // ignore
+        }
+      }
+    }, 50);
+
+    return () => {
+      window.clearInterval(interval);
+      try {
+        peer.destroy();
+      } catch {
+        // ignore
+      }
+    };
+  }, [targetRoomId]);
+
+  const sendAction = (patch: Partial<MultiplayerPacket & { type: 'controller-pad' }>) => {
+    const c = connRef.current;
+    if (c && c.open) {
+      try {
+        c.send({
+          type: 'controller-pad',
+          dx: joyRef.current.dx,
+          dy: joyRef.current.dy,
+          ...patch,
+        });
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const handlePadPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const maxR = rect.width * 0.42;
+    const rawX = e.clientX - cx;
+    const rawY = e.clientY - cy;
+    const dist = Math.hypot(rawX, rawY);
+    const scale = dist > maxR ? maxR / dist : 1;
+    const nx = (rawX * scale) / maxR;
+    const ny = (rawY * scale) / maxR;
+    joyRef.current = {
+      dx: Math.round(nx * 100) / 100,
+      dy: Math.round(ny * 100) / 100,
+    };
+    setKnobPos({ x: rawX * scale, y: rawY * scale });
+  };
+
+  const resetPadPointer = () => {
+    joyRef.current = { dx: 0, dy: 0 };
+    setKnobPos({ x: 0, y: 0 });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-[#080714] text-white flex flex-col justify-between p-4 select-none touch-none">
+      <div className="flex items-center justify-between px-4 py-2 rounded-xl bg-slate-950 border border-fuchsia-500/60">
+        <div>
+          <div className="font-display font-black text-base text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 via-amber-200 to-cyan-300">
+            📱 PALLADIUM 80s HANDY-CONTROLLER
+          </div>
+          <div className="font-mono text-[11px] text-slate-400">
+            Ziel-Raum: <strong className="text-cyan-300">{targetRoomId}</strong>
+          </div>
+        </div>
+        <span
+          className={`px-2.5 py-1 rounded font-mono text-xs font-bold border ${
+            status === 'connected'
+              ? 'bg-emerald-950 border-emerald-400 text-emerald-300'
+              : status === 'connecting'
+              ? 'bg-amber-950 border-amber-400 text-amber-200'
+              : 'bg-rose-950 border-rose-400 text-rose-200'
+          }`}
+        >
+          {status === 'connected'
+            ? '🟢 LIVE VERBUNDEN'
+            : status === 'connecting'
+            ? '⏳ VERBINDE...'
+            : '⚠️ GETRENNT'}
+        </span>
+      </div>
+
+      <div className="flex-1 grid grid-cols-2 gap-4 items-center my-3">
+        {/* Left: 80s Arcade Touch Thumbstick */}
+        <div className="flex flex-col items-center justify-center">
+          <div
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              handlePadPointer(e);
+            }}
+            onPointerMove={(e) => {
+              if (e.buttons > 0) handlePadPointer(e);
+            }}
+            onPointerUp={resetPadPointer}
+            onPointerCancel={resetPadPointer}
+            className="relative w-44 h-44 rounded-full bg-slate-900 border-4 border-cyan-400 shadow-[0_0_30px_rgba(34,211,238,0.4)] flex items-center justify-center"
+          >
+            <div className="w-16 h-16 rounded-full border border-cyan-500/30" />
+            <div
+              style={{
+                transform: `translate(${knobPos.x}px, ${knobPos.y}px)`,
+              }}
+              className="w-16 h-16 rounded-full bg-gradient-to-br from-fuchsia-500 to-cyan-400 border-2 border-white shadow-lg"
+            />
+          </div>
+          <span className="font-mono text-xs text-cyan-300 mt-2">
+            🕹️ 360° LENK-STICK
+          </span>
+        </div>
+
+        {/* Right: 80s Neon Action & Trick Buttons */}
+        <div className="flex flex-col gap-2.5">
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onPointerDown={() => sendAction({ jump: true })}
+              className="py-4 rounded-2xl bg-amber-400 active:bg-amber-300 text-slate-950 font-mono font-black text-sm border-2 border-white shadow-[0_0_20px_rgba(251,191,36,0.5)]"
+            >
+              🦘 SPRUNG [A]
+            </button>
+            <button
+              type="button"
+              onPointerDown={() => sendAction({ spin: true })}
+              className="py-4 rounded-2xl bg-fuchsia-600 active:bg-fuchsia-500 text-white font-mono font-black text-sm border-2 border-white shadow-[0_0_20px_rgba(232,121,249,0.5)]"
+            >
+              🌀 360°-SPIN [B]
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onPointerDown={() => sendAction({ interact: true })}
+            className="py-3 rounded-xl bg-emerald-500 active:bg-emerald-400 text-slate-950 font-mono font-black text-xs border-2 border-white"
+          >
+            ✋ AKTION / WURF / THEKE [E]
+          </button>
+
+          <div className="grid grid-cols-2 gap-1.5 pt-1">
+            {(
+              [
+                { id: 'spin360' as TrickMoveId, label: '[1] 🌀 Spin' },
+                { id: 'backward' as TrickMoveId, label: '[2] 🔙 Backward' },
+                { id: 'flamingo' as TrickMoveId, label: '[3] 🦩 Flamingo' },
+                { id: 'starjump' as TrickMoveId, label: '[4] ⚡ Star-Jump' },
+              ] as const
+            ).map((mv) => (
+              <button
+                key={mv.id}
+                type="button"
+                onPointerDown={() => sendAction({ trickMove: mv.id })}
+                className="py-2 rounded-lg bg-slate-900 active:bg-fuchsia-800 border border-fuchsia-400/60 text-fuchsia-200 font-mono text-[11px] font-bold"
+              >
+                {mv.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="text-center font-mono text-[10px] text-slate-400">
+        Palladium Hanau &apos;86 • 80er-Touch-Gamepad • Echtzeit-WebRTC
+      </div>
     </div>
   );
 }
