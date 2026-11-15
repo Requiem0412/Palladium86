@@ -13316,6 +13316,37 @@ export function App() {
                   </div>
                 </div>
               </div>
+              <div className="space-y-1.5">
+            <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400">
+              Wie rollst du rein?
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { id: 'skater', label: 'Eigene Rollschuhe', icon: '🛼' },
+                  { id: 'rental', label: 'Leihrollschuhe', icon: '👟' },
+                  { id: 'wheelchair', label: 'Rollstuhl', icon: '♿' },
+                ] as const
+              ).map((mode) => {
+                const active = characterMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => setCharacterMode(mode.id)}
+                    className={`flex flex-col items-center justify-center gap-1 px-2 py-2 rounded-lg border font-mono text-xs transition ${
+                      active
+                        ? 'bg-slate-800 border-2 border-cyan-400 text-white font-bold shadow-[0_0_12px_rgba(34,211,238,0.35)]'
+                        : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-slate-500'
+                    }`}
+                  >
+                    <span className="text-base">{mode.icon}</span>
+                    <span className="truncate max-w-full">{mode.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
               <div className="flex items-center gap-2 pt-2">
                 <button
