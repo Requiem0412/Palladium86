@@ -7,7 +7,7 @@
 // 1. EDITIERBARE TOP-LEVEL KONSTANTEN (ADMIN-PIN & GEISTER-SKATER)
 // ============================================================================
 
-export const APP_VERSION_LABEL = 'Update V0.5 • Aktualisiert am 14.11.2026';
+export const APP_VERSION_LABEL = 'v3.0.8-FUTURE-EDITION';
 
 export const ADMIN_PIN = '1986';
 
@@ -70,6 +70,13 @@ export const LEGACY_DEFAULT_GHOSTS: string[] = [
   'Nachtläufer Hanau',
 ];
 
+export type StationDialogId =
+  | 'kasse'
+  | 'verleih'
+  | 'proshop'
+  | 'snackbar'
+  | 'dj';
+
 export interface CrewNamesConfig {
   dj: string;
   lightJockey: string;
@@ -77,6 +84,10 @@ export interface CrewNamesConfig {
   rollerTeacher: string;
   nurse: string;
   security?: string;
+  cashier?: string;
+  rental?: string;
+  proShop?: string;
+  snackBar?: string;
 }
 
 export const DEFAULT_CREW_NAMES: CrewNamesConfig = {
@@ -86,14 +97,110 @@ export const DEFAULT_CREW_NAMES: CrewNamesConfig = {
   rollerTeacher: 'TRAINERIN CONNY',
   nurse: 'Schwester Gudrun',
   security: 'Security-Sammy',
+  cashier: 'Kassen-Karin',
+  rental: 'Verleih-Biggi',
+  proShop: 'Tuning-Tommy',
+  snackBar: 'Slush-Uschi',
 };
 
+export interface StationDialogMeta {
+  id: StationDialogId;
+  stationNumber: number;
+  title: string;
+  roleBadge: string;
+  crewKey: keyof CrewNamesConfig;
+  defaultCrewName: string;
+  defaultQuote: string;
+  accentHex: string;
+}
+
+export const STATION_DIALOG_DEFAULTS: Record<StationDialogId, StationDialogMeta> = {
+  kasse: {
+    id: 'kasse',
+    stationNumber: 1,
+    title: '1. KASSE & EINLASS',
+    roleBadge: 'TICKETS • STEMPEL • CLIQUE',
+    crewKey: 'cashier',
+    defaultCrewName: 'Kassen-Karin',
+    defaultQuote:
+      "Willkommen im Palladium Hanau '86! Stempel aufs Handgelenk, Freigetränk-Chip einstecken und ab ins Neon-Licht!",
+    accentHex: '#fde047',
+  },
+  verleih: {
+    id: 'verleih',
+    stationNumber: 2,
+    title: '2. ROLLSCHUH-VERLEIH',
+    roleBadge: 'LEIH-SKATES • EIGENE • ROLLSTUHL',
+    crewKey: 'rental',
+    defaultCrewName: 'Verleih-Biggi',
+    defaultQuote:
+      'Größe 36 bis 47 frisch geölt! Schnür die 80er-Lederstiefel fest oder wähle den Neon-Rollstuhl – heute glühen die Kugellager!',
+    accentHex: '#fb923c',
+  },
+  proshop: {
+    id: 'proshop',
+    stationNumber: 3,
+    title: '3. PRO-SHOP & TUNING',
+    roleBadge: 'OUTFITS • ROLLEN • CLOUD-SAVE',
+    crewKey: 'proShop',
+    defaultCrewName: 'Tuning-Tommy',
+    defaultQuote:
+      'Original Sims-Leuchtrollen, Kengol-Bucket-Hat und 80er-Outfits! Dein Style wird direkt in der Supabase-Cloud verewigt!',
+    accentHex: '#00f0ff',
+  },
+  snackbar: {
+    id: 'snackbar',
+    stationNumber: 4,
+    title: '4. SNACK-BAR (SLUSH & BLOB)',
+    roleBadge: 'SLUSH PUPPY • BLOBA COLA • BOOST',
+    crewKey: 'snackBar',
+    defaultCrewName: 'Slush-Uschi',
+    defaultQuote:
+      'Eiskaltes Waldmeister-Kirsch Slush-Puppie oder prickelnde Bloba Cola? Gibt sofort vollen Turbo-Boost für die Bahn!',
+    accentHex: '#ff2a85',
+  },
+  dj: {
+    id: 'dj',
+    stationNumber: 5,
+    title: '5. DJ-KANZEL (TWIN-DECKS)',
+    roleBadge: 'MUSIKWÜNSCHE • ON AIR • 3x3 SAMPLER',
+    crewKey: 'dj',
+    defaultCrewName: 'DJ Magic Force',
+    defaultQuote:
+      'Greetings von den Klecknix Twin-Decks! Welchen 80er-Maxi-Hit soll ich als Nächstes für euch über die Hallen-PA jagen?',
+    accentHex: '#c084fc',
+  },
+};
+
+export type DjJingleSlotId =
+  | 'intro'
+  | 'last-round'
+  | 'jam-battle'
+  | 'slow-skating'
+  | 'sample-5'
+  | 'sample-6'
+  | 'sample-7'
+  | 'sample-8'
+  | 'sample-9';
+
 export interface DjJingleSlot {
-  id: 'intro' | 'last-round' | 'jam-battle' | 'slow-skating';
+  id: DjJingleSlotId;
   label: string;
   bubbleText: string;
   audioUrl: string;
   fileName?: string;
+  keyNumber?: number; // 1..9 for 3x3 Sampler Launchpad
+  showInHandheld?: boolean; // Assignable to Game-Boy-Regie-Handheld
+  synthFallback?:
+    | 'intro'
+    | 'last-round'
+    | 'jam-battle'
+    | 'slow-skating'
+    | 'airhorn'
+    | 'scratch'
+    | 'laser'
+    | 'fog-hiss'
+    | 'applause';
 }
 
 export const DEFAULT_DJ_JINGLE_SLOTS: DjJingleSlot[] = [
@@ -102,26 +209,161 @@ export const DEFAULT_DJ_JINGLE_SLOTS: DjJingleSlot[] = [
     label: '🎙️ Ladies & Gentlemen Intro',
     bubbleText: '🎙️ LADIES & GENTLEMEN — WILLKOMMEN IM PALLADIUM HANAU!',
     audioUrl: '',
+    keyNumber: 1,
+    showInHandheld: true,
+    synthFallback: 'intro',
   },
   {
     id: 'last-round',
     label: '🚨 Letzte Runde',
     bubbleText: '🚨 ACHTUNG SKATER: LETZTE RUNDE FÜR HEUTE ABEND!',
     audioUrl: '',
+    keyNumber: 2,
+    showInHandheld: false,
+    synthFallback: 'last-round',
   },
   {
     id: 'jam-battle',
     label: '🕺 Jam-Battle',
     bubbleText: '🕺 ALLE ZUR SPIEGELWAND — DAS JAM-BATTLE STARTET JETZT!',
     audioUrl: '',
+    keyNumber: 3,
+    showInHandheld: false,
+    synthFallback: 'jam-battle',
   },
   {
     id: 'slow-skating',
     label: '🪩 Slow-Skating',
     bubbleText: '🪩 LICHT AUS, SPOT AN — ZEIT FÜR DIE KUSCHELRUNDE!',
     audioUrl: '',
+    keyNumber: 4,
+    showInHandheld: true,
+    synthFallback: 'slow-skating',
+  },
+  {
+    id: 'sample-5',
+    label: '📣 Club Airhorn 86',
+    bubbleText: '📣 DJ-AIRHORN: BRRRRRR-BÄÄÄM!',
+    audioUrl: '',
+    keyNumber: 5,
+    showInHandheld: true,
+    synthFallback: 'airhorn',
+  },
+  {
+    id: 'sample-6',
+    label: '💿 Klecknix Scratch',
+    bubbleText: '💿 TWIN-DECKS VINYL SCRATCH: WIKA-WIKA!',
+    audioUrl: '',
+    keyNumber: 6,
+    showInHandheld: false,
+    synthFallback: 'scratch',
+  },
+  {
+    id: 'sample-7',
+    label: '⚡ Space Laser-Zap',
+    bubbleText: '⚡ 80s LASER-SYNTH DROP!',
+    audioUrl: '',
+    keyNumber: 7,
+    showInHandheld: false,
+    synthFallback: 'laser',
+  },
+  {
+    id: 'sample-8',
+    label: '💨 CO2 Nebel-Jingle',
+    bubbleText: '💨 NEBELMASCHINE VOLLDAMPF!',
+    audioUrl: '',
+    keyNumber: 8,
+    showInHandheld: false,
+    synthFallback: 'fog-hiss',
+  },
+  {
+    id: 'sample-9',
+    label: '👏 Hallen-Applaus',
+    bubbleText: '👏 APPLAUS FÜR UNSERE SKATER AUF DER BAHN!',
+    audioUrl: '',
+    keyNumber: 9,
+    showInHandheld: false,
+    synthFallback: 'applause',
   },
 ];
+
+export type HallAnnouncementPresetId =
+  | 'towing'
+  | 'direction_change'
+  | 'couple_skate'
+  | 'last_lap';
+
+export interface HallAnnouncementPreset {
+  id: HallAnnouncementPresetId;
+  buttonLabel: string;
+  bannerText: string;
+  speechText: string;
+  useThreeToneGong: boolean;
+}
+
+export const HALL_ANNOUNCEMENT_PRESETS: HallAnnouncementPreset[] = [
+  {
+    id: 'towing',
+    buttonLabel: '🚓 Abschlepp-Durchsage',
+    bannerText:
+      '🚨 ACHTUNG DURCHSAGE: IHR FAHRZEUG MIT DEM KENNZEICHEN HU-PR 1986 STEHT IM HALTEVERBOT UND WIRD GLEICH ABGESCHLEPPT! BITTE SOFORT UMPARKEN! +++',
+    speechText:
+      'Achtung Durchsage! Ihr Fahrzeug wird gleich abgeschleppt. Bitte den PKW vor der Halle sofort umparken!',
+    useThreeToneGong: true,
+  },
+  {
+    id: 'direction_change',
+    buttonLabel: '🔄 Richtungswechsel!',
+    bannerText:
+      '🔄 ACHTUNG HALLEN-DURCHSAGE: ALLE SKATER BITTE VORSICHTIG ABBREMSEN — WIR WECHSELN JETZT DIE FAHRTRICHTUNG! +++',
+    speechText:
+      'Achtung Skater! Bitte abbremsen, Richtungswechsel auf der großen Bahn!',
+    useThreeToneGong: true,
+  },
+  {
+    id: 'couple_skate',
+    buttonLabel: '💑 Paarlauf!',
+    bannerText:
+      '💑 ACHTUNG DURCHSAGE: JETZT BEGINNT DER PAARLAUF! BITTE HAND IN HAND AUF DER GROSSEN ROLLSCHUHBAHN ROLLEN! +++',
+    speechText:
+      'Jetzt beginnt der Paarlauf im Palladium Hanau! Schnappt euch euren Partner auf acht Rollen!',
+    useThreeToneGong: true,
+  },
+  {
+    id: 'last_lap',
+    buttonLabel: '🏁 Letzte Runde!',
+    bannerText:
+      '🏁 ACHTUNG DURCHSAGE: DIE LETZTE RUNDE DES ABENDS LÄUFT — BITTE DANACH DIE LEIHROLLSCHUHE AM VERLEIH ABGEBEN! +++',
+    speechText:
+      'Achtung liebe Gäste, es läuft die letzte Runde! Bitte gebt danach eure Leihrollschuhe am Verleih ab.',
+    useThreeToneGong: true,
+  },
+];
+
+export interface DjSongRequestItem {
+  id: string;
+  trackTitle: string;
+  requestedBy: string;
+  createdAt: string;
+  played?: boolean;
+}
+
+export interface LiveBroadcastSampleEvent {
+  slotId: DjJingleSlotId;
+  label: string;
+  bubbleText: string;
+  audioUrl: string;
+  synthFallback?: DjJingleSlot['synthFallback'];
+  timestamp: number;
+}
+
+export interface LiveHallAnnouncementEvent {
+  presetId: HallAnnouncementPresetId;
+  bannerText: string;
+  speechText: string;
+  useThreeToneGong: boolean;
+  timestamp: number;
+}
 
 export const DEFAULT_TWITCH_CHANNEL = 'Dj_Magic_Force';
 export const DEFAULT_DJ_NAME = 'DJ Magic Force';

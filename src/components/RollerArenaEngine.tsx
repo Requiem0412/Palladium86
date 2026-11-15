@@ -23,6 +23,7 @@ import {
   PlayerCharacterMode,
   ProShopUpgradesState,
   SkateCharmId,
+  StationDialogId,
   TrickMoveId,
   WORLD_HEIGHT,
   WORLD_WIDTH,
@@ -47,6 +48,7 @@ export interface ArenaLiveTelemetry {
   nearSkateRental: boolean;
   nearBistroCounter: boolean;
   nearDjTower: boolean;
+  nearCashier?: boolean;
   hasSkatesEquipped: boolean;
   djAudioProximity: number; // 0.15 .. 1.0
   gamepadConnected: boolean;
@@ -85,6 +87,7 @@ export interface MultiplayerPlayerState {
   trickTimer?: number;
   wristbandColor?: NeonWristbandColor;
   activeCharm?: SkateCharmId | null;
+  avatarRole?: 'standard' | 'kid' | 'stammgast';
 }
 
 interface InterpolatedRemotePlayer extends MultiplayerPlayerState {
@@ -204,6 +207,13 @@ interface RollerArenaEngineProps {
   ) => void;
   onAwardObstaclePoints?: (points: number) => void;
   onRequestAdminPinModal?: () => void;
+  mobilitySelected?: boolean;
+  avatarRole?: 'standard' | 'kid' | 'stammgast';
+  sundayCliqueActive?: boolean;
+  onOpenStationDialog?: (stationId: StationDialogId) => void;
+  newspaperEnabled?: boolean;
+  newspaperHasNewBadge?: boolean;
+  onOpenNewspaperModal?: () => void;
 }
 
 export interface TrackNpc {
@@ -1124,6 +1134,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   onCertificateEvent,
   onAwardObstaclePoints,
   onRequestAdminPinModal,
+  mobilitySelected = true,
+  avatarRole = 'standard',
+  sundayCliqueActive = false,
+  onOpenStationDialog,
+  newspaperEnabled = true,
+  newspaperHasNewBadge = false,
+  onOpenNewspaperModal,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fogEnabledRef = useRef<boolean>(fogMachineEnabled);
@@ -1266,6 +1283,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     onCertificateEvent,
     onAwardObstaclePoints,
     onRequestAdminPinModal,
+    mobilitySelected,
+    avatarRole,
+    sundayCliqueActive,
+    onOpenStationDialog,
+    newspaperEnabled,
+    newspaperHasNewBadge,
+    onOpenNewspaperModal,
   });
 
   useEffect(() => {
@@ -1352,6 +1376,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       onCertificateEvent,
       onAwardObstaclePoints,
       onRequestAdminPinModal,
+      mobilitySelected,
+      avatarRole,
+      sundayCliqueActive,
+      onOpenStationDialog,
+      newspaperEnabled,
+      newspaperHasNewBadge,
+      onOpenNewspaperModal,
     };
   }, [
     playerName,
@@ -1433,6 +1464,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     onCertificateEvent,
     onAwardObstaclePoints,
     onRequestAdminPinModal,
+    mobilitySelected,
+    avatarRole,
+    sundayCliqueActive,
+    onOpenStationDialog,
+    newspaperEnabled,
+    newspaperHasNewBadge,
+    onOpenNewspaperModal,
   ]);
 
   useEffect(() => {
@@ -2007,6 +2045,19 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         }
       }
 
+      // 0b. Check 1. Kasse & Einlass proximity (Station 1)
+      const cb = ARENA_LAYOUT.bottomEntrance.cashierBooth;
+      const distCashier = Math.hypot(
+        player.x - cb.centerX,
+        player.y - cb.centerY
+      );
+      if (distCashier <= 125) {
+        p.onOpenStationDialog?.('kasse');
+        player.speechBubble = `🎟️ 1. Kasse (${p.crewNames?.cashier || 'Kassen-Karin'}): Tickets & Stempelkarte!`;
+        player.speechTimer = 2.8;
+        return;
+      }
+
       // 0. Check Rollschuh-Verleih Counter proximity (Single Source of Truth from ARENA_LAYOUT.proShopAndRental!)
       const rentalCenterX = ARENA_LAYOUT.proShopAndRental.rentalInteractX;
       const rentalInteractY = ARENA_LAYOUT.proShopAndRental.rentalInteractY;
@@ -2015,6 +2066,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         player.y - rentalInteractY
       );
       if (distRental <= ARENA_LAYOUT.proShopAndRental.rentalInteractRadius) {
+        p.onOpenStationDialog?.('verleih');
         if (!p.hasOwnSkates && !p.hasRentedSkates) {
           p.onRedeemDrinkChipAtRental();
           player.freeSlushCount = 0;
@@ -2048,6 +2100,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         player.y - ARENA_LAYOUT.bistro.interactY
       );
       if (distBistro <= ARENA_LAYOUT.bistro.interactRadius) {
+        p.onOpenStationDialog?.('snackbar');
         p.onIntroStepComplete?.('fetch_drink');
         if (!p.hasOwnSkates && !p.hasRentedSkates) {
           player.speechBubble =
@@ -2077,32 +2130,31 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         return;
       }
 
-      // 2. Check Pro-Shop proximity (Never hands out rental skates; street-shoe visitors must go to ROLLSCHUHVERLEIH!)
+      // 2. Check Pro-Shop proximity (Station 3: 80s Pixel-Arcade-Dialog & Pro-Shop)
       const distShop = Math.hypot(
         player.x - ARENA_LAYOUT.proShopAndRental.proShopInteractX,
         player.y - ARENA_LAYOUT.proShopAndRental.proShopInteractY
       );
       if (distShop <= ARENA_LAYOUT.proShopAndRental.proShopInteractRadius) {
-        if (
-          !p.hasOwnSkates &&
-          !p.hasRentedSkates &&
-          p.characterMode !== 'wheelchair'
-        ) {
-          player.speechBubble =
-            '👟 Keine Leih-Skates im Pro-Shop! Bitte links nebenan zum ROLLSCHUHVERLEIH [E] gehen!';
-          player.speechTimer = 3.6;
+        if (p.onOpenStationDialog) {
+          p.onOpenStationDialog('proshop');
           return;
         }
         p.onOpenProShopModal();
         return;
       }
 
-      // 2b. Check DJ-Tower proximity for live DJ shoutout with activeDjName!
+      // 2b. Check DJ-Tower proximity for Station 5 DJ-Kanzel Dialog & live DJ shoutout!
       const distDj = Math.hypot(
         player.x - ARENA_LAYOUT.djTower.centerX,
         player.y - ARENA_LAYOUT.djTower.centerY
       );
-      if (distDj <= 210) {
+      const distDjEgo = Math.hypot(
+        player.x - ARENA_LAYOUT.djTower.egoTriggerX,
+        player.y - ARENA_LAYOUT.djTower.egoTriggerY
+      );
+      if (distDj <= 220 || distDjEgo <= ARENA_LAYOUT.djTower.egoTriggerRadius) {
+        p.onOpenStationDialog?.('dj');
         const djName = p.activeDjName || 'DJ Magic Force';
         djSpeechBubble = `🎤 "${djName}: Grüße von den Klecknix Twin-Decks ans Palladium Hanau!"`;
         djSpeechTimer = 5.5;
@@ -2658,18 +2710,41 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         }
       }
 
-      // Check click on the curved top-left DJ-Pult ("▶ DJ-PULT [KLICK] ◀")
+      // Check click on 80s Newspaper Stand ("Der Palladium-Kurier") in front entrance/reception area
+      const cb = ARENA_LAYOUT.bottomEntrance.cashierBooth;
+      const newsStandX = cb.x + cb.width / 2;
+      const newsStandY = cb.y + cb.height + 36;
+      if (
+        propsRef.current.newspaperEnabled !== false &&
+        Math.hypot(worldX - newsStandX, worldY - newsStandY) <= 44
+      ) {
+        propsRef.current.onOpenNewspaperModal?.();
+        return;
+      }
+
+      // Check click on 1. Kasse & Einlass ("KASSE & EINGANG")
+      if (
+        worldX >= cb.x - 20 &&
+        worldX <= cb.x + cb.width + 20 &&
+        worldY >= cb.y - 20 &&
+        worldY <= cb.y + cb.height + 20
+      ) {
+        propsRef.current.onOpenStationDialog?.('kasse');
+        return;
+      }
+
+      // Check click on the curved top-left DJ-Pult ("▶ DJ-PULT [KLICK] ◀" / Station 5: DJ-Kanzel)
       const { djTower, proShopAndRental } = ARENA_LAYOUT;
       if (
         Math.hypot(worldX - djTower.centerX, worldY - djTower.centerY) <=
         djTower.clickRadius
       ) {
+        propsRef.current.onOpenStationDialog?.('dj');
         propsRef.current.onClickDjConsole?.();
-        propsRef.current.onToggleTwitchStream?.();
         return;
       }
 
-      // Check click on Rollschuh-Verleih counter to redeem Freigetränk-Chip for rental skates!
+      // Check click on Rollschuh-Verleih counter (Station 2: Verleih)
       const rb = proShopAndRental.rentalBounds;
       if (
         worldX >= rb.x &&
@@ -2677,6 +2752,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         worldY >= rb.y - 45 &&
         worldY <= rb.y + rb.height
       ) {
+        propsRef.current.onOpenStationDialog?.('verleih');
         if (!propsRef.current.hasOwnSkates && !propsRef.current.hasRentedSkates) {
           propsRef.current.onRedeemDrinkChipAtRental();
           player.freeSlushCount = 0;
@@ -2690,8 +2766,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             'VERLEIH-BIGGI',
             'female'
           );
-          return;
         }
+        return;
       }
 
       // Check click on 80er-Spindreihe ("SPINDE") -> opens compact Spind menu & completes Intro step 1!
@@ -2712,7 +2788,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         }
       }
 
-      // Check click on Bistro / Gastro Counter -> fetches drink & completes Intro step 2!
+      // Check click on Bistro / Gastro Counter (Station 4: Snack-Bar)
       const bc = ARENA_LAYOUT.bistro.counter;
       if (
         worldX >= bc.x - 20 &&
@@ -2720,6 +2796,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         worldY >= bc.y - 35 &&
         worldY <= bc.y + bc.height + 35
       ) {
+        propsRef.current.onOpenStationDialog?.('snackbar');
         propsRef.current.onIntroStepComplete?.('fetch_drink');
         player.slushRemainingSec = 75;
         player.blobaColaRemainingSec = 45;
@@ -2742,7 +2819,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         return;
       }
 
-      // Check click on Pro-Shop showcase
+      // Check click on Pro-Shop showcase (Station 3: Pro-Shop)
       const sb = proShopAndRental.proShopBounds;
       if (
         worldX >= sb.x &&
@@ -2750,7 +2827,11 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         worldY >= sb.y - 40 &&
         worldY <= sb.y + sb.height
       ) {
-        propsRef.current.onOpenProShopModal();
+        if (propsRef.current.onOpenStationDialog) {
+          propsRef.current.onOpenStationDialog('proshop');
+        } else {
+          propsRef.current.onOpenProShopModal();
+        }
         return;
       }
 
@@ -2914,9 +2995,10 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
       const p = propsRef.current;
       const hasSkatesEquipped =
-        p.hasOwnSkates ||
-        p.hasRentedSkates ||
-        p.characterMode === 'wheelchair';
+        p.mobilitySelected !== false &&
+        (p.hasOwnSkates ||
+          p.hasRentedSkates ||
+          p.characterMode === 'wheelchair');
 
       // Keep Single Source of Truth ARENA_LAYOUT & NPC home anchors synchronized with customLayout (including Reset & Multiplayer Live-Sync!)
       const currentLayoutJson = JSON.stringify(p.customLayout || null);
@@ -3701,10 +3783,12 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         player.vy = Math.max(0, player.vy);
         if (player.speechTimer <= 0.4) {
           player.speechBubble =
-            '🛑 Nicht mit Straßenschuhen auf die Bahn! Erst am ROLLSCHUHVERLEIH [E] Leih-Skates holen!';
+            p.mobilitySelected === false
+              ? '🚧 Schranke verriegelt: Bitte wähle erst deine Rollschuhe, Leihrollschuhe oder Rollstuhl!'
+              : '🛑 Bitte wähle erst deine Rollschuhe! Am ROLLSCHUHVERLEIH [E] Leih-Skates holen!';
           player.speechTimer = 3.2;
           speakNpcBubble(
-            'Halt! Nicht mit Straßenschuhen aufs Parkett! Hol dir erst Leih-Rollschuhe am Verleih!',
+            'Halt! Bitte wähle erst deine Rollschuhe, Leihrollschuhe oder den Rollstuhl vor dem Bahneintritt!',
             'SKATE GUARD MANNI',
             'male'
           );
@@ -5554,6 +5638,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             ? p.upgrades.wristbandColor
             : undefined,
           activeCharm: p.upgrades.activeCharm || null,
+          avatarRole: p.avatarRole || 'standard',
         });
       }
 
@@ -5610,6 +5695,11 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               player.x - ARENA_LAYOUT.djTower.egoTriggerX,
               player.y - ARENA_LAYOUT.djTower.egoTriggerY
             ) <= ARENA_LAYOUT.djTower.egoTriggerRadius,
+          nearCashier:
+            Math.hypot(
+              player.x - ARENA_LAYOUT.bottomEntrance.cashierBooth.centerX,
+              player.y - ARENA_LAYOUT.bottomEntrance.cashierBooth.centerY
+            ) <= 130,
           hasSkatesEquipped,
           djAudioProximity: djProximity,
           gamepadConnected,
@@ -6267,6 +6357,11 @@ function renderCompleteScene(
     neonLightboxLine1?: string;
     neonLightboxLine2?: string;
     neonLightboxLine3?: string;
+    mobilitySelected?: boolean;
+    avatarRole?: 'standard' | 'kid' | 'stammgast';
+    sundayCliqueActive?: boolean;
+    newspaperEnabled?: boolean;
+    newspaperHasNewBadge?: boolean;
   },
   player: {
     x: number;
@@ -7356,8 +7451,69 @@ function renderCompleteScene(
         isBackwardGliding: rp.activeTrickMove === 'backward',
         wristbandColor: rp.wristbandColor,
         activeCharm: rp.activeCharm || null,
+        avatarRole: rp.avatarRole || 'standard',
       });
     }
+  }
+
+  // 9c. RENDER 80s NEWSPAPER STAND ("DER PALLADIUM-KURIER") IN FRONT ENTRANCE / RECEPTION AREA
+  if (p.newspaperEnabled !== false) {
+    const cb = ARENA_LAYOUT.bottomEntrance.cashierBooth;
+    const nsX = cb.x + cb.width / 2;
+    const nsY = cb.y + cb.height + 36;
+    ctx.save();
+    ctx.translate(nsX, nsY);
+
+    // Vintage 80s Wire Rack & Newspaper Stack Base
+    ctx.fillStyle = '#1e1b4b';
+    ctx.strokeStyle = '#fde047';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.roundRect(-36, -18, 72, 36, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Folded 80s Newspaper Icon on Rack
+    ctx.fillStyle = '#fef3c7';
+    ctx.strokeStyle = '#78350f';
+    ctx.lineWidth = 1.4;
+    ctx.fillRect(-26, -12, 22, 16);
+    ctx.strokeRect(-26, -12, 22, 16);
+    ctx.fillStyle = '#dc2626';
+    ctx.fillRect(-24, -10, 18, 3);
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(-24, -5, 8, 6);
+    ctx.fillRect(-14, -5, 8, 2);
+    ctx.fillRect(-14, -1, 8, 2);
+
+    // Label: "KURIER"
+    ctx.fillStyle = '#fde047';
+    ctx.font = 'bold 8.5px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('PALLADIUM', -1, -3);
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillText('KURIER 📰', -1, 8);
+
+    // Blinking "NEU!" Badge when unread issue is available
+    if (p.newspaperHasNewBadge) {
+      const blinkOn = Math.floor(now / 380) % 2 === 0;
+      ctx.save();
+      ctx.translate(28, -18);
+      ctx.fillStyle = blinkOn ? '#ef4444' : '#fde047';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(-16, -8, 32, 15, 5);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = blinkOn ? '#ffffff' : '#0f172a';
+      ctx.font = 'bold 8px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('NEU!', 0, 2.5);
+      ctx.restore();
+    }
+
+    ctx.restore();
   }
 
   // 10. RENDER PLAYER CHARACTER (Supports [H] Kengol-Bucket-Hat, VIP Disco-Rollschuhe, 80s Trick Moves [1]-[4], & Neon Wristbands!)
@@ -7421,7 +7577,27 @@ function renderCompleteScene(
       ? p.upgrades.wristbandColor
       : undefined,
     activeCharm: p.upgrades.activeCharm || null,
+    avatarRole: p.avatarRole || 'standard',
   });
+
+  // 10b. WARME SONNTAGS-CLIQUE NACHMITTAGSBELEUCHTUNG (Golden Hour Sunlight Tint)
+  if (p.sundayCliqueActive && !isPutzlicht) {
+    ctx.save();
+    const sunGrad = ctx.createRadialGradient(
+      rink.centerX,
+      rink.centerY - 60,
+      90,
+      rink.centerX,
+      rink.centerY,
+      820
+    );
+    sunGrad.addColorStop(0, 'rgba(251, 191, 36, 0.16)');
+    sunGrad.addColorStop(0.55, 'rgba(245, 158, 11, 0.10)');
+    sunGrad.addColorStop(1, 'rgba(217, 119, 6, 0.03)');
+    ctx.fillStyle = sunGrad;
+    ctx.fillRect(rink.x, rink.y, rink.width, rink.height);
+    ctx.restore();
+  }
 
   // Render Nurse / Paramedic ("SANI-SANDRA") in White Coat with Red Cross Symbol when active!
   if (saniNurse.active) {
@@ -11655,6 +11831,7 @@ function renderCharacterSprite(
     isBackwardGliding?: boolean;
     wristbandColor?: NeonWristbandColor;
     activeCharm?: SkateCharmId | null;
+    avatarRole?: 'standard' | 'kid' | 'stammgast';
   }
 ): void {
   if (activePixel16BitFigures) {
@@ -11710,6 +11887,17 @@ function renderCharacterSprite(
   }
 
   ctx.save();
+  if (opts.avatarRole === 'kid') {
+    ctx.scale(0.84, 0.84);
+  } else if (opts.avatarRole === 'stammgast') {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(253, 224, 71, 0.65)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 29, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
   // Rotate 180° when backward-gliding ([Taste 2] or backward couple partner) so skater faces against travel direction!
   ctx.rotate(opts.headingRad + (isBackward ? Math.PI : 0));
 
@@ -11722,15 +11910,26 @@ function renderCharacterSprite(
   const legStride = opts.isPalladiumanerStaff ? 0 : Math.sin(stridePhase) * 3.2;
 
   if (opts.isWheelchair) {
-    // Clean sporty wheelchair frame without protruding grey side bars
+    // Accessible 80s Sport Wheelchair with glowing Neon Wheels (#00f0ff / #ff2a85)
+    ctx.save();
+    const neonWheelPrimary = '#00f0ff';
+    const neonWheelAccent = '#ff2a85';
+    ctx.shadowColor = neonWheelPrimary;
+    ctx.shadowBlur = 11;
     ctx.fillStyle = '#0f172a';
-    ctx.strokeStyle = opts.isBlacklight ? '#00f0ff' : opts.wheelColor;
-    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = neonWheelPrimary;
+    ctx.lineWidth = 3.8;
     ctx.beginPath();
-    ctx.roundRect(-16, -23, 24, 6, 3);
-    ctx.roundRect(-16, 17, 24, 6, 3);
+    ctx.roundRect(-17, -24, 26, 6.5, 3);
+    ctx.roundRect(-17, 17.5, 26, 6.5, 3);
     ctx.fill();
     ctx.stroke();
+
+    // Dual-tone neon hub & rim stripes on both wheelchair wheels
+    ctx.fillStyle = neonWheelAccent;
+    ctx.fillRect(-9, -23, 10, 4.5);
+    ctx.fillRect(-9, 18.5, 10, 4.5);
+    ctx.restore();
 
     ctx.fillStyle = '#1e293b';
     ctx.fillRect(-13, -15, 20, 30);

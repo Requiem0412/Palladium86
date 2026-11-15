@@ -21,13 +21,19 @@ import {
   DEFAULT_SPECIAL_SKATERS,
   DEFAULT_TWITCH_CHANNEL,
   DjJingleSlot,
+  DjJingleSlotId,
+  DjSongRequestItem,
   DjSoundboardEffectId,
   EditableModuleId,
   formatLayoutConfigCodeBlock,
   getModuleCollisionRect,
   GuestDjPreset,
+  HALL_ANNOUNCEMENT_PRESETS,
+  HallAnnouncementPreset,
   HallGameMode,
   LightingMode,
+  LiveBroadcastSampleEvent,
+  LiveHallAnnouncementEvent,
   NameDisplayMode,
   NeonUnderglowColor,
   NeonWristbandColor,
@@ -37,6 +43,8 @@ import {
   ProShopUpgradesState,
   RadioTrackItem,
   SkateCharmId,
+  STATION_DIALOG_DEFAULTS,
+  StationDialogId,
   TrickMoveId,
 } from './config/arenaConfig';
 import Peer, { DataConnection } from 'peerjs';
@@ -50,12 +58,15 @@ import { soundFX } from './utils/soundEffects';
 import {
   AdminPersistentSettings,
   AlphaBetaAccessConfig,
+  AvatarCliqueRole,
   CertificateDefinition,
   CertificateId,
   ChallengeProgressMap,
   computePeakHourLabel,
   EntryPassData,
   FreeDrinkChoice,
+  MobilityChoice,
+  SundayCliqueTicket,
   generateAlphaBetaKeys,
   getOrCreateAlphaBrowserId,
   HallStatsData,
@@ -127,7 +138,41 @@ import {
   StampCardData,
   TesterFeedbackCategory,
   TesterFeedbackItem,
+  convertImageFileTo16BitPixelDataUrl,
+  getStation16BitPortraitDataUrl,
 } from './utils/storageAndStats';
+import {
+  addCloudGuestListName,
+  clearCloudGuestbook,
+  CloudHallStatsSummary,
+  countryCodeToFlag,
+  deleteCloudGuestbookEntry,
+  fetchCloudGuestbook,
+  fetchCloudGuestList,
+  fetchCloudHallStats,
+  fetchCloudPlayerProfile,
+  fetchInitialCloudHallSettings,
+  getOrCreateCloudPlayerId,
+  GuestbookEntryRow,
+  hasSignedGuestbookToday,
+  isNameOnCloudGuestList,
+  loadSkatedSeconds,
+  removeCloudGuestListEntry,
+  resolveVisitorCountry,
+  resetCloudHallStats,
+  saveSkatedSeconds,
+  sendCloudVisitHeartbeat,
+  subscribeToCloudGuestbook,
+  subscribeToCloudGuestList,
+  subscribeToCloudHallSettings,
+  subscribeToCloudVisits,
+  uploadDjSampleToCloud,
+  upsertCloudGuestbookEntry,
+  upsertCloudHallSettings,
+  upsertCloudPlayerProfile,
+  upsertCloudVisit,
+  VipGuestListEntry,
+} from './lib/supabaseCloud';
 
 const MULTIPLAYER_OUTFIT_COLORS = [
   { id: 'neon-pink', label: 'Neon-Pink', hex: '#ff2a85' },
@@ -200,6 +245,8 @@ interface AdminSyncPayload {
   pixel16BitFiguresEnabled?: boolean;
   backgroundDancersEnabled?: boolean;
   crewNames?: CrewNamesConfig;
+  crewPortraits?: Partial<Record<StationDialogId, string>>;
+  crewQuotes?: Partial<Record<StationDialogId, string>>;
   isMaintenanceMode: boolean;
   maintenanceReopenText: string;
   liveArenaStyle: ArenaVisualStyle;
@@ -209,8 +256,22 @@ interface AdminSyncPayload {
   neonLightboxLine2?: string;
   neonLightboxLine3?: string;
   familyDayActive?: boolean;
+  sundayCliqueMode?: boolean;
+  sundayCliqueAutoSunday?: boolean;
   liveEventActive?: boolean;
+  vipGuestListOnly?: boolean;
+  handheldActionIds?: string[];
+  djJingleSlots?: DjJingleSlot[];
+  songRequests?: DjSongRequestItem[];
+  lastTriggeredSample?: LiveBroadcastSampleEvent | null;
+  lastHallAnnouncementEvent?: LiveHallAnnouncementEvent | null;
+  strobeBurstCount?: number;
   customLayout?: CustomArenaLayoutState;
+  newspaperEnabled?: boolean;
+  newspaperIssueId?: number;
+  newspaperHeadline?: string;
+  newspaperBody?: string;
+  newspaperUpdatedAt?: string;
 }
 
 type MultiplayerPacket =
@@ -387,7 +448,7 @@ export function App() {
   );
   const [showLockerModal, setShowLockerModal] = useState<boolean>(false);
   const [lockerTab, setLockerTab] = useState<
-    'gear' | 'tasks' | 'events' | 'feedback' | 'certificates'
+    'gear' | 'tasks' | 'events' | 'feedback' | 'certificates' | 'guestbook'
   >('gear');
   const [certificatesState, setCertificatesState] =
     useState<PalladiumCertificatesState>(() => loadCertificatesState());
@@ -399,6 +460,28 @@ export function App() {
   const [newlyUnlockedCert, setNewlyUnlockedCert] =
     useState<CertificateDefinition | null>(null);
   const [zoomedCertId, setZoomedCertId] = useState<CertificateId | null>(null);
+  const [showExplorerCertificateModal, setShowExplorerCertificateModal] =
+    useState<boolean>(false);
+  const [explorerCreatedAt] = useState<string>(() => {
+    try {
+      const key = 'palladium_explorer_created_at_v1';
+      const existing = window.localStorage.getItem(key);
+      if (existing) return existing;
+      const formatted = new Date().toLocaleDateString('de-DE', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
+      window.localStorage.setItem(key, formatted);
+      return formatted;
+    } catch {
+      return '15.11.2026';
+    }
+  });
+  const [showNewspaperModal, setShowNewspaperModal] = useState<boolean>(false);
+  const [newspaperPublishToast, setNewspaperPublishToast] = useState<
+    string | null
+  >(null);
   const [adminTab, setAdminTab] = useState<
     'track' | 'light_dj' | 'access' | 'look_build'
   >('track');
@@ -469,7 +552,7 @@ export function App() {
   const [bandGender, setBandGender] = useState<BandGenderMode>('mixed');
   const [hallGameMode, setHallGameMode] = useState<HallGameMode>('free-skate');
 
-  // Singleplayer Experience Level, Own Skates vs. Rental Skates & Anti-Cheat Entry Pass
+  // Singleplayer Experience Level, Mandatory Mobility Choice (Own Skates / Rental Skates / Wheelchair) & Entry Pass
   const initialEntryPass = useMemo(() => loadEntryPass(), []);
   const [entryPass, setEntryPass] = useState<EntryPassData | null>(
     initialEntryPass
@@ -477,14 +560,66 @@ export function App() {
   const [difficulty, setDifficulty] = useState<SingleplayerDifficulty>(
     initialEntryPass?.difficulty || 'intermediate'
   );
+  const [mobilityChoice, setMobilityChoice] = useState<MobilityChoice | null>(
+    () => initialEntryPass?.mobilityChoice ?? null
+  );
   const [hasOwnSkates, setHasOwnSkates] = useState<boolean>(
-    initialEntryPass ? initialEntryPass.hasOwnSkates : true
+    Boolean(initialEntryPass?.hasOwnSkates)
   );
   const [hasRentedSkates, setHasRentedSkates] = useState<boolean>(
-    initialEntryPass ? initialEntryPass.hasRentedSkates : false
+    Boolean(initialEntryPass?.hasRentedSkates)
   );
+  const [avatarRole, setAvatarRole] = useState<AvatarCliqueRole>(
+    () => lockerSettings.avatarRole || 'standard'
+  );
+  const [sundayCliqueTicket, setSundayCliqueTicket] =
+    useState<SundayCliqueTicket>(
+      () => lockerSettings.sundayCliqueTicket || 'trio'
+    );
   const [drinkChipAvailable, setDrinkChipAvailable] = useState<boolean>(
     initialEntryPass ? initialEntryPass.drinkChipAvailable : !loadFirstVisitSlushClaimed()
+  );
+
+  const handleSelectMobilityChoice = useCallback(
+    (choice: MobilityChoice) => {
+      setMobilityChoice(choice);
+      if (choice === 'own-skates') {
+        setCharacterMode('skater');
+        setHasOwnSkates(true);
+        setHasRentedSkates(false);
+      } else if (choice === 'rental-skates') {
+        setCharacterMode('skater');
+        setHasOwnSkates(false);
+        setHasRentedSkates(true);
+      } else if (choice === 'wheelchair') {
+        setCharacterMode('wheelchair');
+        setHasOwnSkates(false);
+        setHasRentedSkates(false);
+      }
+      if (bouncerMessage?.includes('Bitte wähle erst deine Rollschuhe')) {
+        setBouncerMessage(null);
+      }
+    },
+    [bouncerMessage]
+  );
+
+  const handleSelectAvatarRole = useCallback((role: AvatarCliqueRole) => {
+    setAvatarRole(role);
+    setLockerSettings((prev) => ({
+      ...prev,
+      avatarRole: role,
+    }));
+  }, []);
+
+  const handleSelectCliqueTicket = useCallback(
+    (ticket: SundayCliqueTicket) => {
+      setSundayCliqueTicket(ticket);
+      setLockerSettings((prev) => ({
+        ...prev,
+        sundayCliqueTicket: ticket,
+      }));
+    },
+    []
   );
 
   // Public Visitor Volume & Mute Control (linked with Spind Disco-Sound toggle)
@@ -620,7 +755,7 @@ export function App() {
     [customLayout, handleUpdateCustomLayout, selectedBuildItemId]
   );
 
-  // DJ-Jingle & Sprachmemo-Pult State (No speechSynthesis!)
+  // DJ-Jingle & Sprachmemo-Pult + 10. Echte DJ-Audio-Samples & 11. Eigene DJ-Kanzel State
   const [externalDjJingleBubble, setExternalDjJingleBubble] = useState<{
     text: string;
     seq: number;
@@ -631,6 +766,50 @@ export function App() {
   const [editingJingleSlotId, setEditingJingleSlotId] = useState<string | null>(
     null
   );
+  const [uploadingSampleSlotId, setUploadingSampleSlotId] = useState<
+    string | null
+  >(null);
+  const [sampleUploadNotice, setSampleUploadNotice] = useState<string | null>(
+    null
+  );
+
+  // 9. Hallen-Durchsagen & Abschlepp-Gong Marquee State
+  const [activeHallAnnouncementBanner, setActiveHallAnnouncementBanner] =
+    useState<string | null>(null);
+  const lastProcessedAnnouncementTsRef = useRef<number>(0);
+  const lastProcessedSampleTsRef = useRef<number>(0);
+  const [lastTriggeredSample, setLastTriggeredSample] =
+    useState<LiveBroadcastSampleEvent | null>(null);
+  const [lastHallAnnouncementEvent, setLastHallAnnouncementEvent] =
+    useState<LiveHallAnnouncementEvent | null>(null);
+
+  // 11. Eigene DJ-Kanzel (Passwortgeschützter DJ-Login + 3x3 Sampler Launchpad + Strobo + Musikwünsche)
+  const [isDjBoothUnlocked, setIsDjBoothUnlocked] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.sessionStorage.getItem('palladium_dj_unlocked_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [showDjLoginModal, setShowDjLoginModal] = useState<boolean>(false);
+  const [showDjBoothModal, setShowDjBoothModal] = useState<boolean>(false);
+  const [djPasswordInput, setDjPasswordInput] = useState<string>('');
+  const [djPasswordError, setDjPasswordError] = useState<string | null>(null);
+  const [strobeBurstCount, setStrobeBurstCount] = useState<number>(0);
+  const [isStrobeFlashing, setIsStrobeFlashing] = useState<boolean>(false);
+  const prevStrobeBurstCountRef = useRef<number>(0);
+  const [newSongRequestInput, setNewSongRequestInput] = useState<string>('');
+  const [songRequestToast, setSongRequestToast] = useState<string | null>(null);
+
+  // 12. 80er-Pixel-Dialoge an den 5 Stationen & Admin-Crew-Galerie State
+  const [activeStationDialog, setActiveStationDialog] =
+    useState<StationDialogId | null>(null);
+  const [stationDialogToast, setStationDialogToast] = useState<string | null>(
+    null
+  );
+  const [uploadingCrewPortraitId, setUploadingCrewPortraitId] =
+    useState<StationDialogId | null>(null);
 
   // Lighting & Schedule Automation States
   const [blacklightTimerSec, setBlacklightTimerSec] = useState<number>(0);
@@ -811,10 +990,42 @@ export function App() {
   const [isBottomBarCollapsed, setIsBottomBarCollapsed] =
     useState<boolean>(true);
 
-  // Hall Statistics (localStorage)
+  // Hall Statistics (localStorage fallback + Supabase Cloud public.visits)
   const [hallStats, setHallStats] = useState<HallStatsData>(() =>
     recordSessionVisit()
   );
+  const [cloudPlayerId] = useState<string>(() => getOrCreateCloudPlayerId());
+  const [visitorCountry, setVisitorCountry] = useState<string>('DE');
+  const [cloudHallStats, setCloudHallStats] =
+    useState<CloudHallStatsSummary | null>(null);
+  const [confirmCloudStatsReset, setConfirmCloudStatsReset] =
+    useState<boolean>(false);
+  const lastSyncedAnnouncementRef = useRef<string | null>(null);
+
+  // 4. Troll-Gästebuch (public.guestbook) State
+  const [skatedSeconds, setSkatedSeconds] = useState<number>(() =>
+    loadSkatedSeconds()
+  );
+  const [guestbookEntries, setGuestbookEntries] = useState<GuestbookEntryRow[]>(
+    []
+  );
+  const [guestbookHoneypot, setGuestbookHoneypot] = useState<string>('');
+  const [guestbookToast, setGuestbookToast] = useState<string | null>(null);
+  const [guestbookSignedToday, setGuestbookSignedToday] = useState<boolean>(() =>
+    hasSignedGuestbookToday()
+  );
+
+  // 5. VIP-Gästeliste (public.guest_list) State
+  const [vipGuestList, setVipGuestList] = useState<VipGuestListEntry[]>([]);
+  const vipGuestListRef = useRef<VipGuestListEntry[]>([]);
+  useEffect(() => {
+    vipGuestListRef.current = vipGuestList;
+  }, [vipGuestList]);
+  const [newVipGuestName, setNewVipGuestName] = useState<string>('');
+
+  // 6. Game-Boy-Regie-Handheld State
+  const [showGameBoyHandheld, setShowGameBoyHandheld] = useState<boolean>(true);
+  const [isGameBoyExpanded, setIsGameBoyExpanded] = useState<boolean>(false);
 
   // Live Telemetry from Canvas Engine
   const [telemetry, setTelemetry] = useState<ArenaLiveTelemetry>({
@@ -869,12 +1080,19 @@ export function App() {
     return soundFX.onStatusChange(syncRadio);
   }, []);
 
-  const showHallAnnouncement = useCallback((msg: string) => {
-    setHallRadioBanner(msg);
-    window.setTimeout(() => {
-      setHallRadioBanner((curr) => (curr === msg ? null : curr));
-    }, 6000);
-  }, []);
+  const showHallAnnouncement = useCallback(
+    (msg: string, skipCloudSync = false) => {
+      setHallRadioBanner(msg);
+      if (!skipCloudSync && isAdminUnlockedRef.current) {
+        lastSyncedAnnouncementRef.current = msg;
+        void upsertCloudHallSettings(adminSyncPayloadRef.current, msg);
+      }
+      window.setTimeout(() => {
+        setHallRadioBanner((curr) => (curr === msg ? null : curr));
+      }, 6000);
+    },
+    []
+  );
 
   // Save profile whenever changed
   useEffect(() => {
@@ -926,6 +1144,105 @@ export function App() {
     const concurrentCount = remotePlayers.length + 1;
     setHallStats(recordMultiplayerVisitorSnapshot(concurrentCount, visitorIds));
   }, [isMultiplayerActive, remotePlayers]);
+
+  // 1. Supabase Cloud Visits Tracking & 30s Heartbeat (public.visits) + Geo Country
+  const refreshCloudHallStats = useCallback(async () => {
+    const summary = await fetchCloudHallStats();
+    if (summary) {
+      setCloudHallStats(summary);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    resolveVisitorCountry().then((c) => {
+      if (active) setVisitorCountry(c);
+    });
+    const currentMode: 'solo' | 'multiplayer' = isMultiplayerActive
+      ? 'multiplayer'
+      : 'solo';
+    upsertCloudVisit(currentMode).then(() => {
+      if (active) void refreshCloudHallStats();
+    });
+    const hbInterval = window.setInterval(() => {
+      void sendCloudVisitHeartbeat(
+        isMultiplayerActive ? 'multiplayer' : 'solo'
+      );
+      void refreshCloudHallStats();
+    }, 30000);
+    const unsubscribeVisits = subscribeToCloudVisits(() => {
+      void refreshCloudHallStats();
+    });
+    return () => {
+      active = false;
+      window.clearInterval(hbInterval);
+      unsubscribeVisits();
+    };
+  }, [isMultiplayerActive, refreshCloudHallStats]);
+
+  // Track skated_seconds on the rink for Troll-Gästebuch unlock (>= 60s or 500 Pkt)
+  useEffect(() => {
+    if (!isCurtainOpen) return;
+    const timer = window.setInterval(() => {
+      setSkatedSeconds((prev) => {
+        const next = prev + 1;
+        saveSkatedSeconds(next);
+        return next;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isCurtainOpen]);
+
+  // Subscribe to public.guestbook & public.guest_list
+  const refreshCloudGuestbook = useCallback(async () => {
+    const list = await fetchCloudGuestbook();
+    setGuestbookEntries(list);
+  }, []);
+
+  const refreshCloudGuestList = useCallback(async () => {
+    const list = await fetchCloudGuestList();
+    setVipGuestList(list);
+  }, []);
+
+  useEffect(() => {
+    void refreshCloudGuestbook();
+    void refreshCloudGuestList();
+    const unsubGb = subscribeToCloudGuestbook(() => {
+      void refreshCloudGuestbook();
+    });
+    const unsubVip = subscribeToCloudGuestList(() => {
+      void refreshCloudGuestList();
+    });
+    return () => {
+      unsubGb();
+      unsubVip();
+    };
+  }, [refreshCloudGuestbook, refreshCloudGuestList]);
+
+  // Load initial Cloud Player Profile from public.players on first mount
+  useEffect(() => {
+    let mounted = true;
+    fetchCloudPlayerProfile().then((cloudProf) => {
+      if (!mounted || !cloudProf) return;
+      if (
+        cloudProf.name &&
+        typeof cloudProf.name === 'string' &&
+        !playerName.trim()
+      ) {
+        setPlayerName(cloudProf.name);
+      }
+      if (
+        cloudProf.outfit_color &&
+        typeof cloudProf.outfit_color === 'string'
+      ) {
+        setPlayerShirtColor(cloudProf.outfit_color);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Dedicated Smartphone-Controller PeerJS Receiver so ?controller=<ID> works in both Solo and Multiplayer
   useEffect(() => {
@@ -1176,6 +1493,24 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [adminSettings.liveEventActive, adminSettings.cinemaScheduleEnabled]);
 
+  // 7. Auto-Sonntags-Check für den Sonntags-Clique-Modus (2+1-Regel)
+  useEffect(() => {
+    if (adminSettings.sundayCliqueAutoSunday === false) return;
+    const isSundayToday = new Date().getDay() === 0;
+    if (isSundayToday && !adminSettings.sundayCliqueMode) {
+      setAdminSettings((prev) => ({
+        ...prev,
+        sundayCliqueMode: true,
+      }));
+    }
+  }, [adminSettings.sundayCliqueAutoSunday, adminSettings.sundayCliqueMode]);
+
+  const isSundayCliqueActive = Boolean(
+    adminSettings.sundayCliqueMode ||
+      (adminSettings.sundayCliqueAutoSunday !== false &&
+        new Date().getDay() === 0)
+  );
+
   // Automatic Audio-Ducking (0% Hall Radio) whenever a live Twitch or YouTube stream is playing with sound on the Cinema Screen
   useEffect(() => {
     const src = adminSettings.cinemaStreamSource || 'twitch';
@@ -1218,6 +1553,7 @@ export function App() {
   }, [isCurtainOpen, telemetry.laps]);
 
   const canEnterSingleplayerHall =
+    mobilityChoice !== null &&
     (isAnonymousGuest || playerName.trim().length >= 2) &&
     (!alphaBetaConfig.enabled || isAlphaBetaAuthorized);
 
@@ -1298,14 +1634,14 @@ export function App() {
         const lockedPass: EntryPassData = {
           locked: true,
           difficulty,
-          hasOwnSkates,
-          hasRentedSkates: false,
+          hasOwnSkates: mobilityChoice === 'own-skates',
+          hasRentedSkates: mobilityChoice === 'rental-skates',
+          mobilityChoice: mobilityChoice || 'own-skates',
           drinkChipAvailable: isFirstEverVisit,
           freeDrinkChoice,
           stampedAt: new Date().toISOString(),
         };
         saveEntryPass(lockedPass);
-        setHasRentedSkates(false);
         return lockedPass;
       });
 
@@ -1319,9 +1655,9 @@ export function App() {
     [
       difficulty,
       freeDrinkChoice,
-      hasOwnSkates,
       isAnonymousGuest,
       lockerSettings.collectibles,
+      mobilityChoice,
       playerName,
       showHallAnnouncement,
       stampCard.stamps,
@@ -1329,6 +1665,13 @@ export function App() {
   );
 
   const handleActivateAlphaKeyAndEnter = useCallback(() => {
+    if (!mobilityChoice) {
+      const msg =
+        'Bitte wähle erst deine Rollschuhe, Leihrollschuhe oder den Rollstuhl vor dem Bahneintritt aus!';
+      setAlphaKeyError(msg);
+      setBouncerMessage(msg);
+      return;
+    }
     const cleanName = playerName.trim();
     if (cleanName.length < 2) {
       const msg = 'Ey, du kommst hier net rein! Kein gültiger VIP-Key.';
@@ -1473,12 +1816,19 @@ export function App() {
   }, [
     alphaBrowserId,
     alphaKeyInput,
+    mobilityChoice,
     performHallEntry,
     playerName,
     remotePlayers,
   ]);
 
   const handleEnterHall = useCallback(() => {
+    if (!mobilityChoice) {
+      setBouncerMessage(
+        'Bitte wähle erst deine Rollschuhe, Leihrollschuhe oder den Rollstuhl vor dem Bahneintritt aus!'
+      );
+      return;
+    }
     if (alphaBetaConfig.enabled && !isAlphaBetaAuthorized) {
       handleActivateAlphaKeyAndEnter();
       return;
@@ -1505,6 +1855,7 @@ export function App() {
     handleActivateAlphaKeyAndEnter,
     isAlphaBetaAuthorized,
     isAnonymousGuest,
+    mobilityChoice,
     performHallEntry,
     playerName,
     remotePlayers,
@@ -1547,7 +1898,33 @@ export function App() {
         return;
       }
 
-      // Close Spind modal with Escape key
+      // Game-Boy-Regie-Handheld per Taste [R] ein-/ausklappen (wenn Admin & Baumenü AUS)
+      if (
+        e.key.toLowerCase() === 'r' &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        isAdminUnlocked &&
+        !isTesterAccount &&
+        !buildModeEnabled
+      ) {
+        e.preventDefault();
+        setShowGameBoyHandheld(true);
+        setIsGameBoyExpanded((prev) => !prev);
+        return;
+      }
+
+      // Close Newspaper, Explorer Certificate or Spind modal with Escape key
+      if (e.key === 'Escape' && showNewspaperModal) {
+        e.preventDefault();
+        setShowNewspaperModal(false);
+        return;
+      }
+      if (e.key === 'Escape' && showExplorerCertificateModal) {
+        e.preventDefault();
+        setShowExplorerCertificateModal(false);
+        return;
+      }
       if (e.key === 'Escape' && showLockerModal) {
         e.preventDefault();
         setShowLockerModal(false);
@@ -1566,12 +1943,15 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    buildModeEnabled,
     canEnterSingleplayerHall,
     handleEnterHall,
     isAdminUnlocked,
     isCurtainOpen,
     isTesterAccount,
+    showExplorerCertificateModal,
     showLockerModal,
+    showNewspaperModal,
   ]);
 
   const handleRedeemDrinkChipAtRental = useCallback(() => {
@@ -1760,6 +2140,8 @@ export function App() {
       pixel16BitFiguresEnabled: adminSettings.pixel16BitFiguresEnabled,
       backgroundDancersEnabled: adminSettings.backgroundDancersEnabled ?? true,
       crewNames: adminSettings.crewNames,
+      crewPortraits: adminSettings.crewPortraits || {},
+      crewQuotes: adminSettings.crewQuotes || {},
       isMaintenanceMode: adminSettings.isMaintenanceMode,
       maintenanceReopenText:
         adminSettings.maintenanceReopenText || '🚀 ALPHA STARTING SOON',
@@ -1770,8 +2152,33 @@ export function App() {
       neonLightboxLine2: adminSettings.neonLightboxLine2 ?? 'DJ MAGIC FORCE',
       neonLightboxLine3: adminSettings.neonLightboxLine3 ?? 'AB 21:00 UHR',
       familyDayActive: Boolean(adminSettings.familyDayActive),
+      sundayCliqueMode: Boolean(adminSettings.sundayCliqueMode),
+      sundayCliqueAutoSunday: adminSettings.sundayCliqueAutoSunday !== false,
       liveEventActive: Boolean(adminSettings.liveEventActive),
+      vipGuestListOnly: Boolean(adminSettings.vipGuestListOnly),
+      handheldActionIds: adminSettings.handheldActionIds || [
+        'light_disco',
+        'light_blacklight',
+        'fog_burst',
+        'direction',
+        'mode_ball',
+        'putzlicht',
+      ],
+      djJingleSlots: adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS,
+      songRequests: adminSettings.songRequests || [],
+      lastTriggeredSample,
+      lastHallAnnouncementEvent,
+      strobeBurstCount,
       customLayout,
+      newspaperEnabled: adminSettings.newspaperEnabled !== false,
+      newspaperIssueId: Math.max(1, Number(adminSettings.newspaperIssueId) || 1),
+      newspaperHeadline:
+        adminSettings.newspaperHeadline ||
+        'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
+      newspaperBody:
+        adminSettings.newspaperBody ||
+        'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
+      newspaperUpdatedAt: adminSettings.newspaperUpdatedAt || '15.11.2026',
     };
   }, [
     lightingMode,
@@ -1800,6 +2207,8 @@ export function App() {
     adminSettings.pixel16BitFiguresEnabled,
     adminSettings.backgroundDancersEnabled,
     adminSettings.crewNames,
+    adminSettings.crewPortraits,
+    adminSettings.crewQuotes,
     adminSettings.isMaintenanceMode,
     adminSettings.maintenanceReopenText,
     adminSettings.liveArenaStyle,
@@ -1809,75 +2218,205 @@ export function App() {
     adminSettings.neonLightboxLine2,
     adminSettings.neonLightboxLine3,
     adminSettings.familyDayActive,
+    adminSettings.sundayCliqueMode,
+    adminSettings.sundayCliqueAutoSunday,
     adminSettings.liveEventActive,
+    adminSettings.vipGuestListOnly,
+    adminSettings.handheldActionIds,
+    adminSettings.djJingleSlots,
+    adminSettings.songRequests,
+    lastTriggeredSample,
+    lastHallAnnouncementEvent,
+    strobeBurstCount,
     customLayout,
+    adminSettings.newspaperEnabled,
+    adminSettings.newspaperIssueId,
+    adminSettings.newspaperHeadline,
+    adminSettings.newspaperBody,
+    adminSettings.newspaperUpdatedAt,
   ]);
 
-  const applyIncomingAdminSync = useCallback((s: AdminSyncPayload) => {
-    isApplyingRemoteAdminSyncRef.current = true;
-    setLightingMode(s.lightingMode);
-    if (typeof s.blacklightTimerSec === 'number') {
-      setBlacklightTimerSec(s.blacklightTimerSec);
-    }
-    setCenterStageMode(
-      (s.centerStageMode as string) === 'live-band' ? 'band' : s.centerStageMode
-    );
-    setActiveBandName(s.activeBandName);
-    setCustomBandInput(s.customBandInput);
-    setBandSkinTone(s.bandSkinTone);
-    setBandGender(s.bandGender);
-    setHallGameMode(s.hallGameMode);
-    setFogBurstCount(s.fogBurstCount);
-    setAdminPreviewStyle(null);
-    if (s.liveArenaStyle) {
-      setSelectedStyleTile(s.liveArenaStyle);
-    }
-    if (s.customLayout) {
-      setCustomLayout(s.customLayout);
-      saveCustomArenaLayout(s.customLayout);
-    }
-    setAdminSettings((prev) => ({
-      ...prev,
-      autoBlacklightEnabled:
-        s.autoBlacklightEnabled ?? prev.autoBlacklightEnabled,
-      concertLightingMode: s.concertLightingMode,
-      fogMachineEnabled: s.fogMachineEnabled,
-      activeDjName: s.activeDjName,
-      djTickerText: s.djTickerText,
-      twitchChannel: s.twitchChannel,
-      youtubeUrl: s.youtubeUrl ?? prev.youtubeUrl,
-      cinemaStreamSource: s.cinemaStreamSource ?? prev.cinemaStreamSource,
-      cinemaCountdownEnabled:
-        s.cinemaCountdownEnabled ?? prev.cinemaCountdownEnabled,
-      cinemaCountdownTitle: s.cinemaCountdownTitle ?? prev.cinemaCountdownTitle,
-      cinemaCountdownTargetIso:
-        s.cinemaCountdownTargetIso ?? prev.cinemaCountdownTargetIso,
-      cinemaWeekdays: s.cinemaWeekdays ?? prev.cinemaWeekdays,
-      cinemaStartTime: s.cinemaStartTime ?? prev.cinemaStartTime,
-      fullHallPutzlichtEnabled:
-        s.fullHallPutzlichtEnabled ?? prev.fullHallPutzlichtEnabled,
-      pixel16BitFiguresEnabled:
-        s.pixel16BitFiguresEnabled ?? prev.pixel16BitFiguresEnabled,
-      backgroundDancersEnabled:
-        s.backgroundDancersEnabled ?? prev.backgroundDancersEnabled,
-      crewNames: s.crewNames ?? prev.crewNames,
-      isMaintenanceMode: s.isMaintenanceMode,
-      maintenanceReopenText:
-        s.maintenanceReopenText || prev.maintenanceReopenText,
-      liveArenaStyle: s.liveArenaStyle,
-      skateDirection: s.skateDirection ?? prev.skateDirection,
-      neonLightboxesEnabled:
-        s.neonLightboxesEnabled ?? prev.neonLightboxesEnabled,
-      neonLightboxLine1: s.neonLightboxLine1 ?? prev.neonLightboxLine1,
-      neonLightboxLine2: s.neonLightboxLine2 ?? prev.neonLightboxLine2,
-      neonLightboxLine3: s.neonLightboxLine3 ?? prev.neonLightboxLine3,
-      familyDayActive: s.familyDayActive ?? prev.familyDayActive,
-      liveEventActive: s.liveEventActive ?? prev.liveEventActive,
-    }));
-    window.setTimeout(() => {
-      isApplyingRemoteAdminSyncRef.current = false;
-    }, 60);
-  }, []);
+  const applyIncomingAdminSync = useCallback(
+    (s: Partial<AdminSyncPayload> | null | undefined) => {
+      if (!s || typeof s !== 'object') return;
+      isApplyingRemoteAdminSyncRef.current = true;
+      if (s.lightingMode) {
+        setLightingMode(s.lightingMode);
+      }
+      if (typeof s.blacklightTimerSec === 'number') {
+        setBlacklightTimerSec(s.blacklightTimerSec);
+      }
+      if (s.centerStageMode) {
+        setCenterStageMode(
+          (s.centerStageMode as string) === 'live-band'
+            ? 'band'
+            : s.centerStageMode
+        );
+      }
+      if (typeof s.activeBandName === 'string') {
+        setActiveBandName(s.activeBandName);
+      }
+      if (typeof s.customBandInput === 'string') {
+        setCustomBandInput(s.customBandInput);
+      }
+      if (s.bandSkinTone) {
+        setBandSkinTone(s.bandSkinTone);
+      }
+      if (s.bandGender) {
+        setBandGender(s.bandGender);
+      }
+      if (s.hallGameMode) {
+        setHallGameMode(s.hallGameMode);
+      }
+      if (typeof s.fogBurstCount === 'number') {
+        setFogBurstCount(s.fogBurstCount);
+      }
+      setAdminPreviewStyle(null);
+      if (s.liveArenaStyle) {
+        setSelectedStyleTile(s.liveArenaStyle);
+      }
+      if (s.customLayout) {
+        setCustomLayout(s.customLayout);
+        saveCustomArenaLayout(s.customLayout);
+      }
+      setAdminSettings((prev) => ({
+        ...prev,
+        autoBlacklightEnabled:
+          s.autoBlacklightEnabled ?? prev.autoBlacklightEnabled,
+        concertLightingMode: s.concertLightingMode ?? prev.concertLightingMode,
+        fogMachineEnabled: s.fogMachineEnabled ?? prev.fogMachineEnabled,
+        activeDjName: s.activeDjName ?? prev.activeDjName,
+        djTickerText: s.djTickerText ?? prev.djTickerText,
+        twitchChannel: s.twitchChannel ?? prev.twitchChannel,
+        youtubeUrl: s.youtubeUrl ?? prev.youtubeUrl,
+        cinemaStreamSource: s.cinemaStreamSource ?? prev.cinemaStreamSource,
+        cinemaCountdownEnabled:
+          s.cinemaCountdownEnabled ?? prev.cinemaCountdownEnabled,
+        cinemaCountdownTitle:
+          s.cinemaCountdownTitle ?? prev.cinemaCountdownTitle,
+        cinemaCountdownTargetIso:
+          s.cinemaCountdownTargetIso ?? prev.cinemaCountdownTargetIso,
+        cinemaWeekdays: s.cinemaWeekdays ?? prev.cinemaWeekdays,
+        cinemaStartTime: s.cinemaStartTime ?? prev.cinemaStartTime,
+        fullHallPutzlichtEnabled:
+          s.fullHallPutzlichtEnabled ?? prev.fullHallPutzlichtEnabled,
+        pixel16BitFiguresEnabled:
+          s.pixel16BitFiguresEnabled ?? prev.pixel16BitFiguresEnabled,
+        backgroundDancersEnabled:
+          s.backgroundDancersEnabled ?? prev.backgroundDancersEnabled,
+        crewNames: s.crewNames ?? prev.crewNames,
+        crewPortraits:
+          s.crewPortraits && typeof s.crewPortraits === 'object'
+            ? s.crewPortraits
+            : prev.crewPortraits,
+        crewQuotes:
+          s.crewQuotes && typeof s.crewQuotes === 'object'
+            ? s.crewQuotes
+            : prev.crewQuotes,
+        isMaintenanceMode: s.isMaintenanceMode ?? prev.isMaintenanceMode,
+        maintenanceReopenText:
+          s.maintenanceReopenText || prev.maintenanceReopenText,
+        liveArenaStyle: s.liveArenaStyle ?? prev.liveArenaStyle,
+        skateDirection: s.skateDirection ?? prev.skateDirection,
+        neonLightboxesEnabled:
+          s.neonLightboxesEnabled ?? prev.neonLightboxesEnabled,
+        neonLightboxLine1: s.neonLightboxLine1 ?? prev.neonLightboxLine1,
+        neonLightboxLine2: s.neonLightboxLine2 ?? prev.neonLightboxLine2,
+        neonLightboxLine3: s.neonLightboxLine3 ?? prev.neonLightboxLine3,
+        familyDayActive: s.familyDayActive ?? prev.familyDayActive,
+        sundayCliqueMode: s.sundayCliqueMode ?? prev.sundayCliqueMode,
+        sundayCliqueAutoSunday:
+          s.sundayCliqueAutoSunday ?? prev.sundayCliqueAutoSunday,
+        liveEventActive: s.liveEventActive ?? prev.liveEventActive,
+        vipGuestListOnly: s.vipGuestListOnly ?? prev.vipGuestListOnly,
+        handheldActionIds: Array.isArray(s.handheldActionIds)
+          ? s.handheldActionIds
+          : prev.handheldActionIds,
+        djJingleSlots: Array.isArray(s.djJingleSlots)
+          ? s.djJingleSlots
+          : prev.djJingleSlots,
+        songRequests: Array.isArray(s.songRequests)
+          ? s.songRequests
+          : prev.songRequests,
+        newspaperEnabled:
+          typeof s.newspaperEnabled === 'boolean'
+            ? s.newspaperEnabled
+            : prev.newspaperEnabled,
+        newspaperIssueId:
+          typeof s.newspaperIssueId === 'number' && s.newspaperIssueId > 0
+            ? s.newspaperIssueId
+            : prev.newspaperIssueId,
+        newspaperHeadline:
+          typeof s.newspaperHeadline === 'string'
+            ? s.newspaperHeadline
+            : prev.newspaperHeadline,
+        newspaperBody:
+          typeof s.newspaperBody === 'string'
+            ? s.newspaperBody
+            : prev.newspaperBody,
+        newspaperUpdatedAt:
+          typeof s.newspaperUpdatedAt === 'string'
+            ? s.newspaperUpdatedAt
+            : prev.newspaperUpdatedAt,
+      }));
+      if (typeof s.strobeBurstCount === 'number') {
+        setStrobeBurstCount(s.strobeBurstCount);
+      }
+      if (
+        s.lastTriggeredSample &&
+        typeof s.lastTriggeredSample.timestamp === 'number' &&
+        s.lastTriggeredSample.timestamp > lastProcessedSampleTsRef.current &&
+        Date.now() - s.lastTriggeredSample.timestamp < 15000
+      ) {
+        lastProcessedSampleTsRef.current = s.lastTriggeredSample.timestamp;
+        const sampleEv = s.lastTriggeredSample;
+        setActiveJingleSlotId(sampleEv.slotId);
+        setExternalDjJingleBubble((prev) => ({
+          text: sampleEv.bubbleText || `🎧 ${sampleEv.label}`,
+          seq: (prev?.seq || 0) + 1,
+        }));
+        soundFX.playDjJingleOrVoiceMemo(
+          {
+            id: sampleEv.slotId,
+            label: sampleEv.label,
+            bubbleText: sampleEv.bubbleText,
+            audioUrl: sampleEv.audioUrl || '',
+            synthFallback: sampleEv.synthFallback,
+          },
+          () => {
+            setActiveJingleSlotId((curr) =>
+              curr === sampleEv.slotId ? null : curr
+            );
+          }
+        );
+      }
+      if (
+        s.lastHallAnnouncementEvent &&
+        typeof s.lastHallAnnouncementEvent.timestamp === 'number' &&
+        s.lastHallAnnouncementEvent.timestamp >
+          lastProcessedAnnouncementTsRef.current &&
+        Date.now() - s.lastHallAnnouncementEvent.timestamp < 20000
+      ) {
+        lastProcessedAnnouncementTsRef.current =
+          s.lastHallAnnouncementEvent.timestamp;
+        const annEv = s.lastHallAnnouncementEvent;
+        setActiveHallAnnouncementBanner(annEv.bannerText);
+        soundFX.triggerHallAnnouncementVoice(
+          annEv.speechText,
+          annEv.useThreeToneGong
+        );
+        window.setTimeout(() => {
+          setActiveHallAnnouncementBanner((curr) =>
+            curr === annEv.bannerText ? null : curr
+          );
+        }, 9500);
+      }
+      window.setTimeout(() => {
+        isApplyingRemoteAdminSyncRef.current = false;
+      }, 60);
+    },
+    []
+  );
 
   const adminSyncPayloadRef = useRef<AdminSyncPayload>(
     buildCurrentAdminSyncPayload()
@@ -1951,7 +2490,51 @@ export function App() {
         }
       }
     }
-  }, [mpRole, isAdminUnlocked, buildCurrentAdminSyncPayload]);
+    // 3. Live-Regie-Synchronisation via Supabase (public.hall_settings, ID = 1)
+    if (isAdminUnlocked || isDjBoothUnlocked) {
+      void upsertCloudHallSettings(payload, lastSyncedAnnouncementRef.current);
+    }
+  }, [
+    mpRole,
+    isAdminUnlocked,
+    isDjBoothUnlocked,
+    buildCurrentAdminSyncPayload,
+  ]);
+
+  // Subscribe to Supabase Realtime on public.hall_settings (ID = 1) for instant live sync across all rinks
+  useEffect(() => {
+    let active = true;
+    fetchInitialCloudHallSettings<AdminSyncPayload>().then((row) => {
+      if (!active || !row) return;
+      if (row.controls && typeof row.controls === 'object') {
+        applyIncomingAdminSync(row.controls);
+      }
+      if (
+        row.announcement &&
+        row.announcement !== lastSyncedAnnouncementRef.current
+      ) {
+        lastSyncedAnnouncementRef.current = row.announcement;
+        showHallAnnouncement(row.announcement, true);
+      }
+    });
+    const unsubscribe = subscribeToCloudHallSettings<AdminSyncPayload>((row) => {
+      if (!active || !row) return;
+      if (row.controls && typeof row.controls === 'object') {
+        applyIncomingAdminSync(row.controls);
+      }
+      if (
+        row.announcement &&
+        row.announcement !== lastSyncedAnnouncementRef.current
+      ) {
+        lastSyncedAnnouncementRef.current = row.announcement;
+        showHallAnnouncement(row.announcement, true);
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [applyIncomingAdminSync, showHallAnnouncement]);
 
   const cleanupPeerSession = useCallback(() => {
     hostConnectionsRef.current.forEach((c) => {
@@ -2333,6 +2916,70 @@ export function App() {
               }
             }
 
+            // 5. VIP-Gästeliste Prüfung vor Multiplayer-Einlass (wenn "Nur VIP" aktiv)
+            if (
+              adminSyncPayloadRef.current.vipGuestListOnly &&
+              !pkt.isAdmin
+            ) {
+              const onVipList = vipGuestListRef.current.some(
+                (v) => v.name.trim().toLowerCase() === requestedNorm
+              );
+              if (!onVipList) {
+                const rejectVip: MultiplayerPacket = {
+                  type: 'join-rejected',
+                  reason:
+                    'Heute geschlossene Gesellschaft – Dein Name steht leider nicht auf der VIP-Gästeliste!',
+                };
+                try {
+                  conn.send(rejectVip);
+                } catch {
+                  // ignore
+                }
+                window.setTimeout(() => {
+                  try {
+                    conn.close();
+                  } catch {
+                    // ignore
+                  }
+                }, 350);
+                return;
+              }
+            }
+
+            // 7. Sonntags-Clique-Modus (2+1-Regel): Max. 3 Skater gleichzeitig in der Clique-Runde
+            const isCliqueActiveNow = Boolean(
+              adminSyncPayloadRef.current.sundayCliqueMode ||
+                (adminSyncPayloadRef.current.sundayCliqueAutoSunday !== false &&
+                  new Date().getDay() === 0)
+            );
+            const activeOtherGuestsCount = Array.from(
+              hostGuestsStateRef.current.keys()
+            ).filter((k) => k !== conn.peer).length;
+            if (
+              isCliqueActiveNow &&
+              !pkt.isAdmin &&
+              activeOtherGuestsCount + 1 >= 3
+            ) {
+              const rejectClique: MultiplayerPacket = {
+                type: 'join-rejected',
+                reason:
+                  'Die Clique-Runde ist gerade voll (max. 3 Skater im 2+1 Gruppen-Lauf) – bitte warte kurz, bis ein Platz frei wird!',
+              };
+              try {
+                conn.send(rejectClique);
+              } catch {
+                // ignore
+              }
+              window.setTimeout(() => {
+                try {
+                  conn.close();
+                } catch {
+                  // ignore
+                }
+              }, 350);
+              return;
+            }
+
             if (isDuplicate) {
               const rejectPkt: MultiplayerPacket = {
                 type: 'join-rejected',
@@ -2673,6 +3320,45 @@ export function App() {
         );
         return;
       }
+      if (!mobilityChoice) {
+        const skateMsg =
+          'Bitte wähle erst deine Rollschuhe, Leihrollschuhe oder den Rollstuhl aus!';
+        setGuestJoinError(skateMsg);
+        setBouncerMessage(skateMsg);
+        return;
+      }
+      if (
+        isSundayCliqueActive &&
+        !isAdminUnlockedRef.current &&
+        remotePlayersRef.current.length + 1 >= 3
+      ) {
+        const fullMsg =
+          'Die Clique-Runde ist gerade voll (max. 3 Skater im 2+1 Gruppen-Lauf) – bitte warte kurz, bis ein Platz frei wird!';
+        setGuestJoinError(fullMsg);
+        setBouncerMessage(fullMsg);
+        setMpNotice(fullMsg);
+        return;
+      }
+      // 5. VIP-Gästeliste (public.guest_list) Prüfung vor Multiplayer-Einlass
+      if (adminSettings.vipGuestListOnly && !isAdminUnlockedRef.current) {
+        setMpStatus('connecting');
+        isNameOnCloudGuestList(cleanName).then((allowed) => {
+          if (!allowed) {
+            setMpStatus('idle');
+            const vipMsg =
+              'Heute geschlossene Gesellschaft – Dein Name steht leider nicht auf der VIP-Gästeliste!';
+            setGuestJoinError(vipMsg);
+            setBouncerMessage(vipMsg);
+            setMpNotice(vipMsg);
+            return;
+          }
+          proceedWithGuestConnection();
+        });
+        return;
+      }
+      proceedWithGuestConnection();
+
+      function proceedWithGuestConnection() {
       setGuestJoinError(null);
       cleanupPeerSession();
       setMpStatus('connecting');
@@ -2928,11 +3614,15 @@ export function App() {
         );
         setMpRole('solo');
       });
+      }
     },
     [
+      adminSettings.vipGuestListOnly,
       applyIncomingAdminSync,
       cleanupPeerSession,
       electAndMigrateHost,
+      isSundayCliqueActive,
+      mobilityChoice,
       showHallAnnouncement,
     ]
   );
@@ -3286,7 +3976,7 @@ export function App() {
     }
 
     const bandKey = `${todayIso}_${
-      customBandInput.trim() || activeBandName || 'Band'
+      (customBandInput || '').trim() || activeBandName || 'Band'
     }`;
     if (isBandEventActive && !nextBandSessions.includes(bandKey)) {
       nextBandSessions.push(bandKey);
@@ -3364,6 +4054,62 @@ export function App() {
       triggerCertificatePopup(unlockedId);
     }
   }, [triggerCertificatePopup]);
+
+  const currentNewspaperIssueId = Math.max(
+    1,
+    Number(adminSettings.newspaperIssueId) || 1
+  );
+  const readNewspaperIssuesList = certificatesState.readNewspaperIssues || [];
+  const hasUnreadNewspaperIssue =
+    adminSettings.newspaperEnabled !== false &&
+    !readNewspaperIssuesList.includes(currentNewspaperIssueId);
+
+  const handleOpenNewspaperModal = useCallback(() => {
+    soundFX.unlockAudioContext();
+    soundFX.playChallengeUnlocked();
+    setShowNewspaperModal(true);
+
+    const cur = certificatesStateRef.current;
+    const prevIssues = Array.isArray(cur.readNewspaperIssues)
+      ? cur.readNewspaperIssues
+      : [];
+    const issueId = Math.max(1, Number(adminSettings.newspaperIssueId) || 1);
+    const nextIssues = prevIssues.includes(issueId)
+      ? prevIssues
+      : [...prevIssues, issueId];
+
+    const dateLabel = new Date().toLocaleDateString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+    const nextUnlocked = { ...cur.unlocked };
+    let newlyUnlockedVielleser = false;
+
+    if (nextIssues.length >= 5 && !nextUnlocked.vielleser_5?.unlocked) {
+      nextUnlocked.vielleser_5 = {
+        unlocked: true,
+        unlockedAt: dateLabel,
+        holderName: (playerName || 'Palladium-Skater').trim(),
+      };
+      newlyUnlockedVielleser = true;
+    }
+
+    if (nextIssues.length !== prevIssues.length || newlyUnlockedVielleser) {
+      const nextState: PalladiumCertificatesState = {
+        ...cur,
+        readNewspaperIssues: nextIssues,
+        unlocked: nextUnlocked,
+      };
+      certificatesStateRef.current = nextState;
+      setCertificatesState(nextState);
+      saveCertificatesState(nextState);
+
+      if (newlyUnlockedVielleser) {
+        triggerCertificatePopup('vielleser_5');
+      }
+    }
+  }, [adminSettings.newspaperIssueId, playerName, triggerCertificatePopup]);
 
   const handleCertificateEvent = useCallback(
     (
@@ -3695,6 +4441,9 @@ export function App() {
       (introTour.try_ballspiel ? 1 : 0);
     const introPts =
       introCompletedStepsCount * 20 + (introTour.bonusClaimed ? 20 : 0);
+    const cliqueBonusPts = isSundayCliqueActive
+      ? Math.round((lapPts + gamePts) * 0.25) + 150
+      : 0;
     return (
       baseWelcomePts +
       lapPts +
@@ -3702,12 +4451,14 @@ export function App() {
       gamePts +
       stampPts +
       bonusPts +
-      introPts
+      introPts +
+      cliqueBonusPts
     );
   }, [
     completedChallengesCount,
     hallStats.bestLapRecord,
     introTour,
+    isSundayCliqueActive,
     stampCard.stamps,
     telemetry.ballspielScore,
     telemetry.laps,
@@ -3719,6 +4470,49 @@ export function App() {
     0,
     totalEarnedPoints - (upgrades.spentPoints || 0)
   );
+
+  // 2. Cloud-Sicherung für Spielerprofile (public.players) via Upsert
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void upsertCloudPlayerProfile({
+        player_id: cloudPlayerId,
+        name: (playerName || 'Gast-Skater').trim(),
+        outfit_color: playerShirtColor,
+        settings: {
+          lockerSettings,
+          crtFilterEnabled,
+          visitorVolume,
+          characterMode,
+          kengolHatEnabled,
+          readNewspaperIssues: certificatesState.readNewspaperIssues || [],
+          vielleserUnlocked: Boolean(
+            certificatesState.unlocked.vielleser_5?.unlocked
+          ),
+          keybindings: {
+            move: 'WASD / Pfeiltasten',
+            jump: 'Space',
+            interact: 'E',
+            spin: 'Shift',
+            rotateBuildItem: 'R',
+          },
+        },
+        highscore: totalEarnedPoints,
+      });
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [
+    cloudPlayerId,
+    playerName,
+    playerShirtColor,
+    lockerSettings,
+    crtFilterEnabled,
+    visitorVolume,
+    characterMode,
+    kengolHatEnabled,
+    certificatesState.readNewspaperIssues,
+    certificatesState.unlocked.vielleser_5,
+    totalEarnedPoints,
+  ]);
   const hasFreeProShopStampReward =
     stampCard.freeProShopVoucherAvailable || stampCard.stamps >= 10;
 
@@ -3863,15 +4657,182 @@ export function App() {
 
   const handleTriggerDjJingle = useCallback((slot: DjJingleSlot) => {
     soundFX.unlockAudioContext();
+    const nowTs = Date.now();
+    lastProcessedSampleTsRef.current = nowTs;
     setActiveJingleSlotId(slot.id);
     setExternalDjJingleBubble((prev) => ({
       text: slot.bubbleText,
       seq: (prev?.seq || 0) + 1,
     }));
+    const liveSampleEvent: LiveBroadcastSampleEvent = {
+      slotId: slot.id,
+      label: slot.label,
+      bubbleText: slot.bubbleText,
+      audioUrl: slot.audioUrl || '',
+      synthFallback: slot.synthFallback,
+      timestamp: nowTs,
+    };
+    setLastTriggeredSample(liveSampleEvent);
     soundFX.playDjJingleOrVoiceMemo(slot, () => {
       setActiveJingleSlotId((curr) => (curr === slot.id ? null : curr));
     });
   }, []);
+
+  // 9. Hallen-Durchsagen & Abschlepp-Gong (mit 3-Klang-Gong, Retro-Leuchtband & Web Speech API Hall-Ansage)
+  const handleTriggerHallAnnouncementPreset = useCallback(
+    (preset: HallAnnouncementPreset) => {
+      soundFX.unlockAudioContext();
+      const nowTs = Date.now();
+      lastProcessedAnnouncementTsRef.current = nowTs;
+
+      if (preset.id === 'direction_change') {
+        setAdminSettings((s) => ({
+          ...s,
+          skateDirection: s.skateDirection === 'cw' ? 'ccw' : 'cw',
+        }));
+      } else if (preset.id === 'couple_skate') {
+        setLightingMode('slow-skating');
+      }
+
+      const ev: LiveHallAnnouncementEvent = {
+        presetId: preset.id,
+        bannerText: preset.bannerText,
+        speechText: preset.speechText,
+        useThreeToneGong: preset.useThreeToneGong,
+        timestamp: nowTs,
+      };
+      setLastHallAnnouncementEvent(ev);
+      setActiveHallAnnouncementBanner(preset.bannerText);
+      showHallAnnouncement(preset.bannerText);
+      soundFX.triggerHallAnnouncementVoice(
+        preset.speechText,
+        preset.useThreeToneGong
+      );
+      window.setTimeout(() => {
+        setActiveHallAnnouncementBanner((curr) =>
+          curr === preset.bannerText ? null : curr
+        );
+      }, 9500);
+    },
+    [showHallAnnouncement]
+  );
+
+  // Trigger Strobe Flash effect whenever strobeBurstCount increments
+  useEffect(() => {
+    if (strobeBurstCount > prevStrobeBurstCountRef.current) {
+      prevStrobeBurstCountRef.current = strobeBurstCount;
+      soundFX.playStrobeZap();
+      setIsStrobeFlashing(true);
+      const timer = window.setTimeout(() => setIsStrobeFlashing(false), 1800);
+      return () => window.clearTimeout(timer);
+    }
+  }, [strobeBurstCount]);
+
+  // 11. DJ-Kanzel 3x3 Sampler Launchpad Keyboard Shortcuts (Keys 1-9 when DJ-Kanzel is open)
+  useEffect(() => {
+    if (!showDjBoothModal) return;
+    const onDjKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      if (e.key >= '1' && e.key <= '9' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        const idx = parseInt(e.key, 10) - 1;
+        const slots = adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS;
+        const slot = slots[idx] || DEFAULT_DJ_JINGLE_SLOTS[idx];
+        if (slot) {
+          handleTriggerDjJingle(slot);
+        }
+      }
+    };
+    window.addEventListener('keydown', onDjKeyDown);
+    return () => window.removeEventListener('keydown', onDjKeyDown);
+  }, [adminSettings.djJingleSlots, handleTriggerDjJingle, showDjBoothModal]);
+
+  const handleOpenDjBooth = useCallback(() => {
+    if (isDjBoothUnlocked || isAdminUnlocked) {
+      setShowDjBoothModal(true);
+    } else {
+      setDjPasswordInput('');
+      setDjPasswordError(null);
+      setShowDjLoginModal(true);
+    }
+  }, [isAdminUnlocked, isDjBoothUnlocked]);
+
+  const handleVerifyDjPassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    const expected = (
+      (import.meta.env.VITE_DJ_PASSWORD as string | undefined) || 'MAGIC86'
+    ).trim();
+    const entered = djPasswordInput.trim();
+    if (
+      entered === expected ||
+      entered.toUpperCase() === expected.toUpperCase() ||
+      entered.toUpperCase() === 'MAGIC86' ||
+      entered === ADMIN_PIN ||
+      entered.toUpperCase() === MASTER_ADMIN_KEY
+    ) {
+      setIsDjBoothUnlocked(true);
+      try {
+        window.sessionStorage.setItem('palladium_dj_unlocked_v1', 'true');
+      } catch {
+        // ignore
+      }
+      setShowDjLoginModal(false);
+      setShowDjBoothModal(true);
+      setDjPasswordError(null);
+    } else {
+      setDjPasswordError('Falsches DJ-Passwort! (Tipp: VITE_DJ_PASSWORD / MAGIC86)');
+    }
+  };
+
+  const handleSubmitSongRequest = useCallback(
+    (trackText: string) => {
+      const cleanTrack = trackText.trim();
+      if (!cleanTrack) return;
+      const newReq: DjSongRequestItem = {
+        id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        trackTitle: cleanTrack,
+        requestedBy: (playerName || 'Gast-Skater').trim() || 'Gast-Skater',
+        createdAt: new Date().toLocaleTimeString('de-DE', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        played: false,
+      };
+      const nextList = [newReq, ...(adminSettings.songRequests || [])].slice(
+        0,
+        25
+      );
+      setAdminSettings((s) => ({
+        ...s,
+        songRequests: nextList,
+      }));
+      const nextPayload: AdminSyncPayload = {
+        ...buildCurrentAdminSyncPayload(),
+        songRequests: nextList,
+      };
+      void upsertCloudHallSettings(
+        nextPayload,
+        lastSyncedAnnouncementRef.current
+      );
+      setNewSongRequestInput('');
+      setSongRequestToast(`🎵 Musikwunsch „${cleanTrack}“ an die DJ-Kanzel gesendet!`);
+      window.setTimeout(() => setSongRequestToast(null), 3500);
+    },
+    [
+      adminSettings.songRequests,
+      buildCurrentAdminSyncPayload,
+      playerName,
+    ]
+  );
 
   // Keep unlockedMoves in upgrades synced when challenge states unlock them
   const effectiveUpgrades = useMemo<ProShopUpgradesState>(
@@ -4050,51 +5011,105 @@ export function App() {
           )}
         </div>
 
-        {/* Center: Live Telemetry Counters (Laps, Speed, Crashes, Mode) */}
-        <div className="hidden xl:flex items-center gap-3 font-mono text-xs bg-slate-950/90 px-3 py-1 rounded border border-slate-800">
-          <div>
-            <span className="text-slate-400 mr-1">RUNDEN:</span>
-            <span className="text-cyan-300 font-bold">{telemetry.laps}</span>
-          </div>
-          <span className="text-slate-700">|</span>
-          <div>
-            <span className="text-slate-400 mr-1">TEMPO:</span>
-            <span className="text-emerald-300 font-bold">
-              {telemetry.speed.toFixed(1)} km/h
+        {/* Center: Clickable Middle Avatar Circle + Live Telemetry Counters */}
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              soundFX.playChallengeUnlocked();
+              setShowExplorerCertificateModal(true);
+            }}
+            title="Profil-Zertifikat öffnen: „Entdecker auf acht Rollen“ (Urkunde mit eigenem Avatar, Erstellungsdatum & Arena-Siegel)"
+            className="group relative w-9 h-9 rounded-full bg-gradient-to-br from-fuchsia-950 via-slate-900 to-cyan-950 border-2 border-amber-300 hover:border-cyan-300 shadow-[0_0_16px_rgba(251,191,36,0.55)] hover:scale-105 transition cursor-pointer flex items-center justify-center shrink-0"
+          >
+            <svg viewBox="0 0 40 40" className="w-7 h-7 overflow-visible">
+              {/* Neon Aura */}
+              <circle
+                cx="20"
+                cy="20"
+                r="16"
+                fill="none"
+                stroke={playerShirtColor || '#ff2a85'}
+                strokeWidth="1.5"
+                strokeDasharray="3 2"
+                opacity="0.75"
+              />
+              {/* Kengol Hat or 80s Hairband */}
+              {kengolHatEnabled ? (
+                <path
+                  d="M11 13 Q20 6 29 13 Z"
+                  fill="#f43f5e"
+                  stroke="#fde047"
+                  strokeWidth="1"
+                />
+              ) : (
+                <rect x="13" y="10" width="14" height="2.5" rx="1" fill="#22d3ee" />
+              )}
+              {/* Head */}
+              <circle cx="20" cy="15" r="5" fill="#fde68a" />
+              {/* 80s Shirt in Player's Outfit Color */}
+              <path
+                d="M12 28 C12 21 28 21 28 28 Z"
+                fill={playerShirtColor || '#ff2a85'}
+                stroke="#ffffff"
+                strokeWidth="1"
+              />
+              {/* 8 Rollerskate Wheels / Neon Wheelchair */}
+              <circle cx="14" cy="32" r="2.2" fill="#22d3ee" />
+              <circle cx="18" cy="32" r="2.2" fill="#fde047" />
+              <circle cx="22" cy="32" r="2.2" fill="#fde047" />
+              <circle cx="26" cy="32" r="2.2" fill="#22d3ee" />
+            </svg>
+            <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-amber-400 text-slate-950 font-mono text-[9px] font-black flex items-center justify-center border border-white shadow">
+              🏅
             </span>
+          </button>
+
+          <div className="hidden xl:flex items-center gap-3 font-mono text-xs bg-slate-950/90 px-3 py-1 rounded border border-slate-800">
+            <div>
+              <span className="text-slate-400 mr-1">RUNDEN:</span>
+              <span className="text-cyan-300 font-bold">{telemetry.laps}</span>
+            </div>
+            <span className="text-slate-700">|</span>
+            <div>
+              <span className="text-slate-400 mr-1">TEMPO:</span>
+              <span className="text-emerald-300 font-bold">
+                {telemetry.speed.toFixed(1)} km/h
+              </span>
+            </div>
+            <span className="text-slate-700">|</span>
+            <div>
+              <span className="text-slate-400 mr-1">STÜRZE:</span>
+              <span className="text-rose-400 font-bold">{telemetry.crashes}</span>
+            </div>
+            {hallGameMode === 'ballspiel' && (
+              <>
+                <span className="text-slate-700">|</span>
+                <div className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/80 text-amber-200 font-bold shadow-[0_0_10px_rgba(251,191,36,0.3)]">
+                  🏐 IM SPIEL: {telemetry.ballspielRemaining} /{' '}
+                  {telemetry.ballspielTotal}
+                </div>
+                <span className="text-slate-700">|</span>
+                <div>
+                  <span className="text-amber-300 mr-1">TREFFER:</span>
+                  <span className="text-amber-200 font-bold">
+                    {telemetry.ballspielScore}
+                  </span>
+                </div>
+              </>
+            )}
+            {hallGameMode === 'slalom' && (
+              <>
+                <span className="text-slate-700">|</span>
+                <div>
+                  <span className="text-fuchsia-300 mr-1">SLALOM-COMBO:</span>
+                  <span className="text-fuchsia-200 font-bold">
+                    {telemetry.slalomCombo}x
+                  </span>
+                </div>
+              </>
+            )}
           </div>
-          <span className="text-slate-700">|</span>
-          <div>
-            <span className="text-slate-400 mr-1">STÜRZE:</span>
-            <span className="text-rose-400 font-bold">{telemetry.crashes}</span>
-          </div>
-          {hallGameMode === 'ballspiel' && (
-            <>
-              <span className="text-slate-700">|</span>
-              <div className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/80 text-amber-200 font-bold shadow-[0_0_10px_rgba(251,191,36,0.3)]">
-                🏐 IM SPIEL: {telemetry.ballspielRemaining} /{' '}
-                {telemetry.ballspielTotal}
-              </div>
-              <span className="text-slate-700">|</span>
-              <div>
-                <span className="text-amber-300 mr-1">TREFFER:</span>
-                <span className="text-amber-200 font-bold">
-                  {telemetry.ballspielScore}
-                </span>
-              </div>
-            </>
-          )}
-          {hallGameMode === 'slalom' && (
-            <>
-              <span className="text-slate-700">|</span>
-              <div>
-                <span className="text-fuchsia-300 mr-1">SLALOM-COMBO:</span>
-                <span className="text-fuchsia-200 font-bold">
-                  {telemetry.slalomCombo}x
-                </span>
-              </div>
-            </>
-          )}
         </div>
 
         {/* Right: Quick Action Buttons + Public Visitor Volume Slider */}
@@ -4277,6 +5292,20 @@ export function App() {
             </span>
           )}
 
+          {/* 11. Eigene DJ-Kanzel Button (Passwortgeschützter 80er-Mischpult-Login) */}
+          <button
+            type="button"
+            onClick={handleOpenDjBooth}
+            title="Eigene DJ-Kanzel (Klecknix Twin-Decks • 3x3 Sampler-Launchpad • Hallen-Durchsagen • Musikwünsche)"
+            className={`px-2.5 py-1 rounded border font-mono font-bold transition cursor-pointer ${
+              showDjBoothModal || isDjBoothUnlocked
+                ? 'bg-fuchsia-950/90 border-fuchsia-400 text-fuchsia-200 shadow-[0_0_12px_rgba(232,121,249,0.45)]'
+                : 'bg-slate-900 hover:bg-slate-800 border-fuchsia-500/50 text-fuchsia-200'
+            }`}
+          >
+            🎧 DJ-Kanzel
+          </button>
+
           {/* Regie-Button erscheint erst NACH Entsperrung per Doppelklick auf Hallen-Logo oder Strg+Shift+R */}
           {isAdminUnlocked && !isTesterAccount && (
             <button
@@ -4292,8 +5321,26 @@ export function App() {
 
       {/* MAIN 16:9 WIDESCREEN ARENA CONTAINER */}
       <main className="relative flex-1 w-full h-full overflow-hidden flex items-center justify-center bg-[#070A12]">
+        {/* 9. RETRO-LEUCHTBAND FÜR HALLEN-DURCHSAGEN & ABSCHLEPP-GONG AUF ALLEN BAHNEN */}
+        {activeHallAnnouncementBanner && (
+          <div className="pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-4xl px-4 py-2 rounded-xl bg-gradient-to-r from-rose-950/95 via-[#1c0918]/95 to-amber-950/95 border-2 border-amber-400 text-amber-200 font-mono text-xs sm:text-sm font-black tracking-wider uppercase shadow-[0_0_32px_rgba(251,191,36,0.75)] flex items-center justify-center gap-3 animate-pulse">
+            <span className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] shrink-0">
+              🔔 3-KLANG-GONG
+            </span>
+            <span className="truncate">{activeHallAnnouncementBanner}</span>
+          </div>
+        )}
+
+        {/* 11. 80s STROBO-BLITZ OVERLAY AUF ALLEN BAHNEN */}
+        {isStrobeFlashing && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none fixed inset-0 z-40 bg-white/35 mix-blend-screen animate-ping"
+          />
+        )}
+
         {/* HALL RADIO JOIN / EVENT ANNOUNCEMENT BANNER */}
-        {hallRadioBanner && (
+        {hallRadioBanner && !activeHallAnnouncementBanner && (
           <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-40 px-5 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 text-cyan-200 font-mono text-xs font-bold shadow-[0_0_24px_rgba(34,211,238,0.5)]">
             {hallRadioBanner}
           </div>
@@ -4413,6 +5460,228 @@ export function App() {
             </button>
           </div>
         )}
+
+        {/* 6. GAME-BOY-REGIE-HANDHELD (DMG-01 RETRO HELLGRAU LAUNCHPAD FÜR ADMIN AUF DER BAHN) */}
+        {isAdminUnlocked &&
+          !isTesterAccount &&
+          isCurtainOpen &&
+          showGameBoyHandheld &&
+          !showAdminTerminal && (
+            <div className="fixed bottom-14 right-3 z-40 select-none font-mono">
+              <div className="w-[264px] rounded-tl-2xl rounded-tr-2xl rounded-bl-2xl rounded-br-[34px] bg-[#d4d4cc] border-4 border-[#8e8e84] shadow-[0_10px_30px_rgba(0,0,0,0.75)] p-2.5 text-slate-900">
+                {/* Top DMG Groove & Label */}
+                <div className="flex items-center justify-between border-b-2 border-[#b0b0a6] pb-1 mb-1.5 text-[9px] font-black tracking-wider text-[#333652]">
+                  <span>DOT MATRIX REGIE • PALLADIUM</span>
+                  <button
+                    type="button"
+                    onClick={() => setIsGameBoyExpanded((v) => !v)}
+                    className="px-1.5 py-0.5 rounded bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] text-[8.5px] font-bold cursor-pointer"
+                    title="Ein-/Ausklappen [R / START / SELECT]"
+                  >
+                    {isGameBoyExpanded ? '▼ MIN [R]' : '▲ PAD [R]'}
+                  </button>
+                </div>
+
+                {/* Dark Gray Screen Bezel + Red Battery LED + Green LCD */}
+                <div className="rounded-lg bg-[#5a5a66] p-2 border-2 border-[#43434d] shadow-inner">
+                  <div className="flex items-center justify-between text-[8px] text-slate-200 mb-1">
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_6px_#f43f5e]" />
+                      BATTERY
+                    </span>
+                    <span className="tracking-widest text-amber-200 font-bold">
+                      HALL_SETTINGS #1
+                    </span>
+                  </div>
+                  <div className="rounded bg-[#8bac0f] border-2 border-[#306230] px-2 py-1.5 text-[#0f380f] font-mono text-[10px] leading-tight shadow-inner">
+                    <div className="flex items-center justify-between font-black border-b border-[#306230]/40 pb-0.5">
+                      <span>LICHT: {lightingMode.toUpperCase()}</span>
+                      <span>
+                        {adminSettings.skateDirection === 'cw' ? '↻ CW' : '↺ CCW'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between mt-0.5 text-[9.5px] font-bold">
+                      <span>MODUS: {hallGameMode.toUpperCase()}</span>
+                      <span>
+                        VIP:{' '}
+                        {adminSettings.vipGuestListOnly ? 'NUR VIP' : 'OFFEN'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Expanded Bordeaux Red Launchpad Buttons */}
+                {isGameBoyExpanded && (
+                  <div className="mt-2 grid grid-cols-2 gap-1.5">
+                    {(
+                      adminSettings.handheldActionIds || [
+                        'light_disco',
+                        'light_blacklight',
+                        'fog_burst',
+                        'direction',
+                        'mode_ball',
+                        'putzlicht',
+                      ]
+                    ).map((actId) => {
+                      const actionMap: Record<
+                        string,
+                        { label: string; run: () => void }
+                      > = {
+                        light_disco: {
+                          label: '🪩 DISCO',
+                          run: () => setLightingMode('disco'),
+                        },
+                        light_blacklight: {
+                          label: '🟣 UV-LICHT',
+                          run: () => setLightingMode('blacklight'),
+                        },
+                        light_slow: {
+                          label: '💜 SLOW-SKATE',
+                          run: () => setLightingMode('slow-skating'),
+                        },
+                        putzlicht: {
+                          label: adminSettings.fullHallPutzlichtEnabled
+                            ? '💡 PUTZ: AN'
+                            : '💡 PUTZ: AUS',
+                          run: () =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              fullHallPutzlichtEnabled:
+                                !s.fullHallPutzlichtEnabled,
+                            })),
+                        },
+                        fog_burst: {
+                          label: '💨 NEBEL-STOSS',
+                          run: () => setFogBurstCount((c) => c + 1),
+                        },
+                        direction: {
+                          label:
+                            adminSettings.skateDirection === 'cw'
+                              ? '🔄 RICHTUNG: CW'
+                              : '🔄 RICHTUNG: CCW',
+                          run: () =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              skateDirection:
+                                s.skateDirection === 'cw' ? 'ccw' : 'cw',
+                            })),
+                        },
+                        mode_free: {
+                          label: '🛼 FREILAUF',
+                          run: () => setHallGameMode('free-skate'),
+                        },
+                        mode_ball: {
+                          label: '🏐 BALLSPIEL',
+                          run: () =>
+                            setHallGameMode((m) =>
+                              m === 'ballspiel' ? 'free-skate' : 'ballspiel'
+                            ),
+                        },
+                        mode_slalom: {
+                          label: '🦺 SLALOM',
+                          run: () =>
+                            setHallGameMode((m) =>
+                              m === 'slalom' ? 'free-skate' : 'slalom'
+                            ),
+                        },
+                        mode_staffel: {
+                          label: '⚡ STAFFEL',
+                          run: () =>
+                            setHallGameMode((m) =>
+                              m === 'springerstaffel'
+                                ? 'free-skate'
+                                : 'springerstaffel'
+                            ),
+                        },
+                        stage_band: {
+                          label:
+                            centerStageMode === 'band'
+                              ? '🎸 BÜHNE: BAND'
+                              : '🏝️ BÜHNE: INSELN',
+                          run: () =>
+                            setCenterStageMode((m) =>
+                              m === 'band' ? 'islands' : 'band'
+                            ),
+                        },
+                        horn: {
+                          label: '📣 AIRHORN',
+                          run: () =>
+                            handleTriggerDjSoundboard('airhorn', 'AIRHORN'),
+                        },
+                        gong_towing: {
+                          label: '🚓 ABSCHLEPPEN',
+                          run: () =>
+                            handleTriggerHallAnnouncementPreset(
+                              HALL_ANNOUNCEMENT_PRESETS[0]
+                            ),
+                        },
+                      };
+                      const item = actionMap[actId];
+                      if (!item) return null;
+                      return (
+                        <button
+                          key={actId}
+                          type="button"
+                          onClick={item.run}
+                          className="py-1.5 px-2 rounded-full bg-[#8b1d41] hover:bg-[#a6234e] active:translate-y-0.5 text-white border-b-3 border-[#4d0d22] font-mono text-[9.5px] font-black tracking-tight shadow cursor-pointer truncate"
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+
+                    {/* 10. Per Checkbox zugewiesene Echte DJ-Audio-Samples auf dem Game-Boy-Regie-Handheld */}
+                    {(adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS)
+                      .filter((slot) => slot.showInHandheld)
+                      .map((slot) => (
+                        <button
+                          key={`handheld_sample_${slot.id}`}
+                          type="button"
+                          onClick={() => handleTriggerDjJingle(slot)}
+                          className="py-1.5 px-2 rounded-full bg-[#6b1435] hover:bg-[#8f1b47] active:translate-y-0.5 text-amber-200 border-b-3 border-[#3d0a1c] font-mono text-[9px] font-black tracking-tight shadow cursor-pointer truncate"
+                          title={`DJ-Sample abspielen: ${slot.label}`}
+                        >
+                          🎵 {slot.label}
+                        </button>
+                      ))}
+                  </div>
+                )}
+
+                {/* Classic Diagonal Grey Rubber SELECT & START Buttons */}
+                <div className="mt-2 pt-1 flex items-center justify-center gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setIsGameBoyExpanded((v) => !v)}
+                    className="group flex flex-col items-center cursor-pointer"
+                    title="Ein-/Ausklappen (SELECT)"
+                  >
+                    <span className="w-8 h-2.5 rounded-full bg-[#686870] group-hover:bg-[#52525a] border border-[#45454c] -rotate-12 block shadow-inner" />
+                    <span className="text-[8px] font-black tracking-widest text-[#333652] mt-0.5">
+                      SELECT
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsGameBoyExpanded((v) => !v)}
+                    className="group flex flex-col items-center cursor-pointer"
+                    title="Ein-/Ausklappen (START)"
+                  >
+                    <span className="w-8 h-2.5 rounded-full bg-[#686870] group-hover:bg-[#52525a] border border-[#45454c] -rotate-12 block shadow-inner" />
+                    <span className="text-[8px] font-black tracking-widest text-[#333652] mt-0.5">
+                      START
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminTerminal(true)}
+                    className="px-2 py-0.5 rounded bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] text-[8.5px] font-black cursor-pointer"
+                  >
+                    🎛️ REGIE
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
         {/* COMPACT TOP BAR FOR ACTIVE BUILD MODE ("🛠️ BAUMENÜ") WHEN ADMIN MODAL IS CLOSED */}
         {isAdminUnlocked && !isTesterAccount && buildModeEnabled && !showAdminTerminal && (
@@ -4544,7 +5813,9 @@ export function App() {
           lightingMode={lightingMode}
           centerStageMode={centerStageMode}
           activeBandName={
-            customBandInput.trim() ? customBandInput.trim() : activeBandName
+            (customBandInput || '').trim()
+              ? (customBandInput || '').trim()
+              : activeBandName || 'NDW-Power'
           }
           bandSkinTone={bandSkinTone}
           bandGender={bandGender}
@@ -4650,7 +5921,70 @@ export function App() {
           }}
           onCertificateEvent={handleCertificateEvent}
           onTelemetry={setTelemetry}
+          mobilitySelected={mobilityChoice !== null}
+          avatarRole={avatarRole}
+          sundayCliqueActive={isSundayCliqueActive}
+          onOpenStationDialog={(stationId) => {
+            soundFX.unlockAudioContext();
+            setStationDialogToast(null);
+            setActiveStationDialog(stationId);
+          }}
+          newspaperEnabled={adminSettings.newspaperEnabled !== false}
+          newspaperHasNewBadge={hasUnreadNewspaperIssue}
+          onOpenNewspaperModal={handleOpenNewspaperModal}
         />
+
+        {/* ZEITUNGSSTÄNDER VORNE IM EINGANGSBEREICH ("DER PALLADIUM-KURIER" MIT BLINKENDEM "NEU!"-BADGE) */}
+        {isCurtainOpen &&
+          !isBlockedByMaintenance &&
+          adminSettings.newspaperEnabled !== false && (
+            <button
+              type="button"
+              onClick={handleOpenNewspaperModal}
+              title={`Der Palladium-Kurier (Ausgabe #${currentNewspaperIssueId}) • Gelesene Ausgaben: ${readNewspaperIssuesList.length}/5 für „Vielleser auf Rollen“-Urkunde`}
+              className="z-30 absolute bottom-10 right-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#26180c]/95 via-[#18122b]/95 to-[#26180c]/95 hover:from-[#382311] hover:to-[#271b42] border-2 border-amber-400 shadow-[0_0_22px_rgba(251,191,36,0.5)] cursor-pointer transition group"
+            >
+              <span className="text-lg group-hover:scale-110 transition">
+                📰
+              </span>
+              <div className="text-left font-mono leading-tight">
+                <div className="text-[11px] font-black text-amber-200 tracking-wide">
+                  Der Palladium-Kurier
+                </div>
+                <div className="text-[9.5px] text-cyan-300">
+                  Ausgabe #{currentNewspaperIssueId} • Eingang/Empfang
+                </div>
+              </div>
+              {hasUnreadNewspaperIssue && (
+                <span className="px-1.5 py-0.5 rounded-md bg-rose-600 text-white font-mono text-[9.5px] font-black border border-white animate-bounce shadow-[0_0_10px_rgba(244,63,94,0.9)]">
+                  NEU!
+                </span>
+              )}
+            </button>
+          )}
+
+        {/* 7. RETRO-BANNER AUF DER BAHN FÜR SONNTAGS-CLIQUE-MODUS (2+1-REGEL) */}
+        {isCurtainOpen && !isBlockedByMaintenance && isSundayCliqueActive && (
+          <div className="pointer-events-none absolute top-2.5 left-1/2 -translate-x-1/2 z-20 px-4 py-1.5 rounded-xl bg-gradient-to-r from-amber-950/90 via-orange-900/90 to-rose-950/90 border-2 border-amber-300 shadow-[0_0_24px_rgba(251,191,36,0.55)] flex flex-wrap items-center justify-center gap-2 text-center">
+            <span className="font-display font-black text-xs sm:text-sm tracking-wider text-amber-200">
+              ☀️ SONNTAGS-CLIQUE • 2+1 GRUPPEN-LAUF
+            </span>
+            <span className="px-2 py-0.5 rounded bg-amber-400/20 border border-amber-300/70 font-mono text-[10px] font-bold text-amber-100">
+              {sundayCliqueTicket === 'duo'
+                ? '🎟️ 2er-Runde (Duo)'
+                : '🎟️ 3er-Runde (Trio)'}{' '}
+              • Rolle:{' '}
+              {avatarRole === 'kid'
+                ? '🧢 Kid/Junior'
+                : avatarRole === 'stammgast'
+                ? '⭐ Stammgast'
+                : '🛼 Standard'}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/70 font-mono text-[10px] font-bold text-emerald-200">
+              👥 Skater: {Math.min(3, activePlayersOnRink)} / 3 • +25% Cliquen-Bonus
+            </span>
+          </div>
+        )}
 
         {/* LIVE KINO-LEINWAND OVERLAY (EXAKT ZENTRIERT & BÜNDIG IN DER INNEREN BILDFLÄCHE DES RAHMENS) */}
         {isCurtainOpen &&
@@ -4793,24 +6127,60 @@ export function App() {
           </div>
         )}
 
-        {isCurtainOpen && telemetry.nearProShop && !showProShopModal && (
-          <div className="absolute bottom-14 left-6 z-30 flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-950/95 border border-cyan-400 shadow-lg text-xs">
-            <span className="text-cyan-300 font-bold">
-              🛠️ Pro-Shop Vitrine:
-            </span>
-            <span className="text-slate-200">
-              Drücke <kbd className="px-1.5 py-0.5 bg-slate-800 rounded">[E]</kbd>{' '}
-              oder klicke für Rollschuh-Tuning &amp; 80er-Moves
-            </span>
-            <button
-              type="button"
-              onClick={() => setShowProShopModal(true)}
-              className="ml-1 px-2 py-0.5 rounded bg-cyan-500 text-slate-950 font-bold cursor-pointer"
-            >
-              Katalog öffnen
-            </button>
-          </div>
-        )}
+        {isCurtainOpen &&
+          !activeStationDialog &&
+          (telemetry.nearCashier ||
+            telemetry.nearSkateRental ||
+            telemetry.nearProShop ||
+            telemetry.nearBistroCounter ||
+            telemetry.nearDjTower) &&
+          (() => {
+            const activeNearStation: StationDialogId = telemetry.nearCashier
+              ? 'kasse'
+              : telemetry.nearSkateRental
+              ? 'verleih'
+              : telemetry.nearProShop
+              ? 'proshop'
+              : telemetry.nearBistroCounter
+              ? 'snackbar'
+              : 'dj';
+            const stMeta = STATION_DIALOG_DEFAULTS[activeNearStation];
+            const crewName =
+              adminSettings.crewNames?.[stMeta.crewKey] ||
+              stMeta.defaultCrewName;
+            return (
+              <div className="absolute bottom-14 left-6 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(0,240,255,0.45)] text-xs font-mono">
+                <img
+                  src={getStation16BitPortraitDataUrl(
+                    activeNearStation,
+                    adminSettings.crewPortraits?.[activeNearStation]
+                  )}
+                  alt={crewName}
+                  style={{ imageRendering: 'pixelated' }}
+                  className="w-8 h-8 rounded border border-amber-300 shrink-0"
+                />
+                <div>
+                  <div className="text-amber-300 font-black text-[11px]">
+                    {stMeta.title} • {crewName}
+                  </div>
+                  <div className="text-slate-200 text-[10.5px]">
+                    Drücke{' '}
+                    <kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-cyan-400/50">
+                      [E]
+                    </kbd>{' '}
+                    für den 80er-Pixel-Dialog
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveStationDialog(activeNearStation)}
+                  className="ml-1 px-2.5 py-1 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-[11px] cursor-pointer"
+                >
+                  👾 Dialog öffnen [E]
+                </button>
+              </div>
+            );
+          })()}
 
         {isCurtainOpen &&
           !telemetry.hasSkatesEquipped &&
@@ -5682,58 +7052,231 @@ export function App() {
                   </div>
                 )}
 
-                {/* 2. ROLLSCHUH-CHECK (DIREKT DARUNTER) */}
-                <div className="p-3.5 rounded-xl bg-[#141024] border border-fuchsia-500/40 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-                  <label
-                    className={`flex items-start md:items-center gap-2.5 select-none ${
-                      entryPass?.locked
-                        ? 'opacity-65 cursor-not-allowed'
-                        : 'cursor-pointer'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={hasOwnSkates}
-                      disabled={Boolean(entryPass?.locked)}
-                      onChange={(e) => {
-                        if (entryPass?.locked) return;
-                        setHasOwnSkates(e.target.checked);
-                      }}
-                      className="accent-emerald-400 w-4 h-4 mt-0.5 md:mt-0 rounded cursor-pointer disabled:cursor-not-allowed"
-                    />
+                {/* 2. ROLLSCHUH- & ROLLSTUHL-LOGIK (VERPFLICHTENDE AUSWAHL VOR BAHNEINTRITT) */}
+                <div className="p-3.5 rounded-xl bg-[#141024] border-2 border-fuchsia-500/50 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <span className="font-mono font-bold text-xs md:text-sm text-emerald-300 uppercase">
-                        2. ROLLSCHUH-CHECK — 🛼 Ich habe eigene Rollschuhe
+                        2. ROLLSCHUH- &amp; ROLLSTUHL-AUSWAHL (Pflichtwahl vor Bahneintritt)
                       </span>
                       <p className="text-[11px] text-slate-300 mt-0.5">
-                        {hasOwnSkates ? (
-                          <>
-                            <strong>Eigene Rollschuhe aktiv:</strong> Du startest
-                            direkt auf eigenen Custom-Skates (+10% Antritt/Kurvenlage)
-                            und darfst sofort durch die Schleusen-Bande auf die Bahn!
-                          </>
-                        ) : (
-                          <>
-                            <strong>Keine eigenen Rollschuhe:</strong> Du spawnt in
-                            Straßenschuhen und musst dir zuerst am{' '}
-                            <strong>ROLLSCHUHVERLEIH [E]</strong> Leih-Skates holen,
-                            bevor du auf die Bahn darfst!
-                          </>
-                        )}
+                        Wähle vor dem Betreten der Bahn verpflichtend deine Ausstattung (inkl. barrierefreiem Rollstuhl-Avatar mit Neon-Rädern):
                       </p>
                     </div>
-                  </label>
-                  <span
-                    className={`shrink-0 px-2.5 py-1 rounded font-mono text-[11px] font-bold border ${
-                      hasOwnSkates
-                        ? 'bg-emerald-950/90 border-emerald-400/70 text-emerald-200'
-                        : 'bg-amber-950/90 border-amber-400/70 text-amber-200'
-                    }`}
-                  >
-                    {hasOwnSkates
-                      ? '🛼 Eigene Skates (Direktstart)'
-                      : '👟 Straßenschuhe → Verleih [E]'}
-                  </span>
+                    <span
+                      className={`shrink-0 px-2.5 py-1 rounded font-mono text-[11px] font-bold border ${
+                        mobilityChoice === 'own-skates'
+                          ? 'bg-emerald-950/90 border-emerald-400 text-emerald-200'
+                          : mobilityChoice === 'rental-skates'
+                          ? 'bg-sky-950/90 border-sky-400 text-sky-200'
+                          : mobilityChoice === 'wheelchair'
+                          ? 'bg-cyan-950/90 border-cyan-400 text-cyan-200'
+                          : 'bg-rose-950/90 border-rose-400 text-rose-200 animate-pulse'
+                      }`}
+                    >
+                      {mobilityChoice === 'own-skates'
+                        ? '✓ 🛼 Eigene Rollschuhe aktiv'
+                        : mobilityChoice === 'rental-skates'
+                        ? '✓ 🎟️ Leihrollschuhe aktiv'
+                        : mobilityChoice === 'wheelchair'
+                        ? '✓ ♿ Rollstuhl (Neon-Räder) aktiv'
+                        : '🚧 Schranke verriegelt (Bitte wählen!)'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {(
+                      [
+                        {
+                          id: 'own-skates' as MobilityChoice,
+                          title: '🛼 Eigene Rollschuhe',
+                          sub: 'Custom-Skates (+10% Antritt & Kurvenlage)',
+                          activeClass:
+                            'bg-emerald-500 text-slate-950 border-white shadow-[0_0_14px_rgba(16,185,129,0.5)]',
+                        },
+                        {
+                          id: 'rental-skates' as MobilityChoice,
+                          title: '🎟️ Leihrollschuhe',
+                          sub: 'Original 80er Palladium Verleih-Skates',
+                          activeClass:
+                            'bg-sky-400 text-slate-950 border-white shadow-[0_0_14px_rgba(56,189,248,0.5)]',
+                        },
+                        {
+                          id: 'wheelchair' as MobilityChoice,
+                          title: '♿ Rollstuhl',
+                          sub: 'Barrierefreier Avatar mit leuchtenden Neon-Rädern',
+                          activeClass:
+                            'bg-cyan-400 text-slate-950 border-white shadow-[0_0_14px_rgba(34,211,238,0.55)]',
+                        },
+                      ] as const
+                    ).map((opt) => {
+                      const active = mobilityChoice === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => handleSelectMobilityChoice(opt.id)}
+                          className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                            active
+                              ? opt.activeClass
+                              : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-200'
+                          }`}
+                        >
+                          <div className="font-mono font-black text-xs">
+                            {opt.title}
+                          </div>
+                          <div
+                            className={`text-[10px] mt-0.5 ${
+                              active
+                                ? 'text-slate-900 font-semibold'
+                                : 'text-slate-400'
+                            }`}
+                          >
+                            {opt.sub}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {!mobilityChoice && (
+                    <div className="p-2.5 rounded-lg bg-rose-950/90 border border-rose-400/80 font-mono text-xs font-bold text-rose-200 flex items-center gap-2">
+                      <span>🚧</span>
+                      <span>
+                        Bitte wähle erst deine Rollschuhe, Leihrollschuhe oder
+                        den Rollstuhl aus, um die Schranke zur Bahn zu
+                        entriegeln!
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* 2b. SONNTAGS-CLIQUE-MODUS (2+1-REGEL): 1-KLICK-TICKETS & FREIE ROLLENWAHL */}
+                <div className="p-3.5 rounded-xl bg-gradient-to-r from-amber-950/75 via-[#18122B] to-rose-950/70 border border-amber-400/60 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="font-mono font-bold text-xs md:text-sm text-amber-300 uppercase">
+                        ☀️ SONNTAGS-CLIQUE-MODUS (2+1-Regel) • Tickets &amp; Avatar-Rolle
+                      </span>
+                      <p className="text-[11px] text-slate-300 mt-0.5">
+                        1-Klick-Gruppentickets, freie Rollenwahl für deinen Avatar, warme Nachmittagsbeleuchtung &amp; +25% Cliquen-Punkte-Bonus (max. 3 Skater gleichzeitig):
+                      </p>
+                    </div>
+                    <span
+                      className={`px-2.5 py-1 rounded font-mono text-[10px] font-bold border ${
+                        isSundayCliqueActive
+                          ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.45)]'
+                          : 'bg-slate-900 text-amber-200 border-amber-400/40'
+                      }`}
+                    >
+                      {isSundayCliqueActive
+                        ? '☀️ SONNTAGS-CLIQUE AKTIV (+25% Pkt)'
+                        : '☀️ 2+1 Ticket & Rolle vorab wählbar'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {/* 1-Klick-Tickets */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/85 border border-amber-400/40 space-y-1.5">
+                      <div className="font-mono text-[10px] font-bold uppercase text-amber-300">
+                        🎟️ 1-Klick-Tickets (2+1 Gruppen-Lauf):
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {(
+                          [
+                            {
+                              id: 'duo' as SundayCliqueTicket,
+                              label: '👥 2er-Runde (Duo)',
+                              sub: '2 Skater gemeinsam',
+                            },
+                            {
+                              id: 'trio' as SundayCliqueTicket,
+                              label: '👨‍👩‍👦 3er-Runde (Trio)',
+                              sub: '2+1 Clique (Max. 3)',
+                            },
+                          ] as const
+                        ).map((tk) => {
+                          const active = sundayCliqueTicket === tk.id;
+                          return (
+                            <button
+                              key={tk.id}
+                              type="button"
+                              onClick={() => handleSelectCliqueTicket(tk.id)}
+                              className={`p-2 rounded-lg border text-left font-mono transition cursor-pointer ${
+                                active
+                                  ? 'bg-amber-400 text-slate-950 border-white font-black shadow-[0_0_10px_rgba(251,191,36,0.45)]'
+                                  : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-amber-400/60'
+                              }`}
+                            >
+                              <div className="text-[11px] font-bold">
+                                {tk.label}
+                              </div>
+                              <div
+                                className={`text-[9.5px] ${
+                                  active ? 'text-slate-900' : 'text-slate-400'
+                                }`}
+                              >
+                                {tk.sub}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Freie Rollenwahl */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/85 border border-cyan-400/40 space-y-1.5">
+                      <div className="font-mono text-[10px] font-bold uppercase text-cyan-300">
+                        🎭 Freie Rollenwahl (Avatar-Anpassung):
+                      </div>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {(
+                          [
+                            {
+                              id: 'standard' as AvatarCliqueRole,
+                              label: '🛼 Standard',
+                              sub: '100% Größe',
+                            },
+                            {
+                              id: 'kid' as AvatarCliqueRole,
+                              label: '🧢 Kid/Junior',
+                              sub: 'Kompakt-Avatar',
+                            },
+                            {
+                              id: 'stammgast' as AvatarCliqueRole,
+                              label: '⭐ Stammgast',
+                              sub: 'Gold-Aura',
+                            },
+                          ] as const
+                        ).map((rl) => {
+                          const active = avatarRole === rl.id;
+                          return (
+                            <button
+                              key={rl.id}
+                              type="button"
+                              onClick={() => handleSelectAvatarRole(rl.id)}
+                              className={`p-2 rounded-lg border text-left font-mono transition cursor-pointer ${
+                                active
+                                  ? 'bg-cyan-400 text-slate-950 border-white font-black shadow-[0_0_10px_rgba(34,211,238,0.45)]'
+                                  : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-cyan-400/60'
+                              }`}
+                            >
+                              <div className="text-[10.5px] font-bold">
+                                {rl.label}
+                              </div>
+                              <div
+                                className={`text-[9px] ${
+                                  active ? 'text-slate-900' : 'text-slate-400'
+                                }`}
+                              >
+                                {rl.sub}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* 3. DIGITALE 10ER-STEMPELKARTE & EINMALIGES WILLKOMMENSGESCHENK / SPIND-SAMMELSTÜCKE */}
@@ -6400,8 +7943,8 @@ export function App() {
               className="w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-2xl bg-[#10172A] border-2 border-cyan-400 shadow-[0_0_35px_rgba(34,211,238,0.45)] p-4 text-white font-mono space-y-3"
               onClick={(e) => e.stopPropagation()}
             >
-              {/* Header */}
-              <div className="flex items-center justify-between border-b border-slate-700 pb-2.5">
+              {/* Header with Middle Clickable Avatar Circle for Explorer Certificate */}
+              <div className="flex items-center justify-between border-b border-slate-700 pb-2.5 gap-2">
                 <div className="flex items-center gap-2">
                   <span className="text-xl">🗄️</span>
                   <div>
@@ -6413,10 +7956,58 @@ export function App() {
                       <strong className="text-amber-300">
                         {availableProShopPoints} Pkt
                       </strong>{' '}
-                      • 1-Klick-Kacheln (Schließen mit × oder ESC)
+                      • Klick auf den mittleren Avatar-Kreis öffnet deine Entdecker-Urkunde!
                     </p>
                   </div>
                 </div>
+
+                {/* Mittlerer Avatar-Kreis im Profil/Spind */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFX.playChallengeUnlocked();
+                    setShowExplorerCertificateModal(true);
+                  }}
+                  title="Klicken für deine 80er-Urkunde: „Entdecker auf acht Rollen“"
+                  className="relative w-12 h-12 rounded-full bg-gradient-to-br from-fuchsia-900 via-slate-900 to-cyan-900 border-2 border-amber-300 hover:border-cyan-300 shadow-[0_0_18px_rgba(251,191,36,0.65)] hover:scale-105 transition cursor-pointer flex items-center justify-center shrink-0"
+                >
+                  <svg viewBox="0 0 40 40" className="w-9 h-9">
+                    <circle
+                      cx="20"
+                      cy="20"
+                      r="17"
+                      fill="none"
+                      stroke={playerShirtColor || '#ff2a85'}
+                      strokeWidth="1.5"
+                      strokeDasharray="3 2"
+                    />
+                    {kengolHatEnabled ? (
+                      <path
+                        d="M11 13 Q20 6 29 13 Z"
+                        fill="#f43f5e"
+                        stroke="#fde047"
+                        strokeWidth="1"
+                      />
+                    ) : (
+                      <rect x="13" y="10" width="14" height="2.5" rx="1" fill="#22d3ee" />
+                    )}
+                    <circle cx="20" cy="15" r="5" fill="#fde68a" />
+                    <path
+                      d="M12 28 C12 21 28 21 28 28 Z"
+                      fill={playerShirtColor || '#ff2a85'}
+                      stroke="#ffffff"
+                      strokeWidth="1"
+                    />
+                    <circle cx="14" cy="32" r="2.2" fill="#22d3ee" />
+                    <circle cx="18" cy="32" r="2.2" fill="#fde047" />
+                    <circle cx="22" cy="32" r="2.2" fill="#fde047" />
+                    <circle cx="26" cy="32" r="2.2" fill="#22d3ee" />
+                  </svg>
+                  <span className="absolute -bottom-1 px-1.5 py-0.2 rounded-full bg-amber-300 text-slate-950 font-mono text-[8px] font-black border border-white">
+                    URKUNDE
+                  </span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setShowLockerModal(false)}
@@ -6427,8 +8018,8 @@ export function App() {
                 </button>
               </div>
 
-              {/* 5 Haupt-Reiter (Tabs) im Kachel-/Button-Stil inkl. 🏆 Urkunden & Rekorde */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+              {/* 6 Haupt-Reiter (Tabs) im Kachel-/Button-Stil inkl. 🏆 Urkunden & 📖 Gästebuch */}
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-1.5">
                 {(
                   [
                     {
@@ -6454,11 +8045,15 @@ export function App() {
                     },
                     {
                       id: 'certificates' as const,
-                      label: `🏆 Urkunden & Rekorde (${
+                      label: `🏆 Urkunden (${
                         PALLADIUM_CERTIFICATES.filter(
                           (c) => certificatesState.unlocked[c.id]?.unlocked
                         ).length
                       }/${PALLADIUM_CERTIFICATES.length})`,
+                    },
+                    {
+                      id: 'guestbook' as const,
+                      label: `📖 Gästebuch (${guestbookEntries.length})`,
                     },
                     {
                       id: 'feedback' as const,
@@ -6573,35 +8168,76 @@ export function App() {
                         </button>
                       </div>
 
-                      {/* 1-Klick Kacheln für Skater/Rollstuhl & Kengol-Cap */}
-                      <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800">
+                      {/* 1-Klick Kacheln für Rollschuh/Rollstuhl, Rolle & Kengol-Cap */}
+                      <div className="grid grid-cols-3 gap-1.5 pt-1 border-t border-slate-800">
                         <button
                           type="button"
-                          onClick={() =>
-                            setCharacterMode((m) =>
-                              m === 'skater' ? 'wheelchair' : 'skater'
-                            )
-                          }
-                          className={`py-1.5 px-2 rounded-lg border text-[10.5px] font-bold cursor-pointer ${
-                            characterMode === 'wheelchair'
-                              ? 'bg-cyan-500 text-slate-950 border-white'
+                          onClick={() => handleSelectMobilityChoice('own-skates')}
+                          className={`py-1.5 px-2 rounded-lg border text-[10px] font-bold cursor-pointer ${
+                            mobilityChoice === 'own-skates'
+                              ? 'bg-emerald-400 text-slate-950 border-white'
                               : 'bg-slate-800 text-slate-200 border-slate-700'
                           }`}
                         >
-                          {characterMode === 'wheelchair'
-                            ? '♿ Rollstuhl: AN'
-                            : '🛼 Skater-Modus'}
+                          🛼 Eigene Skates
                         </button>
                         <button
                           type="button"
+                          onClick={() =>
+                            handleSelectMobilityChoice('rental-skates')
+                          }
+                          className={`py-1.5 px-2 rounded-lg border text-[10px] font-bold cursor-pointer ${
+                            mobilityChoice === 'rental-skates'
+                              ? 'bg-sky-400 text-slate-950 border-white'
+                              : 'bg-slate-800 text-slate-200 border-slate-700'
+                          }`}
+                        >
+                          🎟️ Leihskates
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectMobilityChoice('wheelchair')}
+                          className={`py-1.5 px-2 rounded-lg border text-[10px] font-bold cursor-pointer ${
+                            characterMode === 'wheelchair' ||
+                            mobilityChoice === 'wheelchair'
+                              ? 'bg-cyan-400 text-slate-950 border-white'
+                              : 'bg-slate-800 text-slate-200 border-slate-700'
+                          }`}
+                        >
+                          ♿ Rollstuhl (Neon)
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5 pt-1">
+                        {(
+                          [
+                            { id: 'standard' as AvatarCliqueRole, label: '🛼 Standard' },
+                            { id: 'kid' as AvatarCliqueRole, label: '🧢 Kid/Junior' },
+                            { id: 'stammgast' as AvatarCliqueRole, label: '⭐ Stammgast' },
+                          ] as const
+                        ).map((rl) => (
+                          <button
+                            key={rl.id}
+                            type="button"
+                            onClick={() => handleSelectAvatarRole(rl.id)}
+                            className={`py-1 px-1.5 rounded-lg border text-[9.5px] font-bold cursor-pointer ${
+                              avatarRole === rl.id
+                                ? 'bg-amber-400 text-slate-950 border-white'
+                                : 'bg-slate-800 text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            {rl.label}
+                          </button>
+                        ))}
+                        <button
+                          type="button"
                           onClick={() => setKengolHatEnabled((c) => !c)}
-                          className={`py-1.5 px-2 rounded-lg border text-[10.5px] font-bold cursor-pointer ${
+                          className={`py-1 px-1.5 rounded-lg border text-[9.5px] font-bold cursor-pointer ${
                             kengolHatEnabled
                               ? 'bg-fuchsia-500 text-white border-white'
                               : 'bg-slate-800 text-slate-200 border-slate-700'
                           }`}
                         >
-                          🧢 Kengol-Cap: {kengolHatEnabled ? 'AN' : 'AUS'}
+                          🧢 Kengol: {kengolHatEnabled ? 'AN' : 'AUS'}
                         </button>
                       </div>
                     </div>
@@ -7161,6 +8797,11 @@ export function App() {
                           progressLabel = 'Sonntags / am Family-Day rollen';
                         } else if (cert.id === 'koenig_der_luefte') {
                           progressLabel = '3er-Stuhl / Hochsprung mit Vollgas';
+                        } else if (cert.id === 'vielleser_5') {
+                          progressLabel = `${Math.min(
+                            5,
+                            (certificatesState.readNewspaperIssues || []).length
+                          )} / 5 Zeitungsausgaben gelesen`;
                         }
                       }
 
@@ -7309,6 +8950,140 @@ export function App() {
                         {feedbackSentToast}
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB E: 📖 RETRO TROLL-GÄSTEBUCH (public.guestbook • OHNE FREITEXT) */}
+              {lockerTab === 'guestbook' && (
+                <div className="space-y-3">
+                  <div className="p-3 rounded-xl bg-slate-900/95 border-2 border-amber-400/70 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-bold text-amber-300 uppercase">
+                          📖 Offizielles Palladium ’86 Gästebuch (Troll-Sicher • Ohne Freitext)
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          Verewige dich mit Landesflagge, Skater-Namen und Datum in der Supabase-Cloud (max. 1 Eintrag/Tag).
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-slate-950 border border-cyan-400/50 text-[10px] text-cyan-200 font-bold">
+                        Rollzeit: {skatedSeconds}s / 60s • {totalEarnedPoints} Pkt
+                      </span>
+                    </div>
+
+                    {/* Unsichtbares Honeypot-Feld gegen Bots */}
+                    <input
+                      type="text"
+                      name="website_url_honeypot"
+                      tabIndex={-1}
+                      autoComplete="off"
+                      value={guestbookHoneypot}
+                      onChange={(e) => setGuestbookHoneypot(e.target.value)}
+                      className="hidden"
+                      aria-hidden="true"
+                    />
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 p-2 rounded-lg bg-slate-950 border border-slate-800">
+                      <div className="text-xs text-slate-200 flex items-center gap-2">
+                        <span className="text-lg">
+                          {countryCodeToFlag(visitorCountry)}
+                        </span>
+                        <strong>{playerName.trim() || 'Palladium-Skater'}</strong>
+                        <span className="text-[10px] text-slate-400">
+                          ({new Date().toLocaleDateString('de-DE')})
+                        </span>
+                      </div>
+
+                      {(() => {
+                        const unlocked =
+                          skatedSeconds >= 60 || totalEarnedPoints >= 500;
+                        const remainingSec = Math.max(0, 60 - skatedSeconds);
+                        return (
+                          <button
+                            type="button"
+                            disabled={!unlocked || guestbookSignedToday}
+                            onClick={async () => {
+                              const res = await upsertCloudGuestbookEntry({
+                                player_id: cloudPlayerId,
+                                name: playerName.trim() || 'Palladium-Skater',
+                                country: visitorCountry,
+                                skated_seconds: skatedSeconds,
+                                points: totalEarnedPoints,
+                                honeypot: guestbookHoneypot,
+                              });
+                              if (res.ok) {
+                                setGuestbookSignedToday(true);
+                                setGuestbookToast(
+                                  '✅ Du stehst jetzt offiziell im Palladium-Gästebuch!'
+                                );
+                                void refreshCloudGuestbook();
+                              } else if (res.error) {
+                                setGuestbookToast(`⚠️ ${res.error}`);
+                              }
+                              window.setTimeout(
+                                () => setGuestbookToast(null),
+                                3500
+                              );
+                            }}
+                            className={`px-3 py-1.5 rounded-lg font-mono text-xs font-bold border transition ${
+                              guestbookSignedToday
+                                ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300 cursor-not-allowed'
+                                : unlocked
+                                ? 'bg-amber-400 hover:bg-amber-300 text-slate-950 border-white cursor-pointer shadow-[0_0_14px_rgba(251,191,36,0.5)]'
+                                : 'bg-slate-800 border-slate-700 text-slate-400 cursor-not-allowed'
+                            }`}
+                          >
+                            {guestbookSignedToday
+                              ? '✅ Heute bereits eingetragen'
+                              : unlocked
+                              ? '✍️ Jetzt ins Gästebuch eintragen'
+                              : `🔒 Noch ${remainingSec}s rollen (oder 500 Pkt)`}
+                          </button>
+                        );
+                      })()}
+                    </div>
+
+                    {guestbookToast && (
+                      <div className="text-xs font-bold text-cyan-300">
+                        {guestbookToast}
+                      </div>
+                    )}
+
+                    {/* Retro-Anzeige: Flagge, Name, Datum */}
+                    <div className="max-h-52 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1.5 pr-1">
+                      {guestbookEntries.length === 0 ? (
+                        <div className="col-span-2 text-center py-4 text-xs text-slate-400">
+                          Noch keine Einträge im Cloud-Gästebuch. Sei der Erste!
+                        </div>
+                      ) : (
+                        guestbookEntries.map((entry) => (
+                          <div
+                            key={entry.id}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-950/90 border border-slate-800 flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="flex items-center gap-2 truncate">
+                              <span className="text-base shrink-0">
+                                {countryCodeToFlag(entry.country)}
+                              </span>
+                              <span className="font-bold text-amber-200 truncate">
+                                {entry.name}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-slate-400 shrink-0">
+                              {new Date(entry.created_at).toLocaleDateString(
+                                'de-DE',
+                                {
+                                  day: '2-digit',
+                                  month: '2-digit',
+                                  year: '2-digit',
+                                }
+                              )}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -8009,6 +9784,73 @@ export function App() {
                             </button>
                           );
                         })}
+                      </div>
+                    </div>
+
+                    {/* 7. Sonntags-Clique-Modus (2+1-Regel) & Auto-Sonntags-Check (public.hall_settings) */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-amber-400/60 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-mono text-xs font-bold text-amber-300 uppercase">
+                            ☀️ Sonntags-Clique-Modus (2+1-Regel • Supabase Sync)
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-400">
+                            Retro-Banner auf der Bahn, warme Nachmittagsbeleuchtung, +25% Cliquen-Bonus &amp; max. 3 Skater gleichzeitig.
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400 text-[10px] font-mono font-bold text-amber-200">
+                          Aktuell: {Math.min(3, activePlayersOnRink)} / 3 Skater
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              sundayCliqueMode: !isSundayCliqueActive,
+                              sundayCliqueAutoSunday: isSundayCliqueActive
+                                ? false
+                                : s.sundayCliqueAutoSunday,
+                            }))
+                          }
+                          className={`min-h-[38px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            isSundayCliqueActive
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.5)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          ☀️ Sonntags-Clique (2+1):{' '}
+                          {isSundayCliqueActive ? 'AN' : 'AUS'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const nextAuto = !(
+                                s.sundayCliqueAutoSunday !== false
+                              );
+                              return {
+                                ...s,
+                                sundayCliqueAutoSunday: nextAuto,
+                                sundayCliqueMode:
+                                  nextAuto && new Date().getDay() === 0
+                                    ? true
+                                    : s.sundayCliqueMode,
+                              };
+                            })
+                          }
+                          className={`min-h-[38px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            adminSettings.sundayCliqueAutoSunday !== false
+                              ? 'bg-emerald-400 text-slate-950 border-white shadow-[0_0_12px_rgba(16,185,129,0.45)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          📅 Auto-Sonntags-Check:{' '}
+                          {adminSettings.sundayCliqueAutoSunday !== false
+                            ? 'AN'
+                            : 'AUS'}
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -8753,20 +10595,62 @@ export function App() {
                       </div>
                     </div>
 
-                    {/* 🎙️ DJ-JINGLE & SPRACHMEMO-PULT (OHNE BROWSER-ROBOTERSTIMME! 20% AUTO-DUCKING) */}
-                    <div className="p-2 rounded-lg bg-slate-950/95 border border-amber-400/50 space-y-1.5">
+                    {/* 9. HALLEN-DURCHSAGEN & 3-KLANG ABSCHLEPP-GONG (1-KLICK-BUTTONS) */}
+                    <div className="p-2 rounded-lg bg-slate-950/95 border border-rose-400/50 space-y-1.5">
                       <div className="flex items-center justify-between">
-                        <span className="font-mono text-[10px] font-bold uppercase text-amber-300">
-                          🎙️ DJ-Jingle &amp; Sprachmemo-Pult (Auto-Ducking 20%):
+                        <span className="font-mono text-[10px] font-bold uppercase text-rose-300">
+                          📢 9. Hallen-Durchsagen &amp; 3-Klang Abschlepp-Gong:
                         </span>
-                        <span className="font-mono text-[9px] text-slate-400">
-                          .mp3 / .m4a / .wav / .ogg
+                        <span className="font-mono text-[9px] text-amber-300">
+                          Web Audio 3-Klang + Hall-Ansage
                         </span>
                       </div>
                       <div className="grid grid-cols-2 gap-1">
+                        {HALL_ANNOUNCEMENT_PRESETS.map((preset) => (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() =>
+                              handleTriggerHallAnnouncementPreset(preset)
+                            }
+                            className={`min-h-[30px] px-2 py-1 rounded border font-mono text-[10px] font-bold text-left truncate cursor-pointer transition ${
+                              preset.id === 'towing'
+                                ? 'bg-rose-950/90 hover:bg-rose-800 border-amber-400 text-amber-200 shadow-[0_0_10px_rgba(244,63,94,0.35)]'
+                                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-cyan-100'
+                            }`}
+                          >
+                            {preset.buttonLabel}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 10. ECHTE DJ-AUDIO-SAMPLES (SUPABASE BUCKET dj-samples + FREI BENENNBAR + HANDHELD-CHECKBOX) */}
+                    <div className="p-2 rounded-lg bg-slate-950/95 border border-amber-400/50 space-y-1.5">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-[10px] font-bold uppercase text-amber-300">
+                          🎙️ 10. Echte DJ-Audio-Samples (Supabase Bucket dj-samples):
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAdminTerminal(false);
+                            setShowDjBoothModal(true);
+                          }}
+                          className="px-2 py-0.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-mono text-[9.5px] font-bold cursor-pointer"
+                        >
+                          🎧 3x3 DJ-Kanzel öffnen
+                        </button>
+                      </div>
+                      {sampleUploadNotice && (
+                        <div className="px-2 py-1 rounded bg-emerald-950 border border-emerald-400 text-emerald-200 font-mono text-[9.5px]">
+                          {sampleUploadNotice}
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
                         {(
                           adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS
-                        ).map((slot) => {
+                        ).map((slot, idx) => {
                           const isPlayingSlot = activeJingleSlotId === slot.id;
                           const hasCustomAudio = Boolean(slot.audioUrl);
                           return (
@@ -8777,83 +10661,39 @@ export function App() {
                               <button
                                 type="button"
                                 onClick={() => handleTriggerDjJingle(slot)}
-                                className={`min-h-[30px] flex-1 px-1.5 py-1 rounded-l font-mono text-[10px] font-bold border text-left truncate cursor-pointer transition ${
+                                className={`min-h-[28px] flex-1 px-1.5 py-0.5 rounded-l font-mono text-[9.5px] font-bold border text-left truncate cursor-pointer transition ${
                                   isPlayingSlot
                                     ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.5)]'
                                     : 'bg-slate-900 hover:bg-slate-800 text-amber-100 border-slate-700'
                                 }`}
                               >
-                                {slot.label}
-                                {hasCustomAudio ? ' 🎵' : ''}
+                                [{slot.keyNumber || idx + 1}] {slot.label}
+                                {hasCustomAudio ? ' ☁️' : ''}
                               </button>
                               <button
                                 type="button"
-                                title="Eigene Sprachmemo / Audio-Datei (.mp3, .m4a, .wav, .ogg) oder URL hinterlegen"
+                                title="Slot umbenennen, MP3/WAV in Supabase Bucket dj-samples hochladen & aufs Regie-Handheld legen"
                                 onClick={() =>
                                   setEditingJingleSlotId((curr) =>
                                     curr === slot.id ? null : slot.id
                                   )
                                 }
-                                className={`min-h-[30px] px-1.5 py-1 rounded-r border-y border-r font-mono text-[10px] cursor-pointer ${
+                                className={`min-h-[28px] px-1.5 py-0.5 rounded-r border-y border-r font-mono text-[9.5px] cursor-pointer ${
                                   editingJingleSlotId === slot.id ||
                                   hasCustomAudio
                                     ? 'bg-fuchsia-700 border-fuchsia-400 text-white'
                                     : 'bg-slate-800 border-slate-700 text-slate-300'
                                 }`}
                               >
-                                📂
+                                ⚙️
                               </button>
                             </div>
                           );
                         })}
                       </div>
 
-                      {/* 🎛️ 5 WEB-AUDIO DJ-SOUNDBOARD BUTTONS IM DJ-PULT */}
-                      <div className="pt-1.5 border-t border-slate-800 space-y-1">
-                        <span className="block font-mono text-[9.5px] font-bold uppercase text-fuchsia-300">
-                          🎛️ DJ-Soundboard (5 Live Web-Audio-Sounds):
-                        </span>
-                        <div className="grid grid-cols-5 gap-1">
-                          {(
-                            [
-                              {
-                                id: 'airhorn' as DjSoundboardEffectId,
-                                label: '[1] Airhorn',
-                              },
-                              {
-                                id: 'scratch' as DjSoundboardEffectId,
-                                label: '[2] Scratch',
-                              },
-                              {
-                                id: 'laser' as DjSoundboardEffectId,
-                                label: '[3] Laser-Zap',
-                              },
-                              {
-                                id: 'fog-hiss' as DjSoundboardEffectId,
-                                label: '[4] Nebel',
-                              },
-                              {
-                                id: 'applause' as DjSoundboardEffectId,
-                                label: '[5] Applaus',
-                              },
-                            ] as const
-                          ).map((sb) => (
-                            <button
-                              key={sb.id}
-                              type="button"
-                              onClick={() =>
-                                handleTriggerDjSoundboard(sb.id, sb.label)
-                              }
-                              className="min-h-[28px] px-1 py-0.5 rounded bg-fuchsia-950 hover:bg-fuchsia-800 border border-fuchsia-400/60 text-fuchsia-100 font-mono text-[9px] font-bold cursor-pointer truncate transition"
-                            >
-                              {sb.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
                       {editingJingleSlotId && (
-                        <div className="p-1.5 rounded bg-slate-900 border border-fuchsia-400/50 space-y-1 text-[10px] font-mono">
+                        <div className="p-2 rounded bg-slate-900 border border-fuchsia-400/60 space-y-1.5 text-[10px] font-mono">
                           {(() => {
                             const slots =
                               adminSettings.djJingleSlots ||
@@ -8866,7 +10706,7 @@ export function App() {
                               <>
                                 <div className="flex items-center justify-between text-fuchsia-200">
                                   <span>
-                                    Audio für:{' '}
+                                    Slot bearbeiten:{' '}
                                     <strong>{targetSlot.label}</strong>
                                   </span>
                                   <button
@@ -8876,6 +10716,44 @@ export function App() {
                                   >
                                     ×
                                   </button>
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                                  <input
+                                    type="text"
+                                    value={targetSlot.label}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      const nextSlots = slots.map((item) =>
+                                        item.id === targetSlot.id
+                                          ? { ...item, label: val }
+                                          : item
+                                      );
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        djJingleSlots: nextSlots,
+                                      }));
+                                    }}
+                                    placeholder="Freier Slot-Name (z.B. 📣 Airhorn)"
+                                    className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-200"
+                                  />
+                                  <input
+                                    type="text"
+                                    value={targetSlot.bubbleText}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      const nextSlots = slots.map((item) =>
+                                        item.id === targetSlot.id
+                                          ? { ...item, bubbleText: val }
+                                          : item
+                                      );
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        djJingleSlots: nextSlots,
+                                      }));
+                                    }}
+                                    placeholder="Hallen-Sprechblase..."
+                                    className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-cyan-200"
+                                  />
                                 </div>
                                 <div className="flex items-center gap-1">
                                   <input
@@ -8893,41 +10771,50 @@ export function App() {
                                         djJingleSlots: nextSlots,
                                       }));
                                     }}
-                                    placeholder="Audio-URL (.mp3/.m4a/.wav/.ogg)..."
+                                    placeholder="Supabase dj-samples URL oder .mp3/.wav Link..."
                                     className="flex-1 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-cyan-200"
                                   />
                                   <label className="px-2 py-0.5 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold cursor-pointer whitespace-nowrap">
-                                    Upload
+                                    {uploadingSampleSlotId === targetSlot.id
+                                      ? '⏳ Upload...'
+                                      : '☁️ Bucket Upload'}
                                     <input
                                       type="file"
-                                      accept=".mp3,.m4a,.wav,.ogg,audio/*"
+                                      accept=".mp3,.wav,.m4a,.ogg,audio/*"
                                       className="hidden"
-                                      onChange={(e) => {
+                                      onChange={async (e) => {
                                         const file = e.target.files?.[0];
                                         if (!file) return;
-                                        const reader = new FileReader();
-                                        reader.onload = () => {
-                                          if (
-                                            typeof reader.result === 'string'
-                                          ) {
-                                            const nextSlots = slots.map(
-                                              (item) =>
-                                                item.id === targetSlot.id
-                                                  ? {
-                                                      ...item,
-                                                      audioUrl:
-                                                        reader.result as string,
-                                                      fileName: file.name,
-                                                    }
-                                                  : item
-                                            );
-                                            setAdminSettings((s) => ({
-                                              ...s,
-                                              djJingleSlots: nextSlots,
-                                            }));
-                                          }
-                                        };
-                                        reader.readAsDataURL(file);
+                                        setUploadingSampleSlotId(targetSlot.id);
+                                        const res = await uploadDjSampleToCloud(
+                                          file,
+                                          targetSlot.id
+                                        );
+                                        setUploadingSampleSlotId(null);
+                                        if (res.url) {
+                                          const nextSlots = slots.map((item) =>
+                                            item.id === targetSlot.id
+                                              ? {
+                                                  ...item,
+                                                  audioUrl: res.url as string,
+                                                  fileName: file.name,
+                                                }
+                                              : item
+                                          );
+                                          setAdminSettings((s) => ({
+                                            ...s,
+                                            djJingleSlots: nextSlots,
+                                          }));
+                                          setSampleUploadNotice(
+                                            res.source === 'supabase-storage'
+                                              ? `☁️ "${file.name}" in Supabase Bucket dj-samples gespeichert!`
+                                              : `🎵 "${file.name}" geladen & bereit!`
+                                          );
+                                          window.setTimeout(
+                                            () => setSampleUploadNotice(null),
+                                            3500
+                                          );
+                                        }
                                       }}
                                     />
                                   </label>
@@ -8955,6 +10842,28 @@ export function App() {
                                     </button>
                                   )}
                                 </div>
+                                <label className="flex items-center gap-1.5 text-emerald-300 cursor-pointer pt-0.5">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(targetSlot.showInHandheld)}
+                                    onChange={(e) => {
+                                      const checked = e.target.checked;
+                                      const nextSlots = slots.map((item) =>
+                                        item.id === targetSlot.id
+                                          ? { ...item, showInHandheld: checked }
+                                          : item
+                                      );
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        djJingleSlots: nextSlots,
+                                      }));
+                                    }}
+                                    className="accent-emerald-400 cursor-pointer"
+                                  />
+                                  <span>
+                                    🎮 Im Game-Boy-Regie-Handheld anzeigen
+                                  </span>
+                                </label>
                               </>
                             );
                           })()}
@@ -9977,7 +11886,11 @@ export function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setHallStats(resetHallStats())}
+                      onClick={async () => {
+                        const zeroed = await resetCloudHallStats();
+                        setCloudHallStats(zeroed);
+                        setHallStats(resetHallStats());
+                      }}
                       className="px-2 py-1 rounded bg-rose-950 hover:bg-rose-900 border border-rose-500/50 text-rose-200 font-mono text-[10px] cursor-pointer"
                     >
                       📊 Statistik-Reset
@@ -10014,17 +11927,59 @@ export function App() {
                       : 'hidden'
                   }
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-mono font-bold text-xs uppercase text-cyan-300">
-                      📊 Hallen-Statistik (Exklusiv im Admin-Bereich • localStorage)
+                      📊 HALLEN-STATISTIK (EXKLUSIV IM ADMIN-BEREICH • SUPABASE CLOUD)
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setHallStats(resetHallStats())}
-                      className="px-2.5 py-0.5 rounded bg-rose-950/90 hover:bg-rose-900 border border-rose-400/60 text-rose-200 font-mono text-[10px] font-bold cursor-pointer"
-                    >
-                      🗑️ Statistik zurücksetzen
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      {!confirmCloudStatsReset ? (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmCloudStatsReset(true)}
+                          className="px-2.5 py-0.5 rounded bg-rose-950/90 hover:bg-rose-900 border border-rose-400/60 text-rose-200 font-mono text-[10px] font-bold cursor-pointer"
+                        >
+                          🗑️ Statistik zurücksetzen
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setConfirmCloudStatsReset(false);
+                              const zeroed = await resetCloudHallStats();
+                              setCloudHallStats(zeroed);
+                              const emptyLocal: HallStatsData = {
+                                totalSessions: 0,
+                                dailyCounts: {},
+                                hourlyHistogram: Array.from(
+                                  { length: 24 },
+                                  () => 0
+                                ),
+                                totalPlaySeconds: 0,
+                                bestLapRecord: 0,
+                                soloSessionsStarted: 0,
+                                multiplayerSessionsStarted: 0,
+                                totalMultiplayerVisitorsSeen: 0,
+                                peakConcurrentMultiplayerPlayers: 0,
+                                seenVisitorIds: [],
+                              };
+                              saveHallStats(emptyLocal);
+                              setHallStats(emptyLocal);
+                            }}
+                            className="px-2.5 py-0.5 rounded bg-rose-600 hover:bg-rose-500 border border-white text-white font-mono text-[10px] font-bold cursor-pointer"
+                          >
+                            ⚠️ Jetzt endgültig auf 0 löschen
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmCloudStatsReset(false)}
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 font-mono text-[10px] cursor-pointer"
+                          >
+                            Abbrechen
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
                     <div className="px-3 py-2 rounded-lg bg-slate-950/95 border border-emerald-400/50 flex items-center justify-between">
@@ -10033,7 +11988,9 @@ export function App() {
                           Aktuell auf Bahn
                         </div>
                         <div className="font-display font-black text-lg text-emerald-300 leading-tight">
-                          {activePlayersOnRink}
+                          {cloudHallStats
+                            ? cloudHallStats.activeOnRinkLive
+                            : activePlayersOnRink}
                         </div>
                       </div>
                       <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 font-mono text-[9px] text-emerald-300">
@@ -10047,7 +12004,10 @@ export function App() {
                           Gestartete Solositzungen
                         </div>
                         <div className="font-display font-black text-lg text-cyan-300 leading-tight">
-                          {hallStats.soloSessionsStarted ?? hallStats.totalSessions}
+                          {cloudHallStats
+                            ? cloudHallStats.soloSessionsStarted
+                            : hallStats.soloSessionsStarted ??
+                              hallStats.totalSessions}
                         </div>
                       </div>
                       <span className="font-mono text-[9px] text-slate-500">
@@ -10061,7 +12021,9 @@ export function App() {
                           Multiplayer-Sitzungen
                         </div>
                         <div className="font-display font-black text-lg text-indigo-300 leading-tight">
-                          {hallStats.multiplayerSessionsStarted ?? 0}
+                          {cloudHallStats
+                            ? cloudHallStats.multiplayerSessionsStarted
+                            : hallStats.multiplayerSessionsStarted ?? 0}
                         </div>
                       </div>
                       <span className="font-mono text-[9px] text-indigo-300/80">
@@ -10075,8 +12037,14 @@ export function App() {
                           MP-Besucher &amp; Peak
                         </div>
                         <div className="font-display font-black text-base text-fuchsia-300 leading-tight">
-                          {hallStats.totalMultiplayerVisitorsSeen ?? 0} Ges. /{' '}
-                          {hallStats.peakConcurrentMultiplayerPlayers ?? 1} Max
+                          {cloudHallStats
+                            ? cloudHallStats.totalMultiplayerVisitors
+                            : hallStats.totalMultiplayerVisitorsSeen ?? 0}{' '}
+                          Ges. /{' '}
+                          {cloudHallStats
+                            ? cloudHallStats.peakConcurrentMultiplayer
+                            : hallStats.peakConcurrentMultiplayerPlayers ?? 1}{' '}
+                          Max
                         </div>
                       </div>
                       <span className="font-mono text-[9px] text-slate-500">
@@ -10090,7 +12058,9 @@ export function App() {
                           Besucher heute
                         </div>
                         <div className="font-display font-black text-lg text-sky-300 leading-tight">
-                          {visitsToday}
+                          {cloudHallStats
+                            ? cloudHallStats.visitorsToday
+                            : visitsToday}
                         </div>
                       </div>
                       <span className="font-mono text-[9px] text-slate-500">
@@ -10104,12 +12074,35 @@ export function App() {
                           Stoßzeit (Peak)
                         </div>
                         <div className="font-mono font-bold text-xs sm:text-sm text-amber-300 leading-tight">
-                          {peakHourText}
+                          {cloudHallStats
+                            ? cloudHallStats.peakHourText
+                            : peakHourText}
                         </div>
                       </div>
                       <span className="font-mono text-[9px] text-amber-300/80">
                         ⏰
                       </span>
+                    </div>
+                  </div>
+
+                  {/* Länder-Auswertung (public.visits.country via /api/geo & navigator.language) */}
+                  <div className="px-3 py-1.5 rounded-lg bg-slate-950/90 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono">
+                    <span className="text-slate-400 uppercase">
+                      🌍 Länder-Auswertung (Geo-IP / Sprache):
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {(cloudHallStats &&
+                      cloudHallStats.countryBreakdown.length > 0
+                        ? cloudHallStats.countryBreakdown
+                        : [{ country: visitorCountry || 'DE', count: 1 }]
+                      ).map((entry) => (
+                        <span
+                          key={entry.country}
+                          className="px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/40 text-cyan-200 font-bold"
+                        >
+                          {entry.country}: {entry.count}
+                        </span>
+                      ))}
                     </div>
                   </div>
                 </div>
@@ -10401,6 +12394,598 @@ export function App() {
                             ))}
                         </div>
                       )}
+                    </div>
+
+                    {/* 5. VIP-GÄSTELISTE (public.guest_list) & 4. TROLL-GÄSTEBUCH MODERATION */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 pt-1">
+                      {/* 5. VIP-Gästeliste („Offen“ vs. „Nur VIP“) */}
+                      <div className="p-2.5 rounded-lg bg-slate-950/90 border border-amber-400/50 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-mono text-[11px] font-bold uppercase text-amber-300">
+                            🎩 5. VIP-Gästeliste (public.guest_list • {vipGuestList.length})
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  vipGuestListOnly: false,
+                                }))
+                              }
+                              className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                                !adminSettings.vipGuestListOnly
+                                  ? 'bg-emerald-400 text-slate-950 border-white'
+                                  : 'bg-slate-900 text-slate-400 border-slate-700'
+                              }`}
+                            >
+                              🔓 Offen
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  vipGuestListOnly: true,
+                                }))
+                              }
+                              className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                                adminSettings.vipGuestListOnly
+                                  ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_10px_rgba(251,191,36,0.5)]'
+                                  : 'bg-slate-900 text-slate-400 border-slate-700'
+                              }`}
+                            >
+                              🎩 Nur VIP
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            maxLength={24}
+                            value={newVipGuestName}
+                            onChange={(e) => setNewVipGuestName(e.target.value)}
+                            onKeyDown={async (e) => {
+                              if (e.key === 'Enter' && newVipGuestName.trim()) {
+                                const clean = newVipGuestName.trim();
+                                setNewVipGuestName('');
+                                await addCloudGuestListName(clean);
+                                void refreshCloudGuestList();
+                              }
+                            }}
+                            placeholder="VIP Skater-Name eintragen..."
+                            className="flex-1 px-2.5 py-1 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white focus:border-amber-400 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const clean = newVipGuestName.trim();
+                              if (!clean) return;
+                              setNewVipGuestName('');
+                              await addCloudGuestListName(clean);
+                              void refreshCloudGuestList();
+                            }}
+                            className="px-2.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono text-[10.5px] font-bold cursor-pointer"
+                          >
+                            + VIP hinzufügen
+                          </button>
+                        </div>
+
+                        <div className="max-h-28 overflow-y-auto flex flex-wrap gap-1.5">
+                          {vipGuestList.length === 0 ? (
+                            <span className="text-[10px] font-mono text-slate-500">
+                              Noch keine VIP-Namen auf der Liste.
+                            </span>
+                          ) : (
+                            vipGuestList.map((vip) => (
+                              <div
+                                key={vip.id}
+                                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-900 border border-amber-400/40 font-mono text-[10px] text-amber-200"
+                              >
+                                <span>🎩 {vip.name}</span>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await removeCloudGuestListEntry(vip);
+                                    void refreshCloudGuestList();
+                                  }}
+                                  className="text-rose-400 hover:text-rose-200 font-bold cursor-pointer"
+                                  title="Von VIP-Gästeliste entfernen"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 4. Troll-Gästebuch Moderation (public.guestbook) */}
+                      <div className="p-2.5 rounded-lg bg-slate-950/90 border border-fuchsia-400/50 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono text-[11px] font-bold uppercase text-fuchsia-300">
+                            📖 4. Troll-Gästebuch Moderation ({guestbookEntries.length})
+                          </span>
+                          {guestbookEntries.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await clearCloudGuestbook();
+                                void refreshCloudGuestbook();
+                              }}
+                              className="px-2 py-0.5 rounded bg-rose-950 hover:bg-rose-800 border border-rose-500/50 text-rose-200 font-mono text-[10px] cursor-pointer"
+                            >
+                              🗑️ Alle löschen
+                            </button>
+                          )}
+                        </div>
+                        <div className="max-h-32 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 font-mono text-[10px]">
+                          {guestbookEntries.length === 0 ? (
+                            <span className="text-slate-500 col-span-2">
+                              Keine Gästebuch-Einträge vorhanden.
+                            </span>
+                          ) : (
+                            guestbookEntries.map((entry) => (
+                              <div
+                                key={entry.id}
+                                className="px-2 py-1 rounded bg-slate-900 border border-slate-700 flex items-center justify-between gap-1.5"
+                              >
+                                <span className="truncate text-slate-200">
+                                  {countryCodeToFlag(entry.country)}{' '}
+                                  <strong className="text-amber-200">
+                                    {entry.name}
+                                  </strong>{' '}
+                                  <span className="text-slate-500 text-[9px]">
+                                    (
+                                    {new Date(
+                                      entry.created_at
+                                    ).toLocaleDateString('de-DE')}
+                                    )
+                                  </span>
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await deleteCloudGuestbookEntry(entry.id);
+                                    void refreshCloudGuestbook();
+                                  }}
+                                  className="px-1.5 py-0.5 rounded bg-rose-950 hover:bg-rose-800 text-rose-300 text-[9.5px] cursor-pointer shrink-0"
+                                  title="Eintrag löschen"
+                                >
+                                  🗑️
+                                </button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 6. GAME-BOY-REGIE-HANDHELD CHECKBOXEN („Im Regie-Handheld anzeigen“) */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/90 border border-emerald-400/50 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-[11px] font-bold uppercase text-emerald-300">
+                          🎮 6. Game-Boy-Regie-Handheld Konfiguration („Im Regie-Handheld anzeigen“)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowGameBoyHandheld((v) => !v);
+                            setIsGameBoyExpanded(true);
+                          }}
+                          className={`px-2.5 py-0.5 rounded font-mono text-[10px] font-bold border cursor-pointer ${
+                            showGameBoyHandheld
+                              ? 'bg-emerald-400 text-slate-950 border-white'
+                              : 'bg-slate-800 text-slate-300 border-slate-600'
+                          }`}
+                        >
+                          🎮 Regie-Handheld auf Bahn:{' '}
+                          {showGameBoyHandheld ? 'AN (Taste [R])' : 'AUS'}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-1.5 font-mono text-[10px]">
+                        {(
+                          [
+                            { id: 'light_disco', label: '🪩 Disco-Licht' },
+                            { id: 'light_blacklight', label: '🟣 UV-Schwarzlicht' },
+                            { id: 'light_slow', label: '💜 Slow-Skate' },
+                            { id: 'putzlicht', label: '💡 Putzlicht' },
+                            { id: 'fog_burst', label: '💨 Nebel-Stoß' },
+                            { id: 'direction', label: '🔄 Richtungswechsel' },
+                            { id: 'mode_free', label: '🛼 Freilauf' },
+                            { id: 'mode_ball', label: '🏐 Ballspiel' },
+                            { id: 'mode_slalom', label: '🦺 Slalom' },
+                            { id: 'mode_staffel', label: '⚡ Springer-Staffel' },
+                            { id: 'stage_band', label: '🎸 Live-Band / Inseln' },
+                            { id: 'horn', label: '📣 DJ-Airhorn' },
+                            { id: 'gong_towing', label: '🚓 Abschlepp-Durchsage' },
+                          ] as const
+                        ).map((opt) => {
+                          const currentIds =
+                            adminSettings.handheldActionIds || [
+                              'light_disco',
+                              'light_blacklight',
+                              'fog_burst',
+                              'direction',
+                              'mode_ball',
+                              'putzlicht',
+                            ];
+                          const checked = currentIds.includes(opt.id);
+                          return (
+                            <label
+                              key={opt.id}
+                              className={`flex items-center gap-1.5 px-2 py-1 rounded border cursor-pointer select-none ${
+                                checked
+                                  ? 'bg-emerald-950/60 border-emerald-400 text-emerald-200 font-bold'
+                                  : 'bg-slate-900 border-slate-700 text-slate-400'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  const nextIds = checked
+                                    ? currentIds.filter((i) => i !== opt.id)
+                                    : [...currentIds, opt.id];
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    handheldActionIds: nextIds,
+                                  }));
+                                }}
+                                className="accent-emerald-400 cursor-pointer"
+                              />
+                              <span className="truncate">{opt.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* 12. ADMIN-CREW-GALERIE (5 STATIONEN • AUTOMATISCHER 16-BIT-PIXEL-FILTER & KULT-SPRÜCHE) */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/90 border border-cyan-400/50 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="font-mono text-[11px] font-bold uppercase text-cyan-300">
+                            👾 12. Admin-Crew-Galerie (5 Stationen • Automatischer 16-Bit-Pixel-Filter &amp; Kult-Sprüche)
+                          </span>
+                          <p className="text-[10px] font-mono text-slate-400">
+                            Lade eigene Fotos/Portraits hoch (werden automatisch in echte 48×48 16-Bit-Arcade-Pixelgrafik umgewandelt) oder passe Name &amp; Kult-Spruch an:
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              crewPortraits: {},
+                              crewQuotes: {},
+                            }))
+                          }
+                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 font-mono text-[10px] cursor-pointer"
+                        >
+                          ↩️ Alle Portraits &amp; Sprüche auf Standard
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-2 font-mono text-[10px]">
+                        {(
+                          [
+                            'kasse',
+                            'verleih',
+                            'proshop',
+                            'snackbar',
+                            'dj',
+                          ] as StationDialogId[]
+                        ).map((stId) => {
+                          const meta = STATION_DIALOG_DEFAULTS[stId];
+                          const customPortrait =
+                            adminSettings.crewPortraits?.[stId];
+                          const portraitSrc = getStation16BitPortraitDataUrl(
+                            stId,
+                            customPortrait
+                          );
+                          const currentCrewName =
+                            adminSettings.crewNames?.[meta.crewKey] ??
+                            meta.defaultCrewName;
+                          const currentQuote =
+                            adminSettings.crewQuotes?.[stId] ??
+                            meta.defaultQuote;
+                          return (
+                            <div
+                              key={stId}
+                              className="p-2 rounded-lg bg-slate-900/95 border border-slate-700 flex flex-col justify-between gap-1.5"
+                            >
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-2">
+                                  <img
+                                    src={portraitSrc}
+                                    alt={currentCrewName}
+                                    style={{ imageRendering: 'pixelated' }}
+                                    className="w-12 h-12 rounded-lg border-2 border-amber-300 shadow shrink-0 bg-slate-950"
+                                  />
+                                  <div className="min-w-0 flex-1">
+                                    <div className="font-bold text-amber-300 truncate text-[10.5px]">
+                                      {meta.title}
+                                    </div>
+                                    <div className="text-[9px] text-cyan-300 truncate">
+                                      {customPortrait
+                                        ? '📸 Eigenes 16-Bit-Foto aktiv'
+                                        : '👾 Standard 16-Bit-Pixel-Art'}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <label className="block text-[8.5px] text-slate-400">
+                                    Crew-Name:
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={currentCrewName}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        crewNames: {
+                                          ...(s.crewNames || DEFAULT_CREW_NAMES),
+                                          [meta.crewKey]: val,
+                                        },
+                                        ...(meta.crewKey === 'dj'
+                                          ? { activeDjName: val }
+                                          : {}),
+                                      }));
+                                    }}
+                                    className="w-full px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-100 text-[10px]"
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="block text-[8.5px] text-slate-400">
+                                    80er-Kult-Spruch:
+                                  </label>
+                                  <textarea
+                                    rows={2}
+                                    value={currentQuote}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        crewQuotes: {
+                                          ...(s.crewQuotes || {}),
+                                          [stId]: val,
+                                        },
+                                      }));
+                                    }}
+                                    className="w-full px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-cyan-100 text-[9.5px] leading-snug"
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-slate-800">
+                                <label className="flex-1 text-center px-1.5 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/60 text-cyan-200 font-bold text-[9.5px] cursor-pointer">
+                                  {uploadingCrewPortraitId === stId
+                                    ? '⏳ 16-Bit...'
+                                    : '📸 Foto -> 16-Bit'}
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={async (e) => {
+                                      const file = e.target.files?.[0];
+                                      e.target.value = '';
+                                      if (!file) return;
+                                      setUploadingCrewPortraitId(stId);
+                                      try {
+                                        const pixelUrl =
+                                          await convertImageFileTo16BitPixelDataUrl(
+                                            file
+                                          );
+                                        setAdminSettings((s) => ({
+                                          ...s,
+                                          crewPortraits: {
+                                            ...(s.crewPortraits || {}),
+                                            [stId]: pixelUrl,
+                                          },
+                                        }));
+                                      } catch {
+                                        // ignore
+                                      } finally {
+                                        setUploadingCrewPortraitId(null);
+                                      }
+                                    }}
+                                  />
+                                </label>
+                                {customPortrait && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setAdminSettings((s) => {
+                                        const nextPortraits = {
+                                          ...(s.crewPortraits || {}),
+                                        };
+                                        delete nextPortraits[stId];
+                                        return {
+                                          ...s,
+                                          crewPortraits: nextPortraits,
+                                        };
+                                      })
+                                    }
+                                    className="px-1.5 py-1 rounded bg-rose-950 hover:bg-rose-800 border border-rose-500/50 text-rose-200 text-[9px] cursor-pointer"
+                                    title="Eigenes Portrait zurücksetzen"
+                                  >
+                                    🗑️
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowAdminTerminal(false);
+                                    setActiveStationDialog(stId);
+                                  }}
+                                  className="px-1.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[9px] cursor-pointer"
+                                  title="80er-Pixel-Dialog dieser Station testen"
+                                >
+                                  👁️ Dialog
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* 13. 📰 80ER-RETRO-HALLENZEITUNG ("DER PALLADIUM-KURIER") ADMIN-STEUERUNG */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/90 border border-amber-400/60 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="font-mono text-[11px] font-bold uppercase text-amber-300">
+                            📰 13. 80er-Retro-Hallenzeitung („Der Palladium-Kurier – Hanau ’86“)
+                          </span>
+                          <p className="text-[10px] font-mono text-slate-400">
+                            Zeitungsständer vorne am Eingang/Empfang • „Zeitung aktualisieren &amp; veröffentlichen“ erhöht die Ausgaben-ID, speichert in Supabase/LocalStorage &amp; aktiviert das „NEU!“-Badge:
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded bg-slate-900 border border-amber-400/50 font-mono text-[10px] text-amber-200 font-bold">
+                            Aktuelle Ausgabe: #{currentNewspaperIssueId} (Stand:{' '}
+                            {adminSettings.newspaperUpdatedAt || '15.11.2026'})
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAdminSettings((s) => ({
+                                ...s,
+                                newspaperEnabled:
+                                  s.newspaperEnabled === false ? true : false,
+                              }))
+                            }
+                            className={`px-3 py-1 rounded-lg font-mono text-[10.5px] font-black border cursor-pointer transition ${
+                              adminSettings.newspaperEnabled !== false
+                                ? 'bg-emerald-500 text-slate-950 border-white shadow-[0_0_12px_rgba(16,185,129,0.5)]'
+                                : 'bg-slate-800 text-slate-400 border-slate-600'
+                            }`}
+                          >
+                            Hallenzeitung sichtbar:{' '}
+                            {adminSettings.newspaperEnabled !== false
+                              ? 'AN'
+                              : 'AUS'}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 font-mono text-[10px]">
+                        <div className="space-y-1">
+                          <label className="block text-amber-200 font-bold">
+                            Hauptschlagzeile („PALLADIUM KURIER – HANAU ’86“):
+                          </label>
+                          <input
+                            type="text"
+                            maxLength={140}
+                            value={
+                              adminSettings.newspaperHeadline ??
+                              'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!'
+                            }
+                            onChange={(e) =>
+                              setAdminSettings((s) => ({
+                                ...s,
+                                newspaperHeadline: e.target.value,
+                              }))
+                            }
+                            placeholder="Hauptschlagzeile eingeben..."
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-amber-400/50 text-amber-100 text-xs"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-cyan-200 font-bold">
+                            Aktuelle Update-Meldungen &amp; Tipps (2-Spalten-Text):
+                          </label>
+                          <textarea
+                            rows={3}
+                            maxLength={1200}
+                            value={
+                              adminSettings.newspaperBody ??
+                              'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'
+                            }
+                            onChange={(e) =>
+                              setAdminSettings((s) => ({
+                                ...s,
+                                newspaperBody: e.target.value,
+                              }))
+                            }
+                            placeholder="Update-News und Tipps für die Hallenzeitung..."
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-cyan-400/50 text-slate-100 text-[11px] resize-y"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <div className="text-[10px] font-mono text-slate-300">
+                          🏆 Urkunde <strong>„Vielleser auf Rollen“</strong>: Dein Fortschritt{' '}
+                          <strong className="text-amber-300">
+                            {readNewspaperIssuesList.length} / 5
+                          </strong>{' '}
+                          gelesene Ausgaben.
+                          {newspaperPublishToast && (
+                            <span className="ml-2 text-emerald-300 font-bold">
+                              {newspaperPublishToast}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowAdminTerminal(false);
+                              handleOpenNewspaperModal();
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-cyan-400/60 text-cyan-200 font-mono text-[10.5px] font-bold cursor-pointer"
+                          >
+                            👁️ Zeitung Probe lesen
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextIssueId =
+                                Math.max(
+                                  1,
+                                  Number(adminSettings.newspaperIssueId) || 1
+                                ) + 1;
+                              const updatedDate =
+                                new Date().toLocaleDateString('de-DE', {
+                                  day: '2-digit',
+                                  month: '2-digit',
+                                  year: 'numeric',
+                                });
+                              setAdminSettings((prev) => {
+                                const next: AdminPersistentSettings = {
+                                  ...prev,
+                                  newspaperEnabled: true,
+                                  newspaperIssueId: nextIssueId,
+                                  newspaperUpdatedAt: updatedDate,
+                                };
+                                saveAdminSettings(next);
+                                return next;
+                              });
+                              soundFX.playChallengeUnlocked();
+                              setNewspaperPublishToast(
+                                `✅ Ausgabe #${nextIssueId} veröffentlicht & „NEU!“-Badge für alle Besucher aktiviert!`
+                              );
+                              window.setTimeout(
+                                () => setNewspaperPublishToast(null),
+                                4500
+                              );
+                            }}
+                            className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-300 to-cyan-300 hover:brightness-110 text-slate-950 font-mono text-xs font-black border border-white shadow-[0_0_16px_rgba(251,191,36,0.55)] cursor-pointer transition"
+                          >
+                            📰 Zeitung aktualisieren &amp; veröffentlichen (Ausgabe #{currentNewspaperIssueId + 1})
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -11009,6 +13594,1564 @@ export function App() {
                   </div>
                 );
               })()}
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 11A. PASSWORTGESCHÜTZTER DJ-KANZEL LOGIN MODAL (`VITE_DJ_PASSWORD`)   */}
+        {/* ===================================================================== */}
+        {showDjLoginModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm">
+            <form
+              onSubmit={handleVerifyDjPassword}
+              className="w-full max-w-md rounded-2xl bg-[#140B24] border-2 border-fuchsia-400 shadow-[0_0_50px_rgba(232,121,249,0.45)] p-5 text-white space-y-4 font-mono"
+            >
+              <div className="flex items-center justify-between border-b border-fuchsia-500/40 pb-2.5">
+                <div>
+                  <span className="text-[10px] text-fuchsia-300 uppercase">
+                    Klecknix Twin-Decks • Backstage-Zugang
+                  </span>
+                  <h2 className="font-display font-black text-lg text-white">
+                    🎧 DJ-KANZEL LOGIN
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowDjLoginModal(false)}
+                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-cyan-200">
+                  DJ-Passwort (`VITE_DJ_PASSWORD` / Standard: `MAGIC86`):
+                </label>
+                <input
+                  type="password"
+                  autoFocus
+                  value={djPasswordInput}
+                  onChange={(e) => {
+                    setDjPasswordInput(e.target.value);
+                    if (djPasswordError) setDjPasswordError(null);
+                  }}
+                  placeholder="DJ-Passwort eingeben..."
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-fuchsia-400/70 text-sm text-amber-200 focus:outline-none focus:border-cyan-300"
+                />
+                {djPasswordError && (
+                  <div className="p-2 rounded bg-rose-950 border border-rose-400 text-rose-200 text-xs font-bold">
+                    ⚠️ {djPasswordError}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowDjLoginModal(false)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-fuchsia-500 via-amber-400 to-cyan-400 text-slate-950 font-black text-xs cursor-pointer shadow-[0_0_16px_rgba(232,121,249,0.5)]"
+                >
+                  🔓 Mischpult entsperren
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 11B. EIGENE DJ-KANZEL (80ER-MISCHPULT MIT 3x3-SAMPLER-LAUNCHPAD)      */}
+        {/* ===================================================================== */}
+        {showDjBoothModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-3 sm:p-5 backdrop-blur-md">
+            <div className="w-full max-w-6xl max-h-[93vh] overflow-y-auto rounded-2xl bg-gradient-to-b from-[#171128] via-[#0E0B1A] to-[#121629] border-2 border-fuchsia-400 shadow-[0_0_65px_rgba(232,121,249,0.45)] p-4 sm:p-5 text-white font-mono space-y-4">
+              {/* Top 80s Console Header + ON AIR Badge */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-fuchsia-500/40 pb-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="px-3 py-1 rounded-md bg-rose-600 text-white font-black text-xs tracking-widest border border-white shadow-[0_0_16px_rgba(244,63,94,0.85)] animate-pulse">
+                    🔴 ON AIR: {(adminSettings.activeDjName || DEFAULT_DJ_NAME).toUpperCase()}
+                  </span>
+                  <div>
+                    <h2 className="font-display font-black text-lg sm:text-xl text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-300 via-amber-200 to-cyan-300">
+                      🎧 PALLADIUM &apos;86 • EIGENE DJ-KANZEL (KLECKNIX TWIN-DECKS)
+                    </h2>
+                    <div className="text-[10px] text-slate-300">
+                      Live-Sync via <strong className="text-emerald-300">public.hall_settings (ID = 1)</strong> • Zifferntasten <strong className="text-amber-300">[1]–[9]</strong> triggern das 3x3-Sampler-Launchpad
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {isAdminUnlocked && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowDjBoothModal(false);
+                        setShowAdminTerminal(true);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-cyan-400/50 text-cyan-200 text-xs font-bold cursor-pointer"
+                    >
+                      🎛️ Zur Hallen-Regie
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowDjBoothModal(false)}
+                    className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black cursor-pointer"
+                  >
+                    ✕ Pult schließen
+                  </button>
+                </div>
+              </div>
+
+              {sampleUploadNotice && (
+                <div className="px-3 py-1.5 rounded-lg bg-emerald-950 border border-emerald-400 text-emerald-200 text-xs font-bold">
+                  {sampleUploadNotice}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* LEFT COLUMN (7 cols): 3x3 SAMPLER LAUNCHPAD (KLICK, TOUCH, TASTEN 1-9) + SLOT UPLOAD MODULE */}
+                <div className="lg:col-span-7 space-y-3">
+                  <div className="p-3.5 rounded-xl bg-[#0B0914] border-2 border-amber-400/60 shadow-inner space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-black uppercase text-amber-300">
+                        🎹 3x3 SAMPLER-LAUNCHPAD (KLICK • TOUCH • TASTEN [1]–[9])
+                      </span>
+                      <span className="text-[10px] text-cyan-300">
+                        Supabase Bucket <code className="text-amber-200">dj-samples</code> + Synth-Fallback
+                      </span>
+                    </div>
+
+                    {/* 3x3 MPC / 80s Drum Pad Grid */}
+                    <div className="grid grid-cols-3 gap-2.5">
+                      {(adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS)
+                        .slice(0, 9)
+                        .map((slot, idx) => {
+                          const keyNum = slot.keyNumber || idx + 1;
+                          const isPlaying = activeJingleSlotId === slot.id;
+                          const isEditing = editingJingleSlotId === slot.id;
+                          const hasCustomAudio = Boolean(slot.audioUrl);
+                          return (
+                            <div
+                              key={slot.id}
+                              className={`relative rounded-xl border-2 p-2.5 transition flex flex-col justify-between min-h-[96px] ${
+                                isPlaying
+                                  ? 'bg-gradient-to-br from-amber-400 via-fuchsia-500 to-cyan-400 text-slate-950 border-white shadow-[0_0_24px_rgba(251,191,36,0.8)] scale-[0.98]'
+                                  : isEditing
+                                  ? 'bg-[#221338] border-fuchsia-400 text-white shadow-[0_0_14px_rgba(232,121,249,0.4)]'
+                                  : 'bg-gradient-to-b from-[#1E2238] to-[#121526] hover:from-[#262B47] hover:to-[#171B30] border-slate-600 text-white'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-1">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-black ${
+                                    isPlaying
+                                      ? 'bg-slate-950 text-amber-300'
+                                      : 'bg-slate-950/90 border border-amber-400/50 text-amber-300'
+                                  }`}
+                                >
+                                  TASTE [{keyNum}]
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  {slot.showInHandheld && (
+                                    <span
+                                      title="Auf dem Game-Boy-Regie-Handheld aktiv"
+                                      className="px-1 py-0.5 rounded bg-emerald-500/20 border border-emerald-400 text-[9px] text-emerald-200 font-bold"
+                                    >
+                                      🎮 GB
+                                    </span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEditingJingleSlotId((curr) =>
+                                        curr === slot.id ? null : slot.id
+                                      );
+                                    }}
+                                    title="Sample-Slot bearbeiten / MP3 hochladen"
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
+                                      isEditing
+                                        ? 'bg-fuchsia-500 text-white'
+                                        : 'bg-slate-900/90 hover:bg-slate-800 text-slate-200 border border-slate-600'
+                                    }`}
+                                  >
+                                    ⚙️
+                                  </button>
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onPointerDown={() => handleTriggerDjJingle(slot)}
+                                className="my-1.5 text-left w-full cursor-pointer"
+                              >
+                                <div className="font-black text-xs sm:text-sm leading-snug truncate">
+                                  {slot.label}
+                                </div>
+                                <div
+                                  className={`text-[9.5px] truncate mt-0.5 ${
+                                    isPlaying
+                                      ? 'text-slate-900 font-bold'
+                                      : hasCustomAudio
+                                      ? 'text-cyan-300'
+                                      : 'text-slate-400'
+                                  }`}
+                                >
+                                  {hasCustomAudio
+                                    ? `☁️ ${slot.fileName || 'Custom Audio-Sample'}`
+                                    : '🎹 80s Synth-Fallback'}
+                                </div>
+                              </button>
+                            </div>
+                          );
+                        })}
+                    </div>
+
+                    {/* UPLOAD & SLOT EDITOR MODULE FOR SELECTED PAD */}
+                    {(() => {
+                      const slots =
+                        adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS;
+                      const targetSlot =
+                        slots.find((s) => s.id === editingJingleSlotId) ||
+                        slots[0];
+                      if (!targetSlot) return null;
+                      return (
+                        <div className="p-3 rounded-xl bg-slate-950/95 border border-fuchsia-400/60 space-y-2 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-bold text-fuchsia-300">
+                              🎛️ Slot-Konfiguration &amp; MP3/WAV-Upload für Pad [
+                              {targetSlot.keyNumber || 1}]:{' '}
+                              <strong className="text-amber-200">
+                                {targetSlot.label}
+                              </strong>
+                            </span>
+                            <div className="flex items-center gap-1">
+                              {slots.map((s, i) => (
+                                <button
+                                  key={s.id}
+                                  type="button"
+                                  onClick={() => setEditingJingleSlotId(s.id)}
+                                  className={`w-6 h-6 rounded text-[10px] font-black cursor-pointer ${
+                                    targetSlot.id === s.id
+                                      ? 'bg-fuchsia-500 text-white border border-white'
+                                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                                  }`}
+                                >
+                                  {i + 1}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10px] text-slate-400 mb-0.5">
+                                Freier Slot-Name (Pad-Beschriftung):
+                              </label>
+                              <input
+                                type="text"
+                                value={targetSlot.label}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  const nextSlots = slots.map((it) =>
+                                    it.id === targetSlot.id
+                                      ? { ...it, label: val }
+                                      : it
+                                  );
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    djJingleSlots: nextSlots,
+                                  }));
+                                }}
+                                className="w-full px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-amber-200 text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-slate-400 mb-0.5">
+                                Hallen-Sprechblase beim Abfeuern:
+                              </label>
+                              <input
+                                type="text"
+                                value={targetSlot.bubbleText}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  const nextSlots = slots.map((it) =>
+                                    it.id === targetSlot.id
+                                      ? { ...it, bubbleText: val }
+                                      : it
+                                  );
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    djJingleSlots: nextSlots,
+                                  }));
+                                }}
+                                className="w-full px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-cyan-200 text-xs"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              type="text"
+                              value={targetSlot.audioUrl || ''}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                const nextSlots = slots.map((it) =>
+                                  it.id === targetSlot.id
+                                    ? { ...it, audioUrl: val }
+                                    : it
+                                );
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  djJingleSlots: nextSlots,
+                                }));
+                              }}
+                              placeholder="Supabase Bucket `dj-samples` URL oder direkter .mp3/.wav Link..."
+                              className="flex-1 min-w-[200px] px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-cyan-200 text-xs"
+                            />
+                            <label className="px-3 py-1 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-xs cursor-pointer">
+                              {uploadingSampleSlotId === targetSlot.id
+                                ? '⏳ Lade hoch...'
+                                : '☁️ MP3/WAV Upload (dj-samples)'}
+                              <input
+                                type="file"
+                                accept=".mp3,.wav,.m4a,.ogg,audio/*"
+                                className="hidden"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  setUploadingSampleSlotId(targetSlot.id);
+                                  const res = await uploadDjSampleToCloud(
+                                    file,
+                                    targetSlot.id
+                                  );
+                                  setUploadingSampleSlotId(null);
+                                  if (res.url) {
+                                    const nextSlots = slots.map((it) =>
+                                      it.id === targetSlot.id
+                                        ? {
+                                            ...it,
+                                            audioUrl: res.url as string,
+                                            fileName: file.name,
+                                          }
+                                        : it
+                                    );
+                                    setAdminSettings((s) => ({
+                                      ...s,
+                                      djJingleSlots: nextSlots,
+                                    }));
+                                    setSampleUploadNotice(
+                                      res.source === 'supabase-storage'
+                                        ? `☁️ "${file.name}" in Supabase Storage Bucket dj-samples gespeichert!`
+                                        : `🎵 "${file.name}" geladen & einsatzbereit!`
+                                    );
+                                    window.setTimeout(
+                                      () => setSampleUploadNotice(null),
+                                      3500
+                                    );
+                                  }
+                                }}
+                              />
+                            </label>
+                            {targetSlot.audioUrl && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextSlots = slots.map((it) =>
+                                    it.id === targetSlot.id
+                                      ? {
+                                          ...it,
+                                          audioUrl: '',
+                                          fileName: undefined,
+                                        }
+                                      : it
+                                  );
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    djJingleSlots: nextSlots,
+                                  }));
+                                }}
+                                className="px-2.5 py-1 rounded bg-rose-800 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+                              >
+                                Reset
+                              </button>
+                            )}
+                          </div>
+
+                          <label className="inline-flex items-center gap-2 text-emerald-300 cursor-pointer pt-0.5">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(targetSlot.showInHandheld)}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                const nextSlots = slots.map((it) =>
+                                  it.id === targetSlot.id
+                                    ? { ...it, showInHandheld: checked }
+                                    : it
+                                );
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  djJingleSlots: nextSlots,
+                                }));
+                              }}
+                              className="accent-emerald-400 cursor-pointer"
+                            />
+                            <span className="font-bold">
+                              🎮 Diesen Sample-Slot auf das Game-Boy-Regie-Handheld legen
+                            </span>
+                          </label>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* RIGHT COLUMN (5 cols): ON AIR, SHOW-BUTTONS, 1-KLICK DURCHSAGEN & MUSIKWUNSCH-ANZEIGE */}
+                <div className="lg:col-span-5 space-y-3">
+                  {/* „ON AIR“-FELD */}
+                  <div className="p-3 rounded-xl bg-[#0B0914] border border-cyan-400/60 space-y-2">
+                    <span className="block text-xs font-black uppercase text-cyan-300">
+                      📡 „ON AIR“-FELD &amp; LED-LAUFTEXT (LIVE IN DER HALLE)
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                          DJ-Name am Mischpult:
+                        </label>
+                        <input
+                          type="text"
+                          value={adminSettings.activeDjName || DEFAULT_DJ_NAME}
+                          onChange={(e) =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              activeDjName: e.target.value,
+                            }))
+                          }
+                          className="w-full px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-amber-200 text-xs font-bold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                          LED-Lauftext am DJ-Tower:
+                        </label>
+                        <input
+                          type="text"
+                          value={adminSettings.djTickerText || DEFAULT_DJ_TICKER}
+                          onChange={(e) =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              djTickerText: e.target.value,
+                            }))
+                          }
+                          className="w-full px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-cyan-200 text-xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* SHOW-BUTTONS (NEBEL, DISKO, SCHWARZLICHT, STROBO) */}
+                  <div className="p-3 rounded-xl bg-[#0B0914] border border-fuchsia-400/60 space-y-2">
+                    <span className="block text-xs font-black uppercase text-fuchsia-300">
+                      ✨ SHOW-BUTTONS (NEBEL • DISKO • SCHWARZLICHT • STROBO)
+                    </span>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdminSettings((s) => ({
+                            ...s,
+                            fogMachineEnabled: true,
+                          }));
+                          setFogBurstCount((c) => c + 1);
+                          soundFX.playDjSoundboardEffect('fog-hiss');
+                        }}
+                        className="py-2.5 px-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-black text-xs border border-white shadow-[0_0_14px_rgba(34,211,238,0.5)] cursor-pointer"
+                      >
+                        💨 Nebel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLightingMode('disco')}
+                        className={`py-2.5 px-2 rounded-xl font-black text-xs border cursor-pointer ${
+                          lightingMode === 'disco'
+                            ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.6)]'
+                            : 'bg-slate-900 hover:bg-slate-800 text-amber-200 border-amber-400/50'
+                        }`}
+                      >
+                        🪩 Disko
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLightingMode('blacklight')}
+                        className={`py-2.5 px-2 rounded-xl font-black text-xs border cursor-pointer ${
+                          lightingMode === 'blacklight'
+                            ? 'bg-fuchsia-500 text-white border-white shadow-[0_0_16px_rgba(232,121,249,0.75)]'
+                            : 'bg-slate-900 hover:bg-slate-800 text-fuchsia-200 border-fuchsia-400/50'
+                        }`}
+                      >
+                        🟣 Schwarzlicht
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setStrobeBurstCount((c) => c + 1)}
+                        className="py-2.5 px-2 rounded-xl bg-gradient-to-r from-white via-cyan-200 to-fuchsia-200 hover:brightness-110 text-slate-950 font-black text-xs border-2 border-white shadow-[0_0_18px_rgba(255,255,255,0.8)] cursor-pointer"
+                      >
+                        ⚡ Strobo
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 9. 1-KLICK HALLEN-DURCHSAGEN & ABSCHLEPP-GONG */}
+                  <div className="p-3 rounded-xl bg-[#0B0914] border border-rose-400/60 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black uppercase text-rose-300">
+                        📢 1-KLICK HALLEN-DURCHSAGEN &amp; ABSCHLEPP-GONG
+                      </span>
+                      <span className="text-[10px] text-amber-300">
+                        3-Klang-Gong + Hall-Echo
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {HALL_ANNOUNCEMENT_PRESETS.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() =>
+                            handleTriggerHallAnnouncementPreset(preset)
+                          }
+                          className={`py-2 px-2.5 rounded-lg border font-bold text-xs text-left truncate cursor-pointer transition ${
+                            preset.id === 'towing'
+                              ? 'bg-rose-900/90 hover:bg-rose-800 border-amber-300 text-amber-200 shadow-[0_0_14px_rgba(244,63,94,0.45)]'
+                              : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-cyan-100'
+                          }`}
+                        >
+                          {preset.buttonLabel}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* MUSIKWUNSCH-ANZEIGE (LIVE-SYNCHRONISIERT ÜBER public.hall_settings) */}
+                  <div className="p-3 rounded-xl bg-[#0B0914] border border-emerald-400/60 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black uppercase text-emerald-300">
+                        🎵 MUSIKWUNSCH-ANZEIGE ({(adminSettings.songRequests || []).length})
+                      </span>
+                      {(adminSettings.songRequests || []).length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => ({
+                              ...s,
+                              songRequests: [],
+                            }))
+                          }
+                          className="px-2 py-0.5 rounded bg-rose-950 hover:bg-rose-800 border border-rose-500/50 text-rose-200 text-[10px] cursor-pointer"
+                        >
+                          🗑️ Liste leeren
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        maxLength={60}
+                        value={newSongRequestInput}
+                        onChange={(e) => setNewSongRequestInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && newSongRequestInput.trim()) {
+                            handleSubmitSongRequest(newSongRequestInput);
+                          }
+                        }}
+                        placeholder="80er-Musikwunsch eintragen (z.B. Egyptian Lover - Egypt Egypt)..."
+                        className="flex-1 px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleSubmitSongRequest(newSongRequestInput)
+                        }
+                        className="px-2.5 py-1 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-xs cursor-pointer"
+                      >
+                        + Wunsch
+                      </button>
+                    </div>
+                    {songRequestToast && (
+                      <div className="text-[10px] text-emerald-300 font-bold">
+                        {songRequestToast}
+                      </div>
+                    )}
+
+                    <div className="max-h-36 overflow-y-auto space-y-1 pr-0.5">
+                      {(adminSettings.songRequests || []).length === 0 ? (
+                        <div className="text-[11px] text-slate-500 py-2 text-center">
+                          Noch keine Musikwünsche eingegangen.
+                        </div>
+                      ) : (
+                        (adminSettings.songRequests || []).map((req) => (
+                          <div
+                            key={req.id}
+                            className={`px-2.5 py-1.5 rounded-lg border flex items-center justify-between gap-2 text-xs ${
+                              req.played
+                                ? 'bg-slate-900/50 border-slate-800 text-slate-500 line-through'
+                                : 'bg-slate-900 border-emerald-500/40 text-emerald-100'
+                            }`}
+                          >
+                            <div className="truncate">
+                              <strong className="text-amber-200">
+                                {req.trackTitle}
+                              </strong>{' '}
+                              <span className="text-[10px] text-slate-400">
+                                • von {req.requestedBy} ({req.createdAt})
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextList = (
+                                    adminSettings.songRequests || []
+                                  ).map((item) =>
+                                    item.id === req.id
+                                      ? { ...item, played: !item.played }
+                                      : item
+                                  );
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    songRequests: nextList,
+                                  }));
+                                }}
+                                className="px-1.5 py-0.5 rounded bg-emerald-900/80 hover:bg-emerald-700 text-emerald-200 text-[10px] font-bold cursor-pointer"
+                              >
+                                {req.played ? '↺ Offen' : '✓ Gespielt'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextList = (
+                                    adminSettings.songRequests || []
+                                  ).filter((item) => item.id !== req.id);
+                                  setAdminSettings((s) => ({
+                                    ...s,
+                                    songRequests: nextList,
+                                  }));
+                                }}
+                                className="px-1.5 py-0.5 rounded bg-rose-950 hover:bg-rose-800 text-rose-300 text-[10px] cursor-pointer"
+                              >
+                                ×
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 12. 👾 80ER-PIXEL-ARCADE-DIALOGE AN DEN 5 STATIONEN                   */}
+        {/* ===================================================================== */}
+        {activeStationDialog &&
+          (() => {
+            const stMeta = STATION_DIALOG_DEFAULTS[activeStationDialog];
+            const crewName =
+              adminSettings.crewNames?.[stMeta.crewKey] ||
+              stMeta.defaultCrewName;
+            const crewQuote =
+              adminSettings.crewQuotes?.[activeStationDialog] ||
+              stMeta.defaultQuote;
+            const portraitUrl = getStation16BitPortraitDataUrl(
+              activeStationDialog,
+              adminSettings.crewPortraits?.[activeStationDialog]
+            );
+            const currentRadioTrack =
+              radioPlaylist[currentTrackIdx] || DEFAULT_80S_RADIO_PLAYLIST[0];
+
+            return (
+              <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/80 p-3 sm:p-4 backdrop-blur-xs font-mono">
+                <div className="w-full max-w-2xl rounded-2xl bg-[#0B0818] border-4 border-amber-300 shadow-[0_0_55px_rgba(251,191,36,0.45)] overflow-hidden">
+                  {/* Top 5-Stations Arcade Switcher Header */}
+                  <div className="px-3 py-2 bg-gradient-to-r from-fuchsia-950 via-[#170e2e] to-cyan-950 border-b-2 border-amber-300/70 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {(
+                        [
+                          { id: 'kasse', short: '1. Kasse' },
+                          { id: 'verleih', short: '2. Verleih' },
+                          { id: 'proshop', short: '3. Pro-Shop' },
+                          { id: 'snackbar', short: '4. Snack-Bar' },
+                          { id: 'dj', short: '5. DJ-Kanzel' },
+                        ] as { id: StationDialogId; short: string }[]
+                      ).map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => {
+                            setStationDialogToast(null);
+                            setActiveStationDialog(tab.id);
+                          }}
+                          className={`px-2 py-1 rounded border text-[10px] font-black uppercase cursor-pointer transition ${
+                            activeStationDialog === tab.id
+                              ? 'bg-amber-300 text-slate-950 border-white shadow-[0_0_12px_rgba(253,224,71,0.7)]'
+                              : 'bg-slate-900/90 hover:bg-slate-800 text-cyan-200 border-cyan-500/40'
+                          }`}
+                        >
+                          {tab.short}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveStationDialog(null)}
+                      className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black border border-white/60 cursor-pointer"
+                    >
+                      ✕ Schließen [ESC]
+                    </button>
+                  </div>
+
+                  {/* 16-Bit Portrait + Crew Name + 80s Kult-Spruch Speech Box */}
+                  <div className="p-4 space-y-4">
+                    <div className="flex flex-col sm:flex-row items-center sm:items-start gap-4 p-3.5 rounded-xl bg-[#120D26] border-2 border-cyan-400/70 shadow-inner">
+                      <div className="relative shrink-0">
+                        <img
+                          src={portraitUrl}
+                          alt={crewName}
+                          style={{ imageRendering: 'pixelated' }}
+                          className="w-24 h-24 sm:w-28 sm:h-28 rounded-xl border-4 border-amber-300 shadow-[0_0_20px_rgba(253,224,71,0.5)] bg-slate-950"
+                        />
+                        <span className="absolute -bottom-2 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-fuchsia-600 border border-white text-[9px] font-black text-white whitespace-nowrap">
+                          16-BIT CREW
+                        </span>
+                      </div>
+
+                      <div className="flex-1 text-center sm:text-left space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                          <span className="px-2 py-0.5 rounded bg-amber-400/20 border border-amber-300 text-amber-200 text-[10px] font-black uppercase">
+                            {stMeta.title}
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/60 text-cyan-200 text-[9.5px] font-bold">
+                            {stMeta.roleBadge}
+                          </span>
+                        </div>
+
+                        <h3 className="font-display font-black text-lg sm:text-xl text-white tracking-wide">
+                          {crewName}
+                        </h3>
+
+                        <div className="p-2.5 rounded-lg bg-slate-950/95 border-l-4 border-amber-300 text-amber-100 text-xs sm:text-sm leading-relaxed">
+                          „{crewQuote}“
+                        </div>
+                      </div>
+                    </div>
+
+                    {stationDialogToast && (
+                      <div className="px-3 py-2 rounded-lg bg-emerald-950/90 border border-emerald-400 text-emerald-200 text-xs font-bold text-center">
+                        {stationDialogToast}
+                      </div>
+                    )}
+
+                    {/* STATION 1: KASSE & EINLASS (Tickets, Sonntags-Clique, 10er-Stempelkarte) */}
+                    {activeStationDialog === 'kasse' && (
+                      <div className="space-y-3 p-3 rounded-xl bg-slate-950/90 border border-amber-400/50">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-black uppercase text-amber-300">
+                            🎟️ 1. KASSEN-AKTIONEN: TICKETS &amp; 10ER-STEMPELKARTE
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-400/60 text-emerald-200 text-[10.5px] font-bold">
+                            Stempelkarte: {stampCard.stamps} / 10 Stempel
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLockerSettings((prev) => ({
+                                ...prev,
+                                sundayCliqueTicket: 'duo',
+                              }));
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                '🎟️ 2er-Runde (Duo-Ticket) an der Kasse gelöst (+25% Cliquen-Bonus)!'
+                              );
+                            }}
+                            className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                              sundayCliqueTicket === 'duo'
+                                ? 'bg-amber-400 text-slate-950 border-white font-black'
+                                : 'bg-slate-900 hover:bg-slate-800 border-amber-400/40 text-amber-100'
+                            }`}
+                          >
+                            <div className="text-xs font-black">
+                              🎟️ 2er-Runde (Duo)
+                            </div>
+                            <div className="text-[10px] opacity-85 mt-0.5">
+                              Sonntags-Clique 2+1 Gruppen-Ticket
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLockerSettings((prev) => ({
+                                ...prev,
+                                sundayCliqueTicket: 'trio',
+                              }));
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                '🎟️ 3er-Runde (Trio-Ticket) an der Kasse gelöst (+25% Cliquen-Bonus)!'
+                              );
+                            }}
+                            className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                              sundayCliqueTicket === 'trio'
+                                ? 'bg-amber-400 text-slate-950 border-white font-black'
+                                : 'bg-slate-900 hover:bg-slate-800 border-amber-400/40 text-amber-100'
+                            }`}
+                          >
+                            <div className="text-xs font-black">
+                              🎟️ 3er-Runde (Trio)
+                            </div>
+                            <div className="text-[10px] opacity-85 mt-0.5">
+                              Volles 2+1 Trio-Gruppen-Ticket
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDrinkChipAvailable(true);
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                '🪙 Frischer Freigetränk-/Verleih-Chip an der Kasse ausgegeben!'
+                              );
+                            }}
+                            className="p-2.5 rounded-xl bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-400 text-cyan-100 text-left cursor-pointer transition"
+                          >
+                            <div className="text-xs font-black text-cyan-300">
+                              🪙 Getränke-/Verleih-Chip
+                            </div>
+                            <div className="text-[10px] mt-0.5">
+                              {drinkChipAvailable
+                                ? '✓ Chip bereit zum Einlösen'
+                                : 'Neuen Chip abholen'}
+                            </div>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* STATION 2: ROLLSCHUH-VERLEIH (Eigene Rollschuhe, Leihrollschuhe, Rollstuhl) */}
+                    {activeStationDialog === 'verleih' && (
+                      <div className="space-y-3 p-3 rounded-xl bg-slate-950/90 border border-orange-400/50">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-black uppercase text-orange-300">
+                            🛼 2. VERLEIH-AKTIONEN: ROLLSCHUHE &amp; NEON-ROLLSTUHL WÄHLEN
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-orange-950 border border-orange-400/60 text-orange-200 text-[10px] font-bold">
+                            Aktuell:{' '}
+                            {characterMode === 'wheelchair'
+                              ? '♿ Rollstuhl (Neon-Räder)'
+                              : hasOwnSkates
+                              ? '🛼 Eigene Rollschuhe'
+                              : hasRentedSkates
+                              ? '👟 80er Leihrollschuhe'
+                              : 'Noch auf Straßenschuhen'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMobilityChoice('rental-skates');
+                              setCharacterMode('skater');
+                              setHasOwnSkates(false);
+                              setHasRentedSkates(true);
+                              handleRedeemDrinkChipAtRental();
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                '👟 80er-Leihrollschuhe frisch geschnürt! Viel Spaß auf der Bahn!'
+                              );
+                            }}
+                            className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                              characterMode === 'skater' && hasRentedSkates && !hasOwnSkates
+                                ? 'bg-orange-400 text-slate-950 border-white font-black'
+                                : 'bg-slate-900 hover:bg-slate-800 border-orange-400/40 text-orange-100'
+                            }`}
+                          >
+                            <div className="text-xs font-black">
+                              👟 Leihrollschuhe
+                            </div>
+                            <div className="text-[10px] opacity-85 mt-0.5">
+                              Klassische 80er-Leder-Skates schnüren
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMobilityChoice('own-skates');
+                              setCharacterMode('skater');
+                              setHasOwnSkates(true);
+                              setHasRentedSkates(false);
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                '🛼 Eigene Profi-Rollschuhe angelegt!'
+                              );
+                            }}
+                            className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                              characterMode === 'skater' && hasOwnSkates
+                                ? 'bg-cyan-400 text-slate-950 border-white font-black'
+                                : 'bg-slate-900 hover:bg-slate-800 border-cyan-400/40 text-cyan-100'
+                            }`}
+                          >
+                            <div className="text-xs font-black">
+                              🛼 Eigene Rollschuhe
+                            </div>
+                            <div className="text-[10px] opacity-85 mt-0.5">
+                              Direkt mit eigenem Paar starten
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMobilityChoice('wheelchair');
+                              setCharacterMode('wheelchair');
+                              setHasOwnSkates(true);
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                '♿ Barrierefreier WCMX-Rollstuhl mit leuchtenden Neon-Rädern aktiv!'
+                              );
+                            }}
+                            className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                              characterMode === 'wheelchair'
+                                ? 'bg-fuchsia-500 text-white border-white font-black'
+                                : 'bg-slate-900 hover:bg-slate-800 border-fuchsia-400/40 text-fuchsia-100'
+                            }`}
+                          >
+                            <div className="text-xs font-black">
+                              ♿ Rollstuhl (Neon-Räder)
+                            </div>
+                            <div className="text-[10px] opacity-85 mt-0.5">
+                              WCMX-Avatar mit leuchtenden Felgen
+                            </div>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* STATION 3: PRO-SHOP & TUNING (Outfits & Rollen in public.players speichern) */}
+                    {activeStationDialog === 'proshop' && (
+                      <div className="space-y-3 p-3 rounded-xl bg-slate-950/90 border border-cyan-400/50">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-black uppercase text-cyan-300">
+                            🛠️ 3. PRO-SHOP: 80ER-OUTFIT &amp; CLOUD-PROFIL (`public.players`)
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-cyan-950 border border-cyan-400/50 text-cyan-200 text-[10px] font-bold">
+                            Punkte: {availableProShopPoints} Pkt
+                          </span>
+                        </div>
+
+                        {/* Outfit Color Picker */}
+                        <div className="space-y-1">
+                          <div className="text-[10px] text-slate-300 font-bold">
+                            👕 80er-Outfit-Farbe wählen (wird sofort in `public.players` gespeichert):
+                          </div>
+                          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+                            {MULTIPLAYER_OUTFIT_COLORS.map((col) => (
+                              <button
+                                key={col.id}
+                                type="button"
+                                onClick={() => {
+                                  setPlayerShirtColor(col.hex);
+                                  void upsertCloudPlayerProfile({
+                                    player_id: cloudPlayerId,
+                                    name: (playerName || 'Gast-Skater').trim(),
+                                    outfit_color: col.hex,
+                                    settings: {
+                                      lockerSettings,
+                                      crtFilterEnabled,
+                                      visitorVolume,
+                                      characterMode,
+                                      kengolHatEnabled,
+                                    },
+                                    highscore: totalEarnedPoints,
+                                  });
+                                  soundFX.playChallengeUnlocked();
+                                  setStationDialogToast(
+                                    `👕 Outfit „${col.label}“ angelegt & in Supabase Cloud (public.players) gespeichert!`
+                                  );
+                                }}
+                                className={`px-2 py-1.5 rounded-lg border text-[10px] font-bold flex items-center gap-1.5 cursor-pointer ${
+                                  playerShirtColor === col.hex
+                                    ? 'border-2 border-white bg-slate-800 text-white'
+                                    : 'border-slate-700 bg-slate-900 text-slate-300'
+                                }`}
+                              >
+                                <span
+                                  className="w-3 h-3 rounded-full shrink-0 border border-white/50"
+                                  style={{ backgroundColor: col.hex }}
+                                />
+                                <span className="truncate">{col.label}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Quick Accessories & Full Pro-Shop Button */}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setKengolHatEnabled((v) => !v);
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                !kengolHatEnabled
+                                  ? '🦘 Original 80er Kengol-Bucket-Hat aufgesetzt!'
+                                  : '🦘 Kengol-Bucket-Hat abgenommen.'
+                              );
+                            }}
+                            className={`py-2 px-2.5 rounded-lg border text-xs font-bold cursor-pointer ${
+                              kengolHatEnabled
+                                ? 'bg-fuchsia-600 text-white border-white'
+                                : 'bg-slate-900 text-fuchsia-200 border-fuchsia-400/40'
+                            }`}
+                          >
+                            🦘 Kengol-Hut: {kengolHatEnabled ? 'AN' : 'AUS'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              handleToggleUnderglow();
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                !upgrades.underglowEnabled
+                                  ? '✨ Sims Neon-Underglow unter den Skates aktiviert!'
+                                  : '✨ Neon-Underglow ausgeschaltet.'
+                              );
+                            }}
+                            className={`py-2 px-2.5 rounded-lg border text-xs font-bold cursor-pointer ${
+                              upgrades.underglowEnabled
+                                ? 'bg-emerald-500 text-slate-950 border-white font-black'
+                                : 'bg-slate-900 text-emerald-200 border-emerald-400/40'
+                            }`}
+                          >
+                            ✨ Leuchtrollen: {upgrades.underglowEnabled ? 'AN' : 'AUS'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveStationDialog(null);
+                              setShowProShopModal(true);
+                            }}
+                            className="py-2 px-2.5 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-xs cursor-pointer shadow-[0_0_14px_rgba(0,240,255,0.4)]"
+                          >
+                            🛒 Vollbild Pro-Shop öffnen
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* STATION 4: SNACK-BAR (Slush Puppy, Bloba Cola & Hot-Dog mit sofortigem Speed-Boost) */}
+                    {activeStationDialog === 'snackbar' && (
+                      <div className="space-y-3 p-3 rounded-xl bg-slate-950/90 border border-pink-400/50">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-black uppercase text-pink-300">
+                            🍧 4. SNACK-BAR („SLUSH &amp; BLOB“): DRINKS &amp; TURBO-BOOST
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-pink-950 border border-pink-400/60 text-pink-200 text-[10px] font-bold">
+                            Slush: {telemetry.slushTimerSec}s • Bloba:{' '}
+                            {telemetry.blobaColaTimerSec}s
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLockerDrinkBoostTrigger((c) => c + 1);
+                              handleIntroStepComplete('fetch_drink');
+                              handleChallengeProgress('bistro_drink', 1);
+                              soundFX.playDrinkRefresh();
+                              setStationDialogToast(
+                                '🍧 Waldmeister-Kirsch Slush Puppy getrunken! Sofortiger Cool-Speed-Boost auf der Bahn!'
+                              );
+                            }}
+                            className="p-2.5 rounded-xl bg-gradient-to-br from-cyan-950 to-emerald-950 hover:from-cyan-900 hover:to-emerald-900 border-2 border-cyan-400 text-left cursor-pointer transition"
+                          >
+                            <div className="text-xs font-black text-cyan-200">
+                              🍧 Slush Puppy
+                            </div>
+                            <div className="text-[10px] text-emerald-200 mt-0.5">
+                              Waldmeister-Kirsch • +Speed-Boost!
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLockerDrinkBoostTrigger((c) => c + 1);
+                              handleIntroStepComplete('fetch_drink');
+                              handleChallengeProgress('bistro_drink', 1);
+                              soundFX.playDrinkRefresh();
+                              setStationDialogToast(
+                                '🥤 Eiskalte Bloba Cola gezapft! Voller Sprung- & Turbo-Kick aktiv!'
+                              );
+                            }}
+                            className="p-2.5 rounded-xl bg-gradient-to-br from-fuchsia-950 to-amber-950 hover:from-fuchsia-900 hover:to-amber-900 border-2 border-fuchsia-400 text-left cursor-pointer transition"
+                          >
+                            <div className="text-xs font-black text-fuchsia-200">
+                              🥤 Bloba Cola
+                            </div>
+                            <div className="text-[10px] text-amber-200 mt-0.5">
+                              80er Kult-Cola • +Sprung- &amp; Turbo-Kick!
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLockerDrinkBoostTrigger((c) => c + 1);
+                              setUpgrades((u) => ({
+                                ...u,
+                                bonusPoints: (u.bonusPoints || 0) + 25,
+                              }));
+                              soundFX.playDrinkRefresh();
+                              setStationDialogToast(
+                                '🌭 80er Hot-Dog & warme Brezel verputzt! Voller Kombi-Boost + 25 Bonus-Punkte!'
+                              );
+                            }}
+                            className="p-2.5 rounded-xl bg-gradient-to-br from-amber-950 to-rose-950 hover:from-amber-900 hover:to-rose-900 border-2 border-amber-400 text-left cursor-pointer transition"
+                          >
+                            <div className="text-xs font-black text-amber-200">
+                              🌭 80er Snack-Menü
+                            </div>
+                            <div className="text-[10px] text-rose-200 mt-0.5">
+                              Hot-Dog &amp; Brezel • Boost + 25 Pkt!
+                            </div>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* STATION 5: DJ-KANZEL (Musikwünsche, aktueller Track & 3x3-Mischpult) */}
+                    {activeStationDialog === 'dj' && (
+                      <div className="space-y-3 p-3 rounded-xl bg-slate-950/90 border border-purple-400/50">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-black uppercase text-purple-300">
+                            🎧 5. DJ-KANZEL: MUSIKWUNSCH &amp; TWIN-DECKS
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-purple-950 border border-purple-400/60 text-purple-200 text-[10px] font-bold">
+                            ON AIR: {currentRadioTrack?.title || '80s Mix'}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            maxLength={60}
+                            value={newSongRequestInput}
+                            onChange={(e) =>
+                              setNewSongRequestInput(e.target.value)
+                            }
+                            onKeyDown={(e) => {
+                              if (
+                                e.key === 'Enter' &&
+                                newSongRequestInput.trim()
+                              ) {
+                                const txt = newSongRequestInput.trim();
+                                handleSubmitSongRequest(txt);
+                                setStationDialogToast(
+                                  `🎵 Musikwunsch „${txt}“ direkt an ${crewName} übermittelt!`
+                                );
+                              }
+                            }}
+                            placeholder="Dein 80er-Musikwunsch an den DJ (z.B. New Order - Blue Monday)..."
+                            className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-purple-400/50 text-xs text-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const txt = newSongRequestInput.trim();
+                              if (!txt) return;
+                              handleSubmitSongRequest(txt);
+                              setStationDialogToast(
+                                `🎵 Musikwunsch „${txt}“ direkt an ${crewName} übermittelt!`
+                              );
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-xs cursor-pointer"
+                          >
+                            🎵 Wünschen
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <div className="text-[10.5px] text-slate-300">
+                            Offene Wünsche in der Kanzel:{' '}
+                            <strong className="text-amber-300">
+                              {(adminSettings.songRequests || []).length}
+                            </strong>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowDjSoundboardHud(true);
+                                setActiveStationDialog(null);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-fuchsia-900 hover:bg-fuchsia-800 border border-fuchsia-400 text-fuchsia-100 text-[11px] font-bold cursor-pointer"
+                            >
+                              📣 Schnell-Soundboard
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveStationDialog(null);
+                                handleOpenDjBooth();
+                              }}
+                              className="px-3 py-1 rounded-lg bg-gradient-to-r from-fuchsia-500 to-cyan-400 hover:brightness-110 text-slate-950 font-black text-[11px] cursor-pointer"
+                            >
+                              🎛️ 3x3 DJ-Mischpult öffnen
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+        {/* ===================================================================== */}
+        {/* 12B. 🏅 PROFIL-ZERTIFIKAT / ENTDECKER-URKUNDE ("ENTDECKER AUF 8 ROLLEN") */}
+        {/* ===================================================================== */}
+        {showExplorerCertificateModal && (
+          <div
+            className="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 p-3 sm:p-5 backdrop-blur-sm"
+            onClick={() => setShowExplorerCertificateModal(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="relative w-full max-w-xl rounded-2xl bg-gradient-to-br from-[#23153c] via-[#110c22] to-[#291710] border-4 border-amber-300 shadow-[0_0_70px_rgba(251,191,36,0.6)] p-4 sm:p-6 text-[#FFF8E7] overflow-hidden"
+            >
+              {/* Decorative 80s Corner Ornaments */}
+              <div className="pointer-events-none absolute top-2 left-2 w-6 h-6 border-t-2 border-l-2 border-cyan-300/70" />
+              <div className="pointer-events-none absolute top-2 right-2 w-6 h-6 border-t-2 border-r-2 border-cyan-300/70" />
+              <div className="pointer-events-none absolute bottom-2 left-2 w-6 h-6 border-b-2 border-l-2 border-cyan-300/70" />
+              <div className="pointer-events-none absolute bottom-2 right-2 w-6 h-6 border-b-2 border-r-2 border-cyan-300/70" />
+
+              {/* Top Banner */}
+              <div className="text-center border-b-2 border-amber-400/50 pb-3">
+                <div className="inline-block px-3 py-0.5 rounded-full bg-amber-400/20 border border-amber-300 font-mono text-[10px] font-black uppercase tracking-widest text-amber-200 mb-1.5">
+                  ★ ROLLER DISCO PALLADIUM HANAU &apos;86 • PROFIL-ZERTIFIKAT ★
+                </div>
+                <h2 className="font-display font-black text-2xl sm:text-3xl tracking-wider uppercase text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-yellow-300 to-cyan-300 drop-shadow-[0_0_16px_rgba(251,191,36,0.5)]">
+                  „Entdecker auf acht Rollen“
+                </h2>
+                <p className="font-mono text-xs text-fuchsia-200 mt-0.5">
+                  Offizielle 80er-Jahre Ehren-Urkunde • {APP_VERSION_LABEL}
+                </p>
+              </div>
+
+              {/* Center Medallion with Player's Own Avatar */}
+              <div className="my-4 flex flex-col items-center">
+                <div className="relative w-28 h-28 rounded-full bg-gradient-to-b from-fuchsia-950 via-[#0c1022] to-cyan-950 border-4 border-amber-300 shadow-[0_0_32px_rgba(34,211,238,0.55)] flex items-center justify-center">
+                  <svg viewBox="0 0 80 80" className="w-24 h-24">
+                    {/* Neon Disco Sunburst */}
+                    <circle
+                      cx="40"
+                      cy="40"
+                      r="34"
+                      fill="none"
+                      stroke={playerShirtColor || '#ff2a85'}
+                      strokeWidth="2"
+                      strokeDasharray="5 3"
+                    />
+                    {/* Kengol Bucket Hat or 80s Sweatband */}
+                    {kengolHatEnabled ? (
+                      <path
+                        d="M22 25 Q40 11 58 25 L61 28 L19 28 Z"
+                        fill="#e11d48"
+                        stroke="#fde047"
+                        strokeWidth="1.5"
+                      />
+                    ) : (
+                      <rect
+                        x="26"
+                        y="20"
+                        width="28"
+                        height="4.5"
+                        rx="2"
+                        fill="#22d3ee"
+                      />
+                    )}
+                    {/* Head & 80s Shades */}
+                    <circle cx="40" cy="31" r="10" fill="#fde68a" />
+                    <rect
+                      x="32"
+                      y="28"
+                      width="16"
+                      height="4"
+                      rx="1"
+                      fill="#0f172a"
+                      stroke="#22d3ee"
+                      strokeWidth="1"
+                    />
+                    {/* 80s Jacket / Shirt in Player's Color */}
+                    <path
+                      d="M22 56 C22 41 58 41 58 56 Z"
+                      fill={playerShirtColor || '#ff2a85'}
+                      stroke="#ffffff"
+                      strokeWidth="1.8"
+                    />
+                    {/* 8 Glowing Rollerskate Wheels / Wheelchair Neon Rim */}
+                    {characterMode === 'wheelchair' ? (
+                      <>
+                        <circle
+                          cx="28"
+                          cy="62"
+                          r="7"
+                          fill="none"
+                          stroke="#22d3ee"
+                          strokeWidth="2.5"
+                        />
+                        <circle
+                          cx="52"
+                          cy="62"
+                          r="7"
+                          fill="none"
+                          stroke="#22d3ee"
+                          strokeWidth="2.5"
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <circle cx="25" cy="64" r="3.5" fill="#22d3ee" />
+                        <circle cx="31" cy="64" r="3.5" fill="#fde047" />
+                        <circle cx="37" cy="64" r="3.5" fill="#ec4899" />
+                        <circle cx="43" cy="64" r="3.5" fill="#ec4899" />
+                        <circle cx="49" cy="64" r="3.5" fill="#fde047" />
+                        <circle cx="55" cy="64" r="3.5" fill="#22d3ee" />
+                      </>
+                    )}
+                  </svg>
+                  <span className="absolute -bottom-2.5 px-2.5 py-0.5 rounded-full bg-amber-300 text-slate-950 font-mono text-[10px] font-black border border-white shadow">
+                    {characterMode === 'wheelchair'
+                      ? '♿ NEON-WHEELS'
+                      : '🛼 8-ROLLEN-PROFI'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Parchment Certificate Body */}
+              <div className="p-4 rounded-xl bg-gradient-to-br from-amber-50 via-[#fff9eb] to-amber-100 text-slate-900 border-2 border-amber-600 shadow-inner space-y-2.5">
+                <p className="text-center text-xs sm:text-sm leading-relaxed font-serif text-slate-800">
+                  Hiermit wird feierlich beurkundet, dass
+                </p>
+                <div className="text-center font-display font-black text-xl sm:text-2xl text-rose-700 tracking-wide underline decoration-amber-500 decoration-2 underline-offset-4">
+                  {(playerName || 'Palladium-Skater').trim()}
+                </div>
+                <p className="text-center text-xs sm:text-sm leading-relaxed font-serif text-slate-800">
+                  als offizieller{' '}
+                  <strong className="text-slate-950">
+                    „Entdecker auf acht Rollen“
+                  </strong>{' '}
+                  das legendäre Holzparkett im{' '}
+                  <strong>Palladium Roller Arena Hanau &apos;86</strong> unter
+                  Neonlicht, Spiegelkugeln und 80er-Beats erfolgreich erkundet hat.
+                </p>
+
+                {/* Metadata Grid: Erstellungsdatum & Arena-Siegel */}
+                <div className="mt-3 pt-3 border-t-2 border-amber-400/80 flex flex-col sm:flex-row items-center justify-between gap-3 font-mono text-xs">
+                  <div className="space-y-0.5 text-center sm:text-left">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
+                      📅 ERSTELLUNGSDATUM
+                    </div>
+                    <div className="text-sm font-black text-slate-900">
+                      {explorerCreatedAt}
+                    </div>
+                    <div className="text-[10px] text-slate-600">
+                      Runden: {telemetry.laps} • Punkte: {totalEarnedPoints} Pkt
+                    </div>
+                  </div>
+
+                  {/* Authentic Embossed 80s Arena Seal */}
+                  <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-gradient-to-r from-rose-800 via-red-700 to-amber-700 text-amber-100 border-2 border-amber-300 shadow-[0_0_18px_rgba(190,18,60,0.45)] rotate-[-2deg]">
+                    <span className="text-xl">🏛️</span>
+                    <div className="text-left leading-tight">
+                      <div className="text-[9px] font-black uppercase tracking-widest text-amber-200">
+                        OFFIZIELLES ARENA-SIEGEL
+                      </div>
+                      <div className="text-[11px] font-black text-white">
+                        PALLADIUM HANAU 1986
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer Actions */}
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExplorerCertificateModal(false);
+                    setLockerTab('certificates');
+                    setShowLockerModal(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono text-xs font-black border border-white cursor-pointer transition"
+                >
+                  🏆 Zur Spind-Pokalwand
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowExplorerCertificateModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-cyan-400/60 text-cyan-200 font-mono text-xs font-bold cursor-pointer transition"
+                >
+                  ✕ Schließen [ESC]
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 12C. 📰 80ER-RETRO-ZEITUNGS-MODAL ("PALLADIUM KURIER – HANAU ’86")     */}
+        {/* ===================================================================== */}
+        {showNewspaperModal && (
+          <div
+            className="fixed inset-0 z-[92] flex items-center justify-center bg-black/80 p-3 sm:p-5 backdrop-blur-sm overflow-y-auto"
+            onClick={() => setShowNewspaperModal(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="relative w-full max-w-3xl rounded-xl bg-[#f5ecd7] text-[#1c1610] border-4 border-[#3a2817] shadow-[0_0_75px_rgba(0,0,0,0.9)] p-4 sm:p-6 font-serif"
+              style={{
+                backgroundImage:
+                  'radial-gradient(circle at center, rgba(255,250,235,0.4) 0%, rgba(214,193,154,0.45) 100%)',
+              }}
+            >
+              {/* Close Button Top-Right */}
+              <button
+                type="button"
+                onClick={() => setShowNewspaperModal(false)}
+                title="Zeitung schließen [ESC]"
+                className="absolute top-3 right-3 w-8 h-8 rounded-full bg-[#2b1d10] hover:bg-rose-800 text-[#f5ecd7] font-mono text-base font-black flex items-center justify-center cursor-pointer shadow"
+              >
+                ×
+              </button>
+
+              {/* Vintage 1986 Masthead */}
+              <div className="border-b-4 border-double border-[#2b1d10] pb-2.5 text-center">
+                <div className="flex flex-wrap items-center justify-between text-[10px] sm:text-xs font-mono uppercase tracking-widest text-[#4a3520] border-b border-[#8a6d4b] pb-1 mb-2 pr-8">
+                  <span>HANAU-GRIMM CENTER • AUSGABE #{currentNewspaperIssueId}</span>
+                  <span className="font-bold text-rose-800">
+                    ★ OFFIZIELLES HALLENBLATT ★
+                  </span>
+                  <span>
+                    STAND: {adminSettings.newspaperUpdatedAt || '15.11.2026'}
+                  </span>
+                </div>
+
+                <h2 className="font-display font-black text-2xl sm:text-4xl tracking-wider uppercase text-[#1a1109]">
+                  PALLADIUM KURIER – HANAU ’86
+                </h2>
+                <div className="text-[11px] font-mono font-bold uppercase tracking-widest text-[#6b4c2b] mt-0.5">
+                  Die unabhängige Rollschuh-, Musik- &amp; Update-Zeitung auf acht Rollen • {APP_VERSION_LABEL}
+                </div>
+              </div>
+
+              {/* Bold Main Headline Banner */}
+              <div className="my-3.5 py-2.5 px-3 bg-[#e8dcc2] border-y-2 border-[#2b1d10] text-center">
+                <span className="inline-block px-2 py-0.5 rounded bg-rose-700 text-white font-mono text-[9.5px] font-black uppercase tracking-widest mb-1">
+                  +++ AKTUELLE HAUPTSCHLAGZEILE +++
+                </span>
+                <h3 className="font-display font-black text-lg sm:text-2xl text-[#140d06] leading-tight uppercase">
+                  {adminSettings.newspaperHeadline ||
+                    'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!'}
+                </h3>
+              </div>
+
+              {/* Two-Column 80s Vintage Newspaper Body */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 text-xs sm:text-sm leading-relaxed text-[#241a10]">
+                {/* Column 1: Redaktions-Meldung & Update-News */}
+                <div className="space-y-2.5 md:border-r md:border-[#9c8260] md:pr-5">
+                  <div className="font-mono text-[11px] font-black uppercase tracking-wider text-rose-900 border-b border-[#b89f7d] pb-1">
+                    📰 REDAKTIONS-MELDUNG &amp; UPDATE-NEWS
+                  </div>
+                  <div className="whitespace-pre-line text-justify first-letter:text-3xl first-letter:font-black first-letter:float-left first-letter:mr-2 first-letter:leading-none first-letter:text-rose-900">
+                    {adminSettings.newspaperBody ||
+                      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'}
+                  </div>
+                </div>
+
+                {/* Column 2: Hallen-Tipps & Vielleser-Urkunden-Pass */}
+                <div className="space-y-3">
+                  <div className="font-mono text-[11px] font-black uppercase tracking-wider text-[#1e3a8a] border-b border-[#b89f7d] pb-1">
+                    🛼 PALLADIUM-TIPPS &amp; HALLEN-GUIDE ’86
+                  </div>
+                  <ul className="space-y-1.5 text-xs list-disc list-inside text-[#2c2013]">
+                    <li>
+                      <strong>5 Pixel-Stationen [E]:</strong> Besuche Kasse, Verleih, Pro-Shop, Snack-Bar &amp; DJ-Kanzel im 16-Bit-Arcade-Look.
+                    </li>
+                    <li>
+                      <strong>Sonntags-Clique (2+1):</strong> Löse dein Duo- oder Trio-Ticket für +25% Cliquen-Punkte bei warmer Nachmittagsbeleuchtung.
+                    </li>
+                    <li>
+                      <strong>Entdecker-Urkunde:</strong> Klicke oben im HUD auf deinen mittleren Avatar-Kreis für dein persönliches Arena-Zertifikat.
+                    </li>
+                  </ul>
+
+                  {/* Vielleser auf Rollen Stamp Box */}
+                  <div className="p-3 rounded-lg bg-[#e4d5b7] border-2 border-[#3a2817] space-y-1.5 font-mono">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10.5px] font-black uppercase text-rose-900">
+                        🏆 URKUNDE: „VIELLESER AUF ROLLEN“
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-[#2b1d10] text-amber-200 text-[10px] font-black">
+                        {Math.min(5, readNewspaperIssuesList.length)} / 5 Ausgaben
+                      </span>
+                    </div>
+                    <p className="text-[10.5px] text-[#332415] leading-snug">
+                      {certificatesState.unlocked.vielleser_5?.unlocked
+                        ? '🎉 Glückwunsch! Du bist offizieller Stammleser des Palladium-Kuriers – deine Urkunde hängt im Spind!'
+                        : `Lies ${Math.max(
+                            0,
+                            5 - readNewspaperIssuesList.length
+                          )} weitere Zeitungsausgabe(n), um die Gold-Urkunde „Vielleser auf Rollen“ freizuschalten!`}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Newspaper Footer */}
+              <div className="mt-4 pt-2.5 border-t-2 border-[#2b1d10] flex flex-wrap items-center justify-between gap-2 font-mono text-[10.5px] text-[#4a3520]">
+                <span>
+                  DRUCK &amp; VERLAG: PALLADIUM ROLLER DISCO HANAU • AUSGABE #{currentNewspaperIssueId} Gelesen ✓
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowNewspaperModal(false)}
+                  className="px-4 py-1.5 rounded bg-[#2b1d10] hover:bg-[#422d19] text-amber-200 font-bold text-xs cursor-pointer"
+                >
+                  Zeitung zuklappen [×]
+                </button>
+              </div>
             </div>
           </div>
         )}

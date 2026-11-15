@@ -135,7 +135,7 @@ class RetroSoundEffects {
 
         jingleAudio.onended = finishJingle;
         jingleAudio.onerror = () => {
-          this.playDjSynthFanfareOnly(slot.id);
+          this.playDjSynthFanfareOnly(slot.id, slot.synthFallback);
           if (typeof window !== 'undefined') {
             this.djDuckingFallbackTimer = window.setTimeout(finishJingle, 2600);
           } else {
@@ -146,7 +146,7 @@ class RetroSoundEffects {
         const playProm = jingleAudio.play();
         if (playProm && typeof playProm.catch === 'function') {
           playProm.catch(() => {
-            this.playDjSynthFanfareOnly(slot.id);
+            this.playDjSynthFanfareOnly(slot.id, slot.synthFallback);
             if (typeof window !== 'undefined') {
               this.djDuckingFallbackTimer = window.setTimeout(finishJingle, 2600);
             } else {
@@ -161,7 +161,7 @@ class RetroSoundEffects {
     }
 
     // Musical 80s Broadcast Jingle Chime (strictly NO window.speechSynthesis!)
-    this.playDjSynthFanfareOnly(slot.id);
+    this.playDjSynthFanfareOnly(slot.id, slot.synthFallback);
     if (typeof window !== 'undefined') {
       this.djDuckingFallbackTimer = window.setTimeout(finishJingle, 2800);
     } else {
@@ -191,13 +191,44 @@ class RetroSoundEffects {
   }
 
   private playDjSynthFanfareOnly(
-    slotId: DjJingleSlot['id']
+    slotId: DjJingleSlot['id'],
+    synthFallback?: DjJingleSlot['synthFallback']
   ): void {
     if (this.muted) return;
+    if (
+      synthFallback === 'airhorn' ||
+      synthFallback === 'scratch' ||
+      synthFallback === 'laser' ||
+      synthFallback === 'fog-hiss' ||
+      synthFallback === 'applause'
+    ) {
+      this.playDjSoundboardEffect(synthFallback);
+      return;
+    }
+    if (slotId === 'sample-5') {
+      this.playDjSoundboardEffect('airhorn');
+      return;
+    }
+    if (slotId === 'sample-6') {
+      this.playDjSoundboardEffect('scratch');
+      return;
+    }
+    if (slotId === 'sample-7') {
+      this.playDjSoundboardEffect('laser');
+      return;
+    }
+    if (slotId === 'sample-8') {
+      this.playDjSoundboardEffect('fog-hiss');
+      return;
+    }
+    if (slotId === 'sample-9') {
+      this.playDjSoundboardEffect('applause');
+      return;
+    }
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
-    const chordMap: Record<DjJingleSlot['id'], number[]> = {
+    const chordMap: Record<string, number[]> = {
       intro: [261.63, 329.63, 392.0, 523.25, 659.25],
       'last-round': [440.0, 554.37, 659.25, 880.0],
       'jam-battle': [293.66, 369.99, 440.0, 587.33, 739.99],
@@ -966,7 +997,160 @@ class RetroSoundEffects {
       noise.stop(now + 1.15);
     }
   }
+
+  /**
+   * 9. Authentic 80s 3-Klang-Gong (G4 – E4 – C4 warm chime harmonics via Web Audio API)
+   * for Hallen-Durchsagen & Abschlepp-Gong
+   */
+  public playThreeToneGong(): void {
+    if (this.muted) return;
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    // Classic German hall / station 3-tone chime: G4 (392 Hz) -> E4 (329.63 Hz) -> C4 (261.63 Hz)
+    const chimes = [
+      { freq: 392.0, offset: 0.0, duration: 0.95 },
+      { freq: 329.63, offset: 0.42, duration: 0.95 },
+      { freq: 261.63, offset: 0.84, duration: 1.55 },
+    ];
+    chimes.forEach((ch) => {
+      const t0 = now + ch.offset;
+      // Fundamental sine + warm bell overtone (2x & 3x)
+      [1, 2, 3].forEach((harmonic, hIdx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = hIdx === 0 ? 'sine' : 'triangle';
+        osc.frequency.setValueAtTime(ch.freq * harmonic, t0);
+        const amp =
+          ((this.volume || 0.7) * (hIdx === 0 ? 0.24 : hIdx === 1 ? 0.08 : 0.03));
+        gain.gain.setValueAtTime(0.0001, t0);
+        gain.gain.linearRampToValueAtTime(amp, t0 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0008, t0 + ch.duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t0);
+        osc.stop(t0 + ch.duration + 0.04);
+      });
+    });
+  }
+
+  /**
+   * 9. Hallen-Durchsage mit 3-Klang-Gong (Web Audio API) & Web Speech API Hall-Ansage
+   */
+  public triggerHallAnnouncementVoice(
+    speechText: string,
+    useThreeToneGong = true
+  ): void {
+    if (this.muted || typeof window === 'undefined') return;
+    this.unlockAudioContext();
+
+    // Activate 20% Auto-Ducking of hall music during announcement
+    this.djVoiceDuckingActive = true;
+    this.syncAudioGain();
+    this.notifyListeners();
+
+    if (useThreeToneGong) {
+      this.playThreeToneGong();
+    }
+
+    const delayMs = useThreeToneGong ? 1350 : 120;
+    window.setTimeout(() => {
+      if (this.muted) {
+        this.djVoiceDuckingActive = false;
+        this.syncAudioGain();
+        this.notifyListeners();
+        return;
+      }
+      if ('speechSynthesis' in window && speechText.trim()) {
+        try {
+          window.speechSynthesis.cancel();
+          const primary = new SpeechSynthesisUtterance(speechText);
+          primary.lang = 'de-DE';
+          primary.rate = 0.94;
+          primary.pitch = 0.92;
+          primary.volume = Math.min(1, (this.volume || 0.7) * 1.0);
+
+          // Subtle stadium hall echo utterance 110ms later at lower volume
+          const hallEcho = new SpeechSynthesisUtterance(speechText);
+          hallEcho.lang = 'de-DE';
+          hallEcho.rate = 0.94;
+          hallEcho.pitch = 0.88;
+          hallEcho.volume = Math.min(0.28, (this.volume || 0.7) * 0.26);
+
+          const restoreDucking = () => {
+            this.djVoiceDuckingActive = false;
+            this.syncAudioGain();
+            this.notifyListeners();
+          };
+          primary.onend = restoreDucking;
+          primary.onerror = restoreDucking;
+
+          window.speechSynthesis.speak(primary);
+          window.setTimeout(() => {
+            try {
+              if (!this.muted && window.speechSynthesis.speaking) {
+                // Trigger subtle Web Audio hall ambience pulse alongside voice
+                const ctx = this.getContext();
+                if (ctx) {
+                  const osc = ctx.createOscillator();
+                  const g = ctx.createGain();
+                  osc.type = 'sine';
+                  osc.frequency.setValueAtTime(130.81, ctx.currentTime);
+                  g.gain.setValueAtTime(0.015, ctx.currentTime);
+                  g.gain.exponentialRampToValueAtTime(
+                    0.0005,
+                    ctx.currentTime + 1.8
+                  );
+                  osc.connect(g);
+                  g.connect(ctx.destination);
+                  osc.start();
+                  osc.stop(ctx.currentTime + 1.85);
+                }
+              }
+            } catch {
+              // ignore
+            }
+          }, 110);
+
+          // Safety fallback to restore ducking after 9s
+          window.setTimeout(restoreDucking, 9000);
+          return;
+        } catch {
+          // fallback below
+        }
+      }
+
+      window.setTimeout(() => {
+        this.djVoiceDuckingActive = false;
+        this.syncAudioGain();
+        this.notifyListeners();
+      }, 2200);
+    }, delayMs);
+  }
+
+  /** High-energy 80s Strobe Flash synth pulse for DJ-Kanzel Show-Button */
+  public playStrobeZap(): void {
+    const ctx = this.getContext();
+    const out = this.getOutputNode();
+    if (!ctx || !out) return;
+    const now = ctx.currentTime;
+    for (let i = 0; i < 5; i++) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      const t0 = now + i * 0.075;
+      osc.frequency.setValueAtTime(1600 - i * 150, t0);
+      osc.frequency.exponentialRampToValueAtTime(120, t0 + 0.065);
+      gain.gain.setValueAtTime(0.09, t0);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.07);
+      osc.connect(gain);
+      gain.connect(out);
+      osc.start(t0);
+      osc.stop(t0 + 0.072);
+    }
+  }
 }
 
 export const soundFX = new RetroSoundEffects();
+
 

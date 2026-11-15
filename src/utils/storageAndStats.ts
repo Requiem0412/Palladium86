@@ -21,6 +21,7 @@ import {
   PALLADIUM_CHALLENGES,
   ProShopUpgradesState,
   RadioTrackItem,
+  StationDialogId,
 } from '../config/arenaConfig';
 
 const KEYS = {
@@ -126,12 +127,17 @@ export interface LocalAlphaBetaSession {
 export type SingleplayerDifficulty = 'beginner' | 'intermediate' | 'pro';
 export type FreeDrinkChoice = 'slush' | 'bloba' | 'combo';
 
+export type AvatarCliqueRole = 'standard' | 'kid' | 'stammgast';
+export type SundayCliqueTicket = 'duo' | 'trio';
+export type MobilityChoice = 'own-skates' | 'rental-skates' | 'wheelchair';
+
 export interface EntryPassData {
   active?: boolean;
   locked: boolean;
   difficulty: SingleplayerDifficulty;
   hasOwnSkates: boolean;
   hasRentedSkates: boolean;
+  mobilityChoice?: MobilityChoice | null;
   drinkChipAvailable: boolean;
   freeDrinkChoice?: FreeDrinkChoice;
   stampedAt?: string;
@@ -182,6 +188,8 @@ export interface LockerPlayerSettings {
   vipDiscoSkatesEquipped: boolean;
   drinksInLocker: number;
   collectibles?: string[];
+  avatarRole?: AvatarCliqueRole;
+  sundayCliqueTicket?: SundayCliqueTicket;
 }
 
 export interface AdminPersistentSettings {
@@ -214,11 +222,29 @@ export interface AdminPersistentSettings {
   neonLightboxLine2?: string;
   neonLightboxLine3?: string;
   familyDayActive?: boolean;
+  sundayCliqueMode?: boolean;
+  sundayCliqueAutoSunday?: boolean;
   liveEventActive?: boolean;
+  vipGuestListOnly?: boolean;
+  handheldActionIds?: string[];
   concertLightingMode: ConcertLightingMode;
   liveArenaStyle: ArenaVisualStyle;
   crewNames: CrewNamesConfig;
+  crewPortraits?: Partial<Record<StationDialogId, string>>;
+  crewQuotes?: Partial<Record<StationDialogId, string>>;
   djJingleSlots: DjJingleSlot[];
+  songRequests?: {
+    id: string;
+    trackTitle: string;
+    requestedBy: string;
+    createdAt: string;
+    played?: boolean;
+  }[];
+  newspaperEnabled?: boolean;
+  newspaperIssueId?: number;
+  newspaperHeadline?: string;
+  newspaperBody?: string;
+  newspaperUpdatedAt?: string;
 }
 
 function getTodayDateString(): string {
@@ -606,11 +632,31 @@ export function loadAdminSettings(): AdminPersistentSettings {
     neonLightboxLine2: 'DJ MAGIC FORCE',
     neonLightboxLine3: 'AB 21:00 UHR',
     familyDayActive: false,
+    sundayCliqueMode: new Date().getDay() === 0,
+    sundayCliqueAutoSunday: true,
     liveEventActive: false,
+    vipGuestListOnly: false,
+    handheldActionIds: [
+      'light_disco',
+      'light_blacklight',
+      'fog_burst',
+      'direction',
+      'mode_ball',
+      'putzlicht',
+    ],
     concertLightingMode: 'auto',
     liveArenaStyle: 'classic-neon',
     crewNames: { ...DEFAULT_CREW_NAMES },
+    crewPortraits: {},
+    crewQuotes: {},
     djJingleSlots: DEFAULT_DJ_JINGLE_SLOTS.map((s) => ({ ...s })),
+    newspaperEnabled: true,
+    newspaperIssueId: 1,
+    newspaperHeadline:
+      'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
+    newspaperBody:
+      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.\n\nTipp der Redaktion: Klicke oben im HUD auf deinen mittleren Avatar-Kreis für deine persönliche „Entdecker auf acht Rollen“-Urkunde – und lies regelmäßig den Palladium-Kurier, um dir nach 5 Ausgaben die Gold-Urkunde „Vielleser auf Rollen“ zu sichern!',
+    newspaperUpdatedAt: '15.11.2026',
   };
   try {
     const raw = localStorage.getItem(KEYS.ADMIN_SETTINGS);
@@ -652,6 +698,14 @@ export function loadAdminSettings(): AdminPersistentSettings {
         ...parsed,
         cinemaWeekdays: mergedWeekdays,
         crewNames: mergedCrewNames,
+        crewPortraits:
+          parsed.crewPortraits && typeof parsed.crewPortraits === 'object'
+            ? parsed.crewPortraits
+            : {},
+        crewQuotes:
+          parsed.crewQuotes && typeof parsed.crewQuotes === 'object'
+            ? parsed.crewQuotes
+            : {},
         djJingleSlots: mergedJingleSlots,
       };
     }
@@ -659,6 +713,260 @@ export function loadAdminSettings(): AdminPersistentSettings {
     // fallback
   }
   return defaults;
+}
+
+const cachedProceduralPortraits: Partial<Record<StationDialogId, string>> = {};
+
+/**
+ * Generates an authentic 16-Bit Arcade Pixel Portrait (48x48 upscaled to 192x192)
+ * for each of the 5 Palladium '86 stations when no custom photo is uploaded.
+ */
+export function getStation16BitPortraitDataUrl(
+  stationId: StationDialogId,
+  customPortraitUrl?: string
+): string {
+  if (customPortraitUrl && customPortraitUrl.trim().length > 0) {
+    return customPortraitUrl;
+  }
+  if (cachedProceduralPortraits[stationId]) {
+    return cachedProceduralPortraits[stationId]!;
+  }
+  if (typeof document === 'undefined') return '';
+
+  const grid = 24;
+  const smallCanvas = document.createElement('canvas');
+  smallCanvas.width = grid;
+  smallCanvas.height = grid;
+  const sCtx = smallCanvas.getContext('2d');
+  if (!sCtx) return '';
+  sCtx.imageSmoothingEnabled = false;
+
+  const px = (x: number, y: number, w: number, h: number, color: string) => {
+    sCtx.fillStyle = color;
+    sCtx.fillRect(x, y, w, h);
+  };
+
+  const palettes: Record<
+    StationDialogId,
+    {
+      bgTop: string;
+      bgBot: string;
+      hair: string;
+      skin: string;
+      skinShadow: string;
+      shirt: string;
+      accent: string;
+      visorOrBand: string;
+      accessory: 'visor' | 'headband' | 'sunglasses' | 'cap' | 'headphones';
+    }
+  > = {
+    kasse: {
+      bgTop: '#1e1b4b',
+      bgBot: '#4c1d95',
+      hair: '#f59e0b',
+      skin: '#fed7aa',
+      skinShadow: '#fdba74',
+      shirt: '#ec4899',
+      accent: '#fde047',
+      visorOrBand: '#00f0ff',
+      accessory: 'visor',
+    },
+    verleih: {
+      bgTop: '#172554',
+      bgBot: '#0f766e',
+      hair: '#9a3412',
+      skin: '#fde68a',
+      skinShadow: '#f59e0b',
+      shirt: '#fb923c',
+      accent: '#39ff14',
+      visorOrBand: '#ff2a85',
+      accessory: 'headband',
+    },
+    proshop: {
+      bgTop: '#090d16',
+      bgBot: '#0e7490',
+      hair: '#1e293b',
+      skin: '#fed7aa',
+      skinShadow: '#fb923c',
+      shirt: '#00f0ff',
+      accent: '#fde047',
+      visorOrBand: '#ff2a85',
+      accessory: 'sunglasses',
+    },
+    snackbar: {
+      bgTop: '#3b0764',
+      bgBot: '#831843',
+      hair: '#d97706',
+      skin: '#ffedd5',
+      skinShadow: '#fdba74',
+      shirt: '#ff2a85',
+      accent: '#00f0ff',
+      visorOrBand: '#39ff14',
+      accessory: 'cap',
+    },
+    dj: {
+      bgTop: '#0f172a',
+      bgBot: '#581c87',
+      hair: '#111827',
+      skin: '#f5d0fe',
+      skinShadow: '#d8b4fe',
+      shirt: '#a855f7',
+      accent: '#00f0ff',
+      visorOrBand: '#fde047',
+      accessory: 'headphones',
+    },
+  };
+
+  const pal = palettes[stationId] || palettes.kasse;
+
+  // 16-Bit Arcade Background with Horizon Grid Stripes
+  px(0, 0, grid, 12, pal.bgTop);
+  px(0, 12, grid, 12, pal.bgBot);
+  px(0, 11, grid, 1, pal.accent);
+  for (let y = 14; y < grid; y += 3) {
+    px(0, y, grid, 1, 'rgba(255,255,255,0.12)');
+  }
+
+  // Shoulders & 80s Neon Jacket / Shirt
+  px(4, 17, 16, 7, '#090d16'); // 1px dark outline
+  px(5, 18, 14, 6, pal.shirt);
+  px(9, 18, 6, 6, pal.accent); // Inner collar / V-neck
+
+  // Neck & Head Outline
+  px(9, 15, 6, 3, pal.skinShadow);
+  px(6, 5, 12, 11, '#090d16');
+  px(7, 6, 10, 9, pal.skin);
+  px(7, 13, 10, 2, pal.skinShadow);
+
+  // 80s Hair Volume
+  px(5, 3, 14, 4, pal.hair);
+  px(5, 6, 2, 7, pal.hair);
+  px(17, 6, 2, 7, pal.hair);
+
+  // Eyes & Smile
+  px(9, 9, 2, 2, '#090d16');
+  px(13, 9, 2, 2, '#090d16');
+  px(9, 9, 1, 1, '#ffffff');
+  px(13, 9, 1, 1, '#ffffff');
+  px(10, 12, 4, 1, '#be123c');
+
+  // Station-Specific 80s Accessory
+  if (pal.accessory === 'visor') {
+    px(6, 6, 12, 2, pal.visorOrBand);
+    px(5, 7, 14, 1, '#00f0ff');
+  } else if (pal.accessory === 'headband') {
+    px(6, 6, 12, 2, pal.visorOrBand);
+    px(7, 6, 10, 1, '#fde047');
+  } else if (pal.accessory === 'sunglasses') {
+    px(7, 8, 10, 3, '#090d16');
+    px(8, 9, 3, 1, '#00f0ff');
+    px(13, 9, 3, 1, '#ff2a85');
+  } else if (pal.accessory === 'cap') {
+    px(6, 2, 12, 4, pal.visorOrBand);
+    px(6, 5, 14, 1, pal.accent);
+  } else if (pal.accessory === 'headphones') {
+    px(4, 3, 16, 2, pal.visorOrBand);
+    px(3, 5, 3, 6, pal.accent);
+    px(18, 5, 3, 6, pal.accent);
+    px(7, 8, 10, 2, '#090d16');
+  }
+
+  // Upscale to 192x192 with crisp nearest-neighbor pixels
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = 192;
+  outCanvas.height = 192;
+  const oCtx = outCanvas.getContext('2d');
+  if (!oCtx) return smallCanvas.toDataURL('image/png');
+  oCtx.imageSmoothingEnabled = false;
+  oCtx.drawImage(smallCanvas, 0, 0, 192, 192);
+
+  // Subtle 16-bit CRT scanline overlay
+  oCtx.fillStyle = 'rgba(0, 0, 0, 0.14)';
+  for (let y = 0; y < 192; y += 4) {
+    oCtx.fillRect(0, y, 192, 1);
+  }
+
+  const dataUrl = outCanvas.toDataURL('image/png');
+  cachedProceduralPortraits[stationId] = dataUrl;
+  return dataUrl;
+}
+
+/**
+ * Automatic 16-Bit Pixel-Art Filter for Admin-Crew-Galerie photo uploads:
+ * Center-crops the image, downscales to 48x48 pixels, applies 16-bit retro color
+ * quantization + ordered Bayer dithering, and upscales to a crisp 192x192 PNG DataURL.
+ */
+export function convertImageFileTo16BitPixelDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Datei konnte nicht gelesen werden'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Bild konnte nicht geladen werden'));
+      img.onload = () => {
+        const pixelRes = 48;
+        const small = document.createElement('canvas');
+        small.width = pixelRes;
+        small.height = pixelRes;
+        const sCtx = small.getContext('2d');
+        if (!sCtx) {
+          resolve(String(reader.result || ''));
+          return;
+        }
+        sCtx.imageSmoothingEnabled = false;
+
+        // Center-crop square
+        const side = Math.min(img.width, img.height);
+        const sx = Math.max(0, Math.floor((img.width - side) / 2));
+        const sy = Math.max(0, Math.floor((img.height - side) / 2));
+        sCtx.drawImage(img, sx, sy, side, side, 0, 0, pixelRes, pixelRes);
+
+        const imgData = sCtx.getImageData(0, 0, pixelRes, pixelRes);
+        const d = imgData.data;
+        const bayer2x2 = [
+          [-6, 6],
+          [10, -2],
+        ];
+        for (let y = 0; y < pixelRes; y++) {
+          for (let x = 0; x < pixelRes; x++) {
+            const idx = (y * pixelRes + x) * 4;
+            const dither = bayer2x2[y % 2][x % 2];
+            // Boost contrast slightly + quantize to 16-bit arcade steps (step 32)
+            const quantize = (v: number) => {
+              const contrasted = (v - 128) * 1.18 + 128 + dither;
+              const clamped = Math.max(0, Math.min(255, contrasted));
+              return Math.min(255, Math.round(clamped / 36) * 36);
+            };
+            d[idx] = quantize(d[idx]);
+            d[idx + 1] = quantize(d[idx + 1]);
+            d[idx + 2] = quantize(d[idx + 2]);
+          }
+        }
+        sCtx.putImageData(imgData, 0, 0);
+
+        const out = document.createElement('canvas');
+        out.width = 192;
+        out.height = 192;
+        const oCtx = out.getContext('2d');
+        if (!oCtx) {
+          resolve(small.toDataURL('image/png'));
+          return;
+        }
+        oCtx.imageSmoothingEnabled = false;
+        oCtx.drawImage(small, 0, 0, 192, 192);
+
+        // Add crisp 16-bit scanlines
+        oCtx.fillStyle = 'rgba(0, 0, 0, 0.16)';
+        for (let y = 0; y < 192; y += 4) {
+          oCtx.fillRect(0, y, 192, 1);
+        }
+
+        resolve(out.toDataURL('image/png'));
+      };
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 export function saveAdminSettings(settings: AdminPersistentSettings): void {
@@ -782,12 +1090,19 @@ export function loadEntryPass(): EntryPassData | null {
           parsed.difficulty === 'pro'
             ? parsed.difficulty
             : 'intermediate';
+        const mobilityChoice: MobilityChoice | null =
+          parsed.mobilityChoice === 'own-skates' ||
+          parsed.mobilityChoice === 'rental-skates' ||
+          parsed.mobilityChoice === 'wheelchair'
+            ? parsed.mobilityChoice
+            : null;
         return {
           active: true,
           locked: true,
           difficulty: diff,
           hasOwnSkates: Boolean(parsed.hasOwnSkates),
           hasRentedSkates: Boolean(parsed.hasRentedSkates),
+          mobilityChoice,
           drinkChipAvailable:
             typeof parsed.drinkChipAvailable === 'boolean'
               ? parsed.drinkChipAvailable
@@ -1366,7 +1681,8 @@ export type CertificateId =
   | 'allrounder_50'
   | 'legende_100'
   | 'dj_livestream'
-  | 'liveband_abend';
+  | 'liveband_abend'
+  | 'vielleser_5';
 
 export interface CertificateDefinition {
   id: CertificateId;
@@ -1474,6 +1790,16 @@ export const PALLADIUM_CERTIFICATES: CertificateDefinition[] = [
     tier: 'gold',
     isMultiTierEvent: true,
   },
+  {
+    id: 'vielleser_5',
+    title: 'Vielleser auf Rollen',
+    subtitle: 'Offizieller Stammleser des Palladium-Kuriers',
+    description:
+      'Verliehen für das Lesen von 5 verschiedenen Ausgaben der offiziellen 80er-Hallenzeitung „Der Palladium-Kurier – Hanau ’86“.',
+    icon: '📰',
+    tier: 'gold',
+    hasRedWaxSeal: true,
+  },
 ];
 
 export interface PalladiumCertificatesState {
@@ -1486,6 +1812,7 @@ export interface PalladiumCertificatesState {
   livebandCount?: number;
   djLivestreamSessions?: string[];
   livebandSessions?: string[];
+  readNewspaperIssues?: number[];
   unlocked: Partial<
     Record<
       CertificateId,
@@ -1515,6 +1842,7 @@ export function loadCertificatesState(): PalladiumCertificatesState {
     livebandCount: 0,
     djLivestreamSessions: [],
     livebandSessions: [],
+    readNewspaperIssues: [],
     unlocked: {},
   };
   try {
@@ -1545,6 +1873,15 @@ export function loadCertificatesState(): PalladiumCertificatesState {
           : [],
         livebandSessions: Array.isArray(parsed.livebandSessions)
           ? parsed.livebandSessions.map(String)
+          : [],
+        readNewspaperIssues: Array.isArray(parsed.readNewspaperIssues)
+          ? Array.from(
+              new Set(
+                parsed.readNewspaperIssues
+                  .map((n: unknown) => Number(n))
+                  .filter((n: number) => Number.isFinite(n) && n > 0)
+              )
+            )
           : [],
         unlocked:
           parsed.unlocked && typeof parsed.unlocked === 'object'
