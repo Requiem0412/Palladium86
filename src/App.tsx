@@ -561,8 +561,18 @@ export function App() {
     initialEntryPass?.difficulty || 'intermediate'
   );
   const [mobilityChoice, setMobilityChoice] = useState<MobilityChoice | null>(
-    () => initialEntryPass?.mobilityChoice ?? null
+    () =>
+      initialEntryPass?.mobilityChoice ??
+      (initialEntryPass?.hasOwnSkates
+        ? 'own-skates'
+        : initialEntryPass?.hasRentedSkates
+        ? 'rental-skates'
+        : null)
   );
+  const mobilityChoiceRef = useRef<MobilityChoice | null>(mobilityChoice);
+  useEffect(() => {
+    mobilityChoiceRef.current = mobilityChoice;
+  }, [mobilityChoice]);
   const [hasOwnSkates, setHasOwnSkates] = useState<boolean>(
     Boolean(initialEntryPass?.hasOwnSkates)
   );
@@ -580,8 +590,20 @@ export function App() {
     initialEntryPass ? initialEntryPass.drinkChipAvailable : !loadFirstVisitSlushClaimed()
   );
 
+  // Regie 4-Tab-Leiste Ein-/Ausklapp-Status & Zeitungs-Banner Schließen/Auto-Hide Status
+  const [isAdminTabsCollapsed, setIsAdminTabsCollapsed] =
+    useState<boolean>(false);
+  const [isAdminTabsAutoHide, setIsAdminTabsAutoHide] =
+    useState<boolean>(false);
+  const [dismissedNewspaperIssueId, setDismissedNewspaperIssueId] = useState<
+    number | null
+  >(null);
+  const [newspaperBannerAutoHidden, setNewspaperBannerAutoHidden] =
+    useState<boolean>(false);
+
   const handleSelectMobilityChoice = useCallback(
     (choice: MobilityChoice) => {
+      mobilityChoiceRef.current = choice;
       setMobilityChoice(choice);
       if (choice === 'own-skates') {
         setCharacterMode('skater');
@@ -596,6 +618,7 @@ export function App() {
         setHasOwnSkates(false);
         setHasRentedSkates(false);
       }
+      setGuestJoinError(null);
       if (bouncerMessage?.includes('Bitte wähle erst deine Rollschuhe')) {
         setBouncerMessage(null);
       }
@@ -3320,7 +3343,9 @@ export function App() {
         );
         return;
       }
-      if (!mobilityChoice) {
+      const activeMobilityChoice =
+        mobilityChoiceRef.current ?? mobilityChoice;
+      if (!activeMobilityChoice) {
         const skateMsg =
           'Bitte wähle erst deine Rollschuhe, Leihrollschuhe oder den Rollstuhl aus!';
         setGuestJoinError(skateMsg);
@@ -4064,10 +4089,24 @@ export function App() {
     adminSettings.newspaperEnabled !== false &&
     !readNewspaperIssuesList.includes(currentNewspaperIssueId);
 
+  // Auto-hide the bottom-right golden newspaper banner after 10 seconds (or when walking away from entrance)
+  useEffect(() => {
+    if (!isCurtainOpen || adminSettings.newspaperEnabled === false) return;
+    setNewspaperBannerAutoHidden(false);
+    const timer = window.setTimeout(() => {
+      setNewspaperBannerAutoHidden(true);
+    }, 10000);
+    return () => window.clearTimeout(timer);
+  }, [isCurtainOpen, currentNewspaperIssueId, adminSettings.newspaperEnabled]);
+
   const handleOpenNewspaperModal = useCallback(() => {
     soundFX.unlockAudioContext();
     soundFX.playChallengeUnlocked();
     setShowNewspaperModal(true);
+    setDismissedNewspaperIssueId(
+      Math.max(1, Number(adminSettings.newspaperIssueId) || 1)
+    );
+    setNewspaperBannerAutoHidden(true);
 
     const cur = certificatesStateRef.current;
     const prevIssues = Array.isArray(cur.readNewspaperIssues)
@@ -5934,33 +5973,51 @@ export function App() {
           onOpenNewspaperModal={handleOpenNewspaperModal}
         />
 
-        {/* ZEITUNGSSTÄNDER VORNE IM EINGANGSBEREICH ("DER PALLADIUM-KURIER" MIT BLINKENDEM "NEU!"-BADGE) */}
+        {/* ZEITUNGSSTÄNDER VORNE IM EINGANGSBEREICH ("DER PALLADIUM-KURIER" MIT BLINKENDEM "NEU!"-BADGE, AUTO-HIDE & SCHLIESSEN-BUTTON) */}
         {isCurtainOpen &&
           !isBlockedByMaintenance &&
-          adminSettings.newspaperEnabled !== false && (
-            <button
-              type="button"
-              onClick={handleOpenNewspaperModal}
-              title={`Der Palladium-Kurier (Ausgabe #${currentNewspaperIssueId}) • Gelesene Ausgaben: ${readNewspaperIssuesList.length}/5 für „Vielleser auf Rollen“-Urkunde`}
-              className="z-30 absolute bottom-10 right-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#26180c]/95 via-[#18122b]/95 to-[#26180c]/95 hover:from-[#382311] hover:to-[#271b42] border-2 border-amber-400 shadow-[0_0_22px_rgba(251,191,36,0.5)] cursor-pointer transition group"
-            >
-              <span className="text-lg group-hover:scale-110 transition">
-                📰
-              </span>
-              <div className="text-left font-mono leading-tight">
-                <div className="text-[11px] font-black text-amber-200 tracking-wide">
-                  Der Palladium-Kurier
-                </div>
-                <div className="text-[9.5px] text-cyan-300">
-                  Ausgabe #{currentNewspaperIssueId} • Eingang/Empfang
-                </div>
-              </div>
-              {hasUnreadNewspaperIssue && (
-                <span className="px-1.5 py-0.5 rounded-md bg-rose-600 text-white font-mono text-[9.5px] font-black border border-white animate-bounce shadow-[0_0_10px_rgba(244,63,94,0.9)]">
-                  NEU!
+          adminSettings.newspaperEnabled !== false &&
+          dismissedNewspaperIssueId !== currentNewspaperIssueId &&
+          hasUnreadNewspaperIssue &&
+          (!newspaperBannerAutoHidden || telemetry.nearCashier) && (
+            <div className="z-30 absolute bottom-10 right-4 flex items-center rounded-xl bg-gradient-to-r from-[#26180c]/95 via-[#18122b]/95 to-[#26180c]/95 border-2 border-amber-400 shadow-[0_0_22px_rgba(251,191,36,0.5)] overflow-hidden">
+              <button
+                type="button"
+                onClick={handleOpenNewspaperModal}
+                title={`Der Palladium-Kurier (Ausgabe #${currentNewspaperIssueId}) • Gelesene Ausgaben: ${readNewspaperIssuesList.length}/5 für „Vielleser auf Rollen“-Urkunde`}
+                className="flex items-center gap-2 pl-3 pr-2 py-1.5 hover:bg-amber-500/15 cursor-pointer transition group"
+              >
+                <span className="text-lg group-hover:scale-110 transition">
+                  📰
                 </span>
-              )}
-            </button>
+                <div className="text-left font-mono leading-tight">
+                  <div className="text-[11px] font-black text-amber-200 tracking-wide">
+                    Der Palladium-Kurier
+                  </div>
+                  <div className="text-[9.5px] text-cyan-300">
+                    Ausgabe #{currentNewspaperIssueId} • Eingang/Empfang
+                  </div>
+                </div>
+                {hasUnreadNewspaperIssue && (
+                  <span className="px-1.5 py-0.5 rounded-md bg-rose-600 text-white font-mono text-[9.5px] font-black border border-white animate-bounce shadow-[0_0_10px_rgba(244,63,94,0.9)]">
+                    NEU!
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDismissedNewspaperIssueId(currentNewspaperIssueId);
+                  setNewspaperBannerAutoHidden(true);
+                }}
+                title="Hinweis-Banner schließen"
+                aria-label="Hinweis-Banner schließen"
+                className="self-stretch px-2.5 flex items-center justify-center border-l border-amber-400/40 bg-black/30 hover:bg-rose-600 text-amber-200 hover:text-white font-mono text-sm font-black cursor-pointer transition"
+              >
+                ×
+              </button>
+            </div>
           )}
 
         {/* 7. RETRO-BANNER AUF DER BAHN FÜR SONNTAGS-CLIQUE-MODUS (2+1-REGEL) */}
@@ -9519,6 +9576,38 @@ export function App() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
                     type="button"
+                    onClick={() => setIsAdminTabsCollapsed((prev) => !prev)}
+                    className={`min-h-[34px] px-3 py-1 rounded font-mono text-xs font-bold border cursor-pointer transition ${
+                      isAdminTabsCollapsed
+                        ? 'bg-cyan-500 text-slate-950 border-white shadow-[0_0_12px_rgba(34,211,238,0.5)]'
+                        : 'bg-slate-900 hover:bg-slate-800 border-cyan-400/60 text-cyan-200'
+                    }`}
+                    title="Obere 4-Tab-Kachelleiste ein- oder ausklappen, um mehr Platz im Regie-Fenster zu schaffen"
+                  >
+                    {isAdminTabsCollapsed
+                      ? '▼ 4-Tab-Leiste ausklappen'
+                      : '▲ 4-Tab-Leiste einklappen'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextAuto = !isAdminTabsAutoHide;
+                      setIsAdminTabsAutoHide(nextAuto);
+                      if (nextAuto) {
+                        setIsAdminTabsCollapsed(true);
+                      }
+                    }}
+                    className={`min-h-[34px] px-2.5 py-1 rounded font-mono text-[11px] font-bold border cursor-pointer transition ${
+                      isAdminTabsAutoHide
+                        ? 'bg-emerald-500 text-slate-950 border-white'
+                        : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-300'
+                    }`}
+                    title="Wenn aktiv, klappt die 4-Tab-Leiste automatisch ein, sobald du mit der Maus nach unten in die Regie fährst"
+                  >
+                    Auto-Hide: {isAdminTabsAutoHide ? 'AN' : 'AUS'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => {
                       const nextState = !buildModeEnabled;
                       setBuildModeEnabled(nextState);
@@ -9556,61 +9645,120 @@ export function App() {
                 </div>
               </div>
 
-              {/* 4 GROSSE HAUPT-REITER (TABS) IM KLAREN KACHEL-/BUTTON-STIL */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                {(
-                  [
-                    {
-                      id: 'track' as const,
-                      label: '🛼 Tab 1: Bahn, Shows & Fahrtrichtung',
-                      sub: 'Modi, Springer-Staffel, Richtung & Live-Monitor',
-                    },
-                    {
-                      id: 'light_dj' as const,
-                      label: '🎛️ Tab 2: Licht, DJ & Kino',
-                      sub: 'Mittel-Arena, Licht/Nebel, Jingles, Radio & Kino',
-                    },
-                    {
-                      id: 'access' as const,
-                      label: `🔑 Tab 3: Zugang, Alpha/Beta & Besucher${
-                        testerFeedbackList.length > 0
-                          ? ` (${testerFeedbackList.length} 💬)`
-                          : ''
-                      }`,
-                      sub: 'Keys, Feedback, Wartung, Crew, Statistik & MP',
-                    },
-                    {
-                      id: 'look_build' as const,
-                      label: '🎨 Tab 4: Hallen-Look & Baumenü',
-                      sub: 'Bahn-Styles, 16-Bit/CRT & Kachel-Baumenü',
-                    },
-                  ] as const
-                ).map((tab) => {
-                  const active = adminTab === tab.id;
-                  return (
+              {/* 4 GROSSE HAUPT-REITER (TABS) IM KLAREN KACHEL-/BUTTON-STIL — EIN-/AUSKLAPPBAR & AUTO-HIDE */}
+              <div
+                onMouseEnter={() => {
+                  if (isAdminTabsAutoHide) setIsAdminTabsCollapsed(false);
+                }}
+                onMouseLeave={() => {
+                  if (isAdminTabsAutoHide) setIsAdminTabsCollapsed(true);
+                }}
+              >
+                {isAdminTabsCollapsed ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-slate-900/95 border border-cyan-500/40">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-[10px] text-slate-400 uppercase mr-1">
+                        Aktiver Reiter:
+                      </span>
+                      {(
+                        [
+                          { id: 'track' as const, short: '🛼 Tab 1: Bahn & Shows' },
+                          { id: 'light_dj' as const, short: '🎛️ Tab 2: Licht, DJ & Kino' },
+                          {
+                            id: 'access' as const,
+                            short: `🔑 Tab 3: Zugang & Besucher${
+                              testerFeedbackList.length > 0
+                                ? ` (${testerFeedbackList.length})`
+                                : ''
+                            }`,
+                          },
+                          { id: 'look_build' as const, short: '🎨 Tab 4: Look & Baumenü' },
+                        ] as const
+                      ).map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => setAdminTab(t.id)}
+                          className={`px-2.5 py-1 rounded-lg font-mono text-xs font-bold border cursor-pointer transition ${
+                            adminTab === t.id
+                              ? 'bg-gradient-to-r from-amber-400 to-cyan-400 text-slate-950 border-white'
+                              : 'bg-slate-950 hover:bg-slate-800 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          {t.short}
+                        </button>
+                      ))}
+                    </div>
                     <button
-                      key={tab.id}
                       type="button"
-                      onClick={() => setAdminTab(tab.id)}
-                      className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
-                        active
-                          ? 'bg-gradient-to-r from-amber-400 to-cyan-400 text-slate-950 border-white shadow-[0_0_18px_rgba(34,211,238,0.45)]'
-                          : 'bg-slate-900/95 hover:bg-slate-800 border-slate-700 text-white'
-                      }`}
+                      onClick={() => setIsAdminTabsCollapsed(false)}
+                      className="px-2.5 py-1 rounded bg-cyan-950 hover:bg-cyan-900 border border-cyan-400/60 text-cyan-200 font-mono text-[11px] font-bold cursor-pointer"
                     >
-                      <div className="font-mono font-bold text-xs sm:text-sm">
-                        {tab.label}
-                      </div>
-                      <div
-                        className={`text-[10px] font-mono mt-0.5 ${
-                          active ? 'text-slate-900 font-bold' : 'text-slate-400'
-                        }`}
-                      >
-                        {tab.sub}
-                      </div>
+                      ▼ Große Kacheln zeigen
                     </button>
-                  );
-                })}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                    {(
+                      [
+                        {
+                          id: 'track' as const,
+                          label: '🛼 Tab 1: Bahn, Shows & Fahrtrichtung',
+                          sub: 'Modi, Springer-Staffel, Richtung & Live-Monitor',
+                        },
+                        {
+                          id: 'light_dj' as const,
+                          label: '🎛️ Tab 2: Licht, DJ & Kino',
+                          sub: 'Mittel-Arena, Licht/Nebel, Jingles, Radio & Kino',
+                        },
+                        {
+                          id: 'access' as const,
+                          label: `🔑 Tab 3: Zugang, Alpha/Beta & Besucher${
+                            testerFeedbackList.length > 0
+                              ? ` (${testerFeedbackList.length} 💬)`
+                              : ''
+                          }`,
+                          sub: 'Keys, Feedback, Wartung, Crew, Statistik & MP',
+                        },
+                        {
+                          id: 'look_build' as const,
+                          label: '🎨 Tab 4: Hallen-Look & Baumenü',
+                          sub: 'Bahn-Styles, 16-Bit/CRT & Kachel-Baumenü',
+                        },
+                      ] as const
+                    ).map((tab) => {
+                      const active = adminTab === tab.id;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => {
+                            setAdminTab(tab.id);
+                            if (isAdminTabsAutoHide) {
+                              setIsAdminTabsCollapsed(true);
+                            }
+                          }}
+                          className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                            active
+                              ? 'bg-gradient-to-r from-amber-400 to-cyan-400 text-slate-950 border-white shadow-[0_0_18px_rgba(34,211,238,0.45)]'
+                              : 'bg-slate-900/95 hover:bg-slate-800 border-slate-700 text-white'
+                          }`}
+                        >
+                          <div className="font-mono font-bold text-xs sm:text-sm">
+                            {tab.label}
+                          </div>
+                          <div
+                            className={`text-[10px] font-mono mt-0.5 ${
+                              active ? 'text-slate-900 font-bold' : 'text-slate-400'
+                            }`}
+                          >
+                            {tab.sub}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* TAB 1: 🛼 BAHN, SHOWS & FAHRTRICHTUNG */}
@@ -13236,7 +13384,7 @@ export function App() {
         {/* 9. 80s MULTIPLAYER INVITATION WELCOME MODAL (?room=<RAUM_ID>)         */}
         {/* ===================================================================== */}
         {showGuestJoinModal && initialUrlRoomId && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-md">
+          <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/85 p-4 overflow-y-auto backdrop-blur-md">
             <div className="w-full max-w-lg rounded-2xl bg-[#120D20] border-2 border-cyan-400 shadow-[0_0_55px_rgba(0,240,255,0.45)] p-5 text-white space-y-4">
               <div className="text-center space-y-1">
                 <span className="inline-block px-2.5 py-0.5 rounded-full bg-cyan-950 border border-cyan-400/60 font-mono text-[10px] text-cyan-300 uppercase">
@@ -13287,6 +13435,82 @@ export function App() {
                   )}
                 </div>
 
+                {/* ROLLSCHUH- & ROLLSTUHL-AUSWAHL DIREKT IM LIVE-EINLADUNGS-MODAL */}
+                <div className="p-3 rounded-xl bg-slate-950/90 border border-emerald-400/50 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs font-bold text-emerald-300 uppercase">
+                      🛼 Wie rollst du rein? (Pflichtwahl):
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border ${
+                        mobilityChoice
+                          ? 'bg-emerald-950 border-emerald-400 text-emerald-200'
+                          : 'bg-rose-950 border-rose-400 text-rose-200 animate-pulse'
+                      }`}
+                    >
+                      {mobilityChoice === 'own-skates'
+                        ? '✓ Eigene Rollschuhe'
+                        : mobilityChoice === 'rental-skates'
+                        ? '✓ Leihrollschuhe'
+                        : mobilityChoice === 'wheelchair'
+                        ? '✓ Rollstuhl (Neon)'
+                        : 'Bitte antippen!'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {(
+                      [
+                        {
+                          id: 'own-skates' as MobilityChoice,
+                          title: '🛼 Eigene Rollschuhe',
+                          sub: 'Custom-Skates (+10% Antritt)',
+                          activeClass:
+                            'bg-emerald-500 text-slate-950 border-white shadow-[0_0_14px_rgba(16,185,129,0.5)] font-black',
+                        },
+                        {
+                          id: 'rental-skates' as MobilityChoice,
+                          title: '🎟️ Leihrollschuhe',
+                          sub: '80er Palladium Verleih-Skates',
+                          activeClass:
+                            'bg-sky-400 text-slate-950 border-white shadow-[0_0_14px_rgba(56,189,248,0.5)] font-black',
+                        },
+                        {
+                          id: 'wheelchair' as MobilityChoice,
+                          title: '♿ Rollstuhl',
+                          sub: 'Barrierefrei mit Neon-Rädern',
+                          activeClass:
+                            'bg-cyan-400 text-slate-950 border-white shadow-[0_0_14px_rgba(34,211,238,0.55)] font-black',
+                        },
+                      ] as const
+                    ).map((opt) => {
+                      const active = mobilityChoice === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => handleSelectMobilityChoice(opt.id)}
+                          className={`p-2 rounded-xl border text-left transition cursor-pointer ${
+                            active
+                              ? opt.activeClass
+                              : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
+                          }`}
+                        >
+                          <div className="font-mono font-bold text-xs">
+                            {opt.title}
+                          </div>
+                          <div
+                            className={`text-[10px] mt-0.5 ${
+                              active ? 'text-slate-900 font-semibold' : 'text-slate-400'
+                            }`}
+                          >
+                            {opt.sub}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <div>
                   <span className="block font-mono text-xs text-fuchsia-300 mb-1.5">
                     Deine 80er-Outfit-Farbe:
@@ -13316,37 +13540,6 @@ export function App() {
                   </div>
                 </div>
               </div>
-              <div className="space-y-1.5">
-            <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400">
-              Wie rollst du rein?
-            </label>
-            <div className="grid grid-cols-3 gap-2">
-              {(
-                [
-                  { id: 'skater', label: 'Eigene Rollschuhe', icon: '🛼' },
-                  { id: 'rental', label: 'Leihrollschuhe', icon: '👟' },
-                  { id: 'wheelchair', label: 'Rollstuhl', icon: '♿' },
-                ] as const
-              ).map((mode) => {
-                const active = characterMode === mode.id;
-                return (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    onClick={() => setCharacterMode(mode.id)}
-                    className={`flex flex-col items-center justify-center gap-1 px-2 py-2 rounded-lg border font-mono text-xs transition ${
-                      active
-                        ? 'bg-slate-800 border-2 border-cyan-400 text-white font-bold shadow-[0_0_12px_rgba(34,211,238,0.35)]'
-                        : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-slate-500'
-                    }`}
-                  >
-                    <span className="text-base">{mode.icon}</span>
-                    <span className="truncate max-w-full">{mode.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
 
               <div className="flex items-center gap-2 pt-2">
                 <button

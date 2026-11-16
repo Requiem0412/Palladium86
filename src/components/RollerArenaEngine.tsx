@@ -10177,7 +10177,7 @@ function renderCenterIslandsOrStage(
       const sh = uIslands.closedStageHeight;
       const scr = uIslands.cinemaScreenRect;
       const projX = stageCenterX;
-      const projY = scr.y + scr.height + 54;
+      const projY = scr.y - 14;
 
       ctx.save();
       // Rounded dark cinema center platform
@@ -10190,12 +10190,12 @@ function renderCenterIslandsOrStage(
       ctx.fill();
       ctx.stroke();
 
-      // 1. White Structural Center Pillar ("weiße Mittelsäule") behind top center of screen
+      // 1. White Structural Center Pillar & Ceiling Projector Mount ("weiße Mittelsäule / Deckenhalterung") above top center of screen
       ctx.fillStyle = '#f1f5f9';
       ctx.strokeStyle = '#94a3b8';
       ctx.lineWidth = 2.5;
       ctx.beginPath();
-      ctx.roundRect(stageCenterX - 24, scr.y - 26, 48, 30, 6);
+      ctx.roundRect(stageCenterX - 28, scr.y - 32, 56, 36, 6);
       ctx.fill();
       ctx.stroke();
 
@@ -10366,39 +10366,39 @@ function renderCenterIslandsOrStage(
       ctx.fill();
       ctx.stroke();
 
-      // 4. Flickering Projector Light Cone ("halbtransparenter, leicht flackernder Projektions-Lichtkegel") from Projector to Screen
+      // 4. Flickering Downward Projector Light Cone from Top Ceiling Projector onto the Cinema Screen (leaving skating track below 100% clear!)
       const flicker =
-        0.15 + Math.sin(now * 0.03) * 0.025 + Math.cos(now * 0.07) * 0.015;
+        0.14 + Math.sin(now * 0.03) * 0.025 + Math.cos(now * 0.07) * 0.015;
       const coneGrad = ctx.createLinearGradient(
         projX,
-        projY,
+        projY + 8,
         stageCenterX,
-        scr.y + scr.height
+        scr.y + scr.height - 6
       );
       coneGrad.addColorStop(0, `rgba(224, 242, 254, ${flicker * 1.55})`);
-      coneGrad.addColorStop(0.5, `rgba(186, 230, 253, ${flicker})`);
-      coneGrad.addColorStop(1, `rgba(56, 189, 248, ${flicker * 0.5})`);
+      coneGrad.addColorStop(0.45, `rgba(186, 230, 253, ${flicker * 0.95})`);
+      coneGrad.addColorStop(1, `rgba(56, 189, 248, ${flicker * 0.25})`);
       ctx.fillStyle = coneGrad;
       ctx.beginPath();
-      ctx.moveTo(projX - 10, projY - 8);
-      ctx.lineTo(projX + 10, projY - 8);
-      ctx.lineTo(scr.x + scr.width - 8, scr.y + scr.height);
-      ctx.lineTo(scr.x + 8, scr.y + scr.height);
+      ctx.moveTo(projX - 12, projY + 8);
+      ctx.lineTo(projX + 12, projY + 8);
+      ctx.lineTo(scr.x + scr.width - 8, scr.y + scr.height - 4);
+      ctx.lineTo(scr.x + 8, scr.y + scr.height - 4);
       ctx.closePath();
       ctx.fill();
 
-      // 5. Opposite 80s Large-Screen RGB CRT Projector ("gegenüberliegender 80er-Großbildprojektor")
+      // 5. Top-Mounted 80s Large-Screen RGB CRT Projector on the White Ceiling/Wall Bracket ("oben an der weißen Deckenhalterung")
       ctx.fillStyle = '#1e293b';
       ctx.strokeStyle = '#cbd5e1';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.roundRect(projX - 24, projY - 10, 48, 26, 4);
+      ctx.roundRect(projX - 24, projY - 12, 48, 22, 4);
       ctx.fill();
       ctx.stroke();
       ['#ef4444', '#22c55e', '#3b82f6'].forEach((lensCol, lIdx) => {
         ctx.fillStyle = lensCol;
         ctx.beginPath();
-        ctx.arc(projX - 11 + lIdx * 11, projY - 9, 3.8, 0, Math.PI * 2);
+        ctx.arc(projX - 11 + lIdx * 11, projY + 3, 3.8, 0, Math.PI * 2);
         ctx.fill();
       });
 
@@ -10411,7 +10411,7 @@ function renderCenterIslandsOrStage(
           ? '📼 PALLADIUM 1989 GROSSPROJEKTOR & MITTELSÄULEN-LEINWAND'
           : '🎬 PALLADIUM KINO-LEINWAND & 80ER GROSSPROJEKTOR',
         stageCenterX,
-        scr.y - 32
+        scr.y - 36
       );
       ctx.restore();
       break;
