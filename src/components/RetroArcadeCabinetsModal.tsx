@@ -224,7 +224,46 @@ export const RetroArcadeCabinetsModal: React.FC<
       }
 
       if (!isEnded) {
-        const ctrl = controlsRef.current;
+        let padLeft = false;
+        let padRight = false;
+        let padUp = false;
+        let padDown = false;
+        let padAction = false;
+        if (
+          typeof navigator !== 'undefined' &&
+          typeof navigator.getGamepads === 'function'
+        ) {
+          const pads = navigator.getGamepads();
+          if (pads) {
+            for (let i = 0; i < pads.length; i++) {
+              const gp = pads[i];
+              if (gp && gp.connected) {
+                const axX = gp.axes[0] || 0;
+                const axY = gp.axes[1] || 0;
+                if (axX < -0.25 || gp.buttons[14]?.pressed) padLeft = true;
+                if (axX > 0.25 || gp.buttons[15]?.pressed) padRight = true;
+                if (axY < -0.25 || gp.buttons[12]?.pressed) padUp = true;
+                if (axY > 0.25 || gp.buttons[13]?.pressed) padDown = true;
+                if (
+                  gp.buttons[0]?.pressed ||
+                  gp.buttons[2]?.pressed ||
+                  gp.buttons[5]?.pressed ||
+                  gp.buttons[7]?.pressed
+                ) {
+                  padAction = true;
+                }
+                break;
+              }
+            }
+          }
+        }
+        const ctrl = {
+          left: controlsRef.current.left || padLeft,
+          right: controlsRef.current.right || padRight,
+          up: controlsRef.current.up || padUp,
+          down: controlsRef.current.down || padDown,
+          action: controlsRef.current.action || padAction,
+        };
 
         if (activeGameId === 'monkey-stomp') {
           // Draw 3 Neon Girders & Ladders

@@ -1101,7 +1101,10 @@ export function App() {
   );
   const [isTouchDevice, setIsTouchDevice] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
+    const sp = new URLSearchParams(window.location.search);
     return (
+      sp.get('touch') === '1' ||
+      sp.get('mobile') === '1' ||
       window.matchMedia?.('(pointer: coarse)').matches ||
       navigator.maxTouchPoints > 0 ||
       window.innerWidth <= 1024
@@ -1115,11 +1118,14 @@ export function App() {
   useEffect(() => {
     const updateViewportFlags = () => {
       if (typeof window === 'undefined') return;
+      const sp = new URLSearchParams(window.location.search);
       setIsPortraitSmallScreen(
         window.innerWidth < 600 && window.innerHeight > window.innerWidth
       );
       setIsTouchDevice(
-        window.matchMedia?.('(pointer: coarse)').matches ||
+        sp.get('touch') === '1' ||
+          sp.get('mobile') === '1' ||
+          window.matchMedia?.('(pointer: coarse)').matches ||
           navigator.maxTouchPoints > 0 ||
           window.innerWidth <= 1024
       );
@@ -6588,9 +6594,18 @@ export function App() {
                       setShowVisitorQuickMenu(false);
                       setShowPhoneControllerModal(true);
                     }}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-left cursor-pointer"
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-left flex items-center justify-between cursor-pointer"
                   >
-                    📱 Handy-Gamepad &amp; Steuerung
+                    <span>🎮 Controller &amp; Handy-Pad</span>
+                    <span
+                      className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                        telemetry.gamepadConnected
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                          : 'bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {telemetry.gamepadConnected ? 'AKTIV' : 'VERBINDEN'}
+                    </span>
                   </button>
 
                   <button
@@ -7564,15 +7579,15 @@ export function App() {
               />
             </div>
 
-            {/* Unten rechts: Kompakte Retro-Buttons: 🐢 Slow-Skate, JUMP und [E] */}
-            <div className="fixed bottom-6 right-5 z-30 flex items-center gap-2 touch-none">
+            {/* Unten rechts: Kompakte Touch-Buttons: Slow, Drift/Boost, Jump & Interagieren [E] */}
+            <div className="fixed bottom-6 right-5 z-30 flex items-center gap-2 touch-none select-none">
               <button
                 type="button"
                 onClick={() => setManualSlowCruiseActive((v) => !v)}
-                className={`w-14 h-14 rounded-full font-mono font-black text-[9.5px] leading-tight border-2 flex flex-col items-center justify-center cursor-pointer transition ${
+                className={`w-13 h-13 rounded-full font-mono font-black text-[9px] leading-tight border-2 flex flex-col items-center justify-center cursor-pointer transition ${
                   manualSlowCruiseActive
-                    ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_16px_rgba(34,211,238,0.65)]'
-                    : 'bg-slate-900/80 text-cyan-200 border-cyan-400/60'
+                    ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_14px_rgba(34,211,238,0.65)]'
+                    : 'bg-slate-950/65 text-cyan-200 border-cyan-400/60'
                 }`}
               >
                 <span>🐢</span>
@@ -7581,18 +7596,39 @@ export function App() {
               <button
                 type="button"
                 onPointerDown={() => {
+                  remoteControllerInputRef.current.boost = true;
+                  remoteControllerInputRef.current.spin = true;
+                }}
+                onPointerUp={() => {
+                  remoteControllerInputRef.current.boost = false;
+                }}
+                onPointerCancel={() => {
+                  remoteControllerInputRef.current.boost = false;
+                }}
+                onPointerLeave={() => {
+                  remoteControllerInputRef.current.boost = false;
+                }}
+                className="w-14 h-14 rounded-full bg-fuchsia-500/75 active:bg-fuchsia-400 text-white font-mono font-black text-[9.5px] leading-tight border-2 border-white shadow-[0_0_16px_rgba(217,70,239,0.5)] flex flex-col items-center justify-center cursor-pointer"
+              >
+                <span>⚡DRIFT</span>
+                <span>BOOST</span>
+              </button>
+              <button
+                type="button"
+                onPointerDown={() => {
                   remoteControllerInputRef.current.jump = true;
                 }}
-                className="w-15 h-15 rounded-full bg-amber-400/85 active:bg-amber-300 text-slate-950 font-mono font-black text-xs border-2 border-white shadow-[0_0_18px_rgba(251,191,36,0.5)] flex items-center justify-center cursor-pointer"
+                className="w-14 h-14 rounded-full bg-amber-400/80 active:bg-amber-300 text-slate-950 font-mono font-black text-[10px] border-2 border-white shadow-[0_0_16px_rgba(251,191,36,0.5)] flex items-center justify-center cursor-pointer"
               >
                 JUMP
               </button>
               <button
                 type="button"
                 onPointerDown={triggerNearStationOrNewspaperInteraction}
-                className="w-15 h-15 rounded-full bg-emerald-500/85 active:bg-emerald-400 text-slate-950 font-mono font-black text-xs border-2 border-white shadow-[0_0_18px_rgba(16,185,129,0.5)] flex items-center justify-center cursor-pointer"
+                className="w-14 h-14 rounded-full bg-emerald-500/80 active:bg-emerald-400 text-slate-950 font-mono font-black text-[10px] leading-tight border-2 border-white shadow-[0_0_16px_rgba(16,185,129,0.5)] flex flex-col items-center justify-center cursor-pointer"
               >
-                [E]
+                <span>[E]</span>
+                <span className="text-[8px]">AKTION</span>
               </button>
             </div>
           </>

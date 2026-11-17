@@ -1656,9 +1656,35 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     // ========================================================================
     // 0. HiDPI / RETINA RESOLUTION & PIXEL-CRISPNESS SCALING
     // ========================================================================
+    const searchParams =
+      typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search)
+        : null;
+    const isMobileOrTV =
+      typeof window !== 'undefined' &&
+      (navigator.maxTouchPoints > 1 ||
+        /AFT|Silk|SmartTV|Tizen|Web0S|Android TV|CrKey|iPad|iPhone|iPod|Android|Mobile/i.test(
+          navigator.userAgent || ''
+        ) ||
+        searchParams?.get('low') === '1' ||
+        searchParams?.get('mobile') === '1');
+    if (isMobileOrTV) {
+      try {
+        Object.defineProperty(ctx, 'shadowBlur', {
+          get: () => 0,
+          set: () => {},
+          configurable: true,
+        });
+      } catch {
+        // ignore if non-configurable
+      }
+    }
+
     let currentDpr = 1;
     const applyCanvasHiDpiScale = () => {
-      const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      const dpr = isMobileOrTV
+        ? 1
+        : Math.max(1, Math.min(3, window.devicePixelRatio || 1));
       currentDpr = dpr;
       const targetW = Math.round(WORLD_WIDTH * dpr);
       const targetH = Math.round(WORLD_HEIGHT * dpr);
@@ -1669,6 +1695,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       ctx.imageSmoothingEnabled = false;
     };
     applyCanvasHiDpiScale();
+    canvas.focus();
     window.addEventListener('resize', applyCanvasHiDpiScale);
     document.addEventListener('fullscreenchange', applyCanvasHiDpiScale);
 
@@ -3236,15 +3263,36 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     // ========================================================================
     let gamepadConnected = false;
     let gamepadName = '';
-    const prevPadButtons: boolean[] = Array(16).fill(false);
+    const prevPadButtons: boolean[] = Array(20).fill(false);
 
     const onGamepadConn = (e: GamepadEvent) => {
-      gamepadConnected = true;
-      gamepadName = e.gamepad.id;
+      if (e.gamepad) {
+        gamepadConnected = true;
+        gamepadName = e.gamepad.id || 'USB/Bluetooth Gamepad';
+        player.speechBubble = `🎮 Controller verbunden: ${gamepadName.slice(0, 28)}!`;
+        player.speechTimer = 3.2;
+      }
     };
     const onGamepadDisconn = () => {
-      gamepadConnected = false;
-      gamepadName = '';
+      let stillConnected: Gamepad | null = null;
+      if (typeof navigator !== 'undefined' && typeof navigator.getGamepads === 'function') {
+        const list = navigator.getGamepads();
+        if (list) {
+          for (let i = 0; i < list.length; i++) {
+            if (list[i] && list[i]!.connected) {
+              stillConnected = list[i];
+              break;
+            }
+          }
+        }
+      }
+      if (stillConnected) {
+        gamepadConnected = true;
+        gamepadName = stillConnected.id || 'USB/Bluetooth Gamepad';
+      } else {
+        gamepadConnected = false;
+        gamepadName = '';
+      }
     };
     window.addEventListener('gamepadconnected', onGamepadConn);
     window.addEventListener('gamepaddisconnected', onGamepadDisconn);
@@ -3634,61 +3682,105 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       }
 
       // ----------------------------------------------------------------------
-      // A. POLL HTML5 GAMEPAD API DIRECTLY IN GAME LOOP
+      // A. POLL HTML5 GAMEPAD API DIRECTLY IN GAME LOOP (requestAnimationFrame)
       // ----------------------------------------------------------------------
       let padAxisX = 0;
       let padAxisY = 0;
       let padThrottle = 0;
+      let padSlowBrake = false;
 
-      if (typeof navigator.getGamepads === 'function') {
+      if (
+        typeof navigator !== 'undefined' &&
+        typeof navigator.getGamepads === 'function' &&
+        !p.isPlayingArcade
+      ) {
         const pads = navigator.getGamepads();
-        const activePad = pads
-          ? pads[0] || pads[1] || pads[2] || pads[3]
-          : null;
-        if (activePad && activePad.connected) {
+        let activePad: Gamepad | null = null;
+        if (pads) {
+          for (let i = 0; i < pads.length; i++) {
+            const candidate = pads[i];
+            if (candidate && candidate.connected) {
+              activePad = candidate;
+              break;
+            }
+          }
+        }
+        if (activePad) {
           gamepadConnected = true;
-          gamepadName = activePad.id;
+          gamepadName = activePad.id || 'USB/Bluetooth Controller';
 
           const rawX = activePad.axes[0] || 0;
           const rawY = activePad.axes[1] || 0;
           const deadzone = 0.15;
-          if (Math.hypot(rawX, rawY) > deadzone) {
-            padAxisX = rawX;
-            padAxisY = rawY;
+          const rawMag = Math.hypot(rawX, rawY);
+          if (rawMag > deadzone) {
+            const scaledMag = Math.min(1, (rawMag - deadzone) / (1 - deadzone));
+            padAxisX = (rawX / rawMag) * scaledMag;
+            padAxisY = (rawY / rawMag) * scaledMag;
           }
 
+          // D-Pad overrides/supplements Left Stick
           if (activePad.buttons[12]?.pressed) padAxisY = -1;
           if (activePad.buttons[13]?.pressed) padAxisY = 1;
           if (activePad.buttons[14]?.pressed) padAxisX = -1;
           if (activePad.buttons[15]?.pressed) padAxisX = 1;
 
-          if (activePad.buttons[7]?.value > 0.1) {
-            padThrottle = activePad.buttons[7].value;
+          // R2 / RT (Button 7) = Analog Gas / Boost; L2 / LT (Button 6) = Slow-Cruise / Bremse
+          const rtVal =
+            activePad.buttons[7]?.value ??
+            (activePad.buttons[7]?.pressed ? 1 : 0);
+          if (rtVal > 0.1) {
+            padThrottle = rtVal;
+            if (Math.hypot(padAxisX, padAxisY) < 0.1) {
+              padAxisX = Math.cos(player.headingRad) * padThrottle;
+              padAxisY = Math.sin(player.headingRad) * padThrottle;
+            }
+          }
+          const ltVal =
+            activePad.buttons[6]?.value ??
+            (activePad.buttons[6]?.pressed ? 1 : 0);
+          if (ltVal > 0.25) {
+            padSlowBrake = true;
           }
 
           const isPressed = (idx: number) =>
-            Boolean(activePad.buttons[idx]?.pressed);
+            Boolean(activePad!.buttons[idx]?.pressed);
+          // A / Cross (0) -> Jump or Enter Hall
           if (isPressed(0) && !prevPadButtons[0]) {
             if (!p.isCurtainOpen) p.onEnterHallFromGamepad();
             else triggerPlayerJump();
           }
+          // B / Circle (1) -> 360° Spin
           if (isPressed(1) && !prevPadButtons[1]) {
             triggerPlayer360Spin();
           }
+          // X / Square (2) or RB / R1 (5) -> Interact at Stations / Throw Ball
           if (
             (isPressed(2) && !prevPadButtons[2]) ||
             (isPressed(5) && !prevPadButtons[5])
           ) {
             triggerInteractOrThrowBall();
           }
+          // Y / Triangle (3) -> Toggle Camera
           if (isPressed(3) && !prevPadButtons[3]) {
             p.onToggleCamera();
           }
+          // LB / L1 (4) -> Trigger 80s Trick Move
+          if (isPressed(4) && !prevPadButtons[4]) {
+            const um = p.upgrades?.unlockedMoves;
+            if (um?.starjump) triggerTrickMove('starjump');
+            else if (um?.flamingo) triggerTrickMove('flamingo');
+            else if (um?.backward) triggerTrickMove('backward');
+            else triggerTrickMove('spin360');
+          }
+          // Select / Share (8) -> Toggle Names
           if (isPressed(8) && !prevPadButtons[8]) {
             p.onToggleShowNames();
           }
+          // Start / Options (9) -> Enter Hall or Open Spind/Menu
           if (isPressed(9) && !prevPadButtons[9]) {
             if (!p.isCurtainOpen) p.onEnterHallFromGamepad();
+            else if (p.onOpenLockerModal) p.onOpenLockerModal();
             else p.onOpenChronicleModal();
           }
 
@@ -3707,6 +3799,9 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           for (let b = 0; b < 16; b++) {
             prevPadButtons[b] = isPressed(b);
           }
+        } else {
+          gamepadConnected = false;
+          gamepadName = '';
         }
       }
 
@@ -4004,9 +4099,20 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         p.skateDirection === 'cw' || p.lightingMode === 'slow-skating';
       const isManualSlowCruise =
         Boolean(p.manualSlowCruiseActive) ||
+        padSlowBrake ||
         Boolean(keysDown['shift'] || keysDown['ShiftLeft'] || keysDown['ShiftRight']);
       const slowSkateThrottleMult =
         isSlowSkateDirection || isManualSlowCruise ? 0.45 : 1.0;
+      const touchBoostActive = Boolean(rc?.boost);
+      if (touchBoostActive && Math.hypot(inputX, inputY) < 0.1) {
+        inputX = Math.cos(player.headingRad);
+        inputY = Math.sin(player.headingRad);
+      }
+      const effectiveThrottle = Math.max(padThrottle, touchBoostActive ? 1 : 0);
+      const padThrottleBoost =
+        effectiveThrottle > 0.1 && !isManualSlowCruise
+          ? 1 + effectiveThrottle * 0.15
+          : 1.0;
       const slalomSpeedBonusMult =
         p.hallGameMode === 'slalom'
           ? 1 + Math.min(0.8, slalomRoundsCompleted * 0.08)
@@ -4020,6 +4126,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         slushMult *
         slipstreamMult *
         slowSkateThrottleMult *
+        padThrottleBoost *
         slalomSpeedBonusMult;
       const airControlMult = player.isJumping ? 0.65 : 1.0;
       const preSpeedForAccel = Math.hypot(player.vx, player.vy);
@@ -4032,6 +4139,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         (hasSkatesEquipped ? 1.0 : 0.72) *
         platesMult *
         blobaMult *
+        padThrottleBoost *
         airControlMult;
 
       if (player.crashTimer <= 0 && player.medicRescueTimer <= 0) {
@@ -6259,6 +6367,12 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       // ----------------------------------------------------------------------
       // H. UPDATE SPARKS & TRAIL FADING
       // ----------------------------------------------------------------------
+      if (isMobileOrTV && sparks.length > 16) {
+        sparks.splice(0, sparks.length - 16);
+      }
+      if (isMobileOrTV && trails.length > 20) {
+        trails.splice(0, trails.length - 20);
+      }
       for (let i = sparks.length - 1; i >= 0; i--) {
         const sp = sparks[i];
         sp.x += sp.vx * dt;
@@ -6561,9 +6675,11 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   return (
     <canvas
       ref={canvasRef}
+      tabIndex={0}
+      onPointerDown={() => canvasRef.current?.focus()}
       width={WORLD_WIDTH}
       height={WORLD_HEIGHT}
-      className="w-full h-full block select-none pixel-crisp-canvas"
+      className="w-full h-full block select-none outline-none touch-none pixel-crisp-canvas"
     />
   );
 };
