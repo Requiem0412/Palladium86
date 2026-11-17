@@ -29,7 +29,10 @@ import {
   WORLD_WIDTH,
 } from '../config/arenaConfig';
 import { soundFX } from '../utils/soundEffects';
-import { SingleplayerDifficulty } from '../utils/storageAndStats';
+import {
+  CustomCrewStationMember,
+  SingleplayerDifficulty,
+} from '../utils/storageAndStats';
 
 export interface ArenaLiveTelemetry {
   x: number;
@@ -60,6 +63,14 @@ export interface ArenaLiveTelemetry {
   slalomCombo: number;
   activeTrickMove?: TrickMoveId | null;
   nearLockers?: boolean;
+  nearNewspaperStand?: boolean;
+  nearLeaderboardBoard?: boolean;
+  nearCustomCrewId?: string | null;
+  slalomRound?: number;
+  slalomSpeedPercent?: number;
+  nearArcadeMachine?: 'monkey-stomp' | 'disco-invaders' | 'pac-roller' | null;
+  ballspielElapsedSec?: number;
+  isArcadeProtected?: boolean;
 }
 
 export interface MultiplayerPlayerState {
@@ -210,10 +221,25 @@ interface RollerArenaEngineProps {
   mobilitySelected?: boolean;
   avatarRole?: 'standard' | 'kid' | 'stammgast';
   sundayCliqueActive?: boolean;
-  onOpenStationDialog?: (stationId: StationDialogId) => void;
+  onOpenStationDialog?: (stationId: StationDialogId | string) => void;
+  customCrewMembers?: CustomCrewStationMember[];
   newspaperEnabled?: boolean;
   newspaperHasNewBadge?: boolean;
   onOpenNewspaperModal?: () => void;
+  monitorCameraMode?: 'local' | 'multiplayer';
+  manualSlowCruiseActive?: boolean;
+  onSlalomRoundComplete?: (round: number, bonusPixels: number) => void;
+  onOpenLeaderboardModal?: () => void;
+  isPlayingArcade?: boolean;
+  onOpenArcadeMachine?: (
+    gameId: 'monkey-stomp' | 'disco-invaders' | 'pac-roller'
+  ) => void;
+  ballspielResetSeq?: number;
+  onBallspielRoundFinished?: (result: {
+    elapsedSec: number;
+    totalSkaters: number;
+    reason: 'victory' | 'timeout';
+  }) => void;
 }
 
 export interface TrackNpc {
@@ -251,9 +277,21 @@ export interface TrackNpc {
   ballspielTargetY?: number;
   ballspielRetargetTimer?: number;
   sittingBarrierSpot: { x: number; y: number; normalRad: number } | null;
+  excursionPhase?:
+    | 'idle'
+    | 'exiting-rink'
+    | 'going-to-spot'
+    | 'at-spot'
+    | 'returning-to-gate';
+  excursionSpotId?: 'snackbar' | 'lockers' | 'wc';
+  excursionTargetX?: number;
+  excursionTargetY?: number;
+  excursionGateSide?: 'left' | 'right';
+  excursionPauseTimer?: number;
 }
 
 interface NeonSoftball {
+  id?: string;
   x: number;
   y: number;
   vx: number;
@@ -614,6 +652,80 @@ export function buildTrackNpcsForDifficulty(
   ];
 
   const allRegularSkaters: TrackNpc[] = [
+    {
+      id: 'cult-skate-cat',
+      name: '🐱 Skate Cat',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 0.65,
+      laneRadiusX: 485,
+      laneRadiusY: 240,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.61 * speedScale,
+      shirtColor: '#f59e0b',
+      accentColor: '#fde047',
+      wheelColor: '#ff2a85',
+      legwarmerColor: '#ff2a85',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'cult-walkman-moni',
+      name: '🎧 Walkman-Moni',
+      gender: 'female',
+      role: 'regular',
+      orbitAngle: 2.95,
+      laneRadiusX: 535,
+      laneRadiusY: 266,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.59 * speedScale,
+      shirtColor: '#ec4899',
+      accentColor: '#00f0ff',
+      wheelColor: '#39ff14',
+      legwarmerColor: '#00f0ff',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
+    {
+      id: 'cult-breakdance-benni',
+      name: '🕺 Breakdance-Benni',
+      gender: 'male',
+      role: 'regular',
+      orbitAngle: 4.55,
+      laneRadiusX: 595,
+      laneRadiusY: 294,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      headingRad: 0,
+      baseSpeed: 0.63 * speedScale,
+      shirtColor: '#dc2626',
+      accentColor: '#fde047',
+      wheelColor: '#00f0ff',
+      spinTimer: 0,
+      speechText: null,
+      speechTimer: 0,
+      crashTimer: 0,
+      hitOutTimer: 0,
+      sittingBarrierSpot: null,
+    },
     {
       id: 'reg-1',
       name: 'Disco-Dieter',
@@ -1138,9 +1250,18 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
   avatarRole = 'standard',
   sundayCliqueActive = false,
   onOpenStationDialog,
+  customCrewMembers = [],
   newspaperEnabled = true,
   newspaperHasNewBadge = false,
   onOpenNewspaperModal,
+  monitorCameraMode = 'local',
+  manualSlowCruiseActive = false,
+  onSlalomRoundComplete,
+  onOpenLeaderboardModal,
+  isPlayingArcade = false,
+  onOpenArcadeMachine,
+  ballspielResetSeq = 0,
+  onBallspielRoundFinished,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fogEnabledRef = useRef<boolean>(fogMachineEnabled);
@@ -1160,6 +1281,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     label?: string;
   } | null>(null);
   const lastTeleportSeqRef = useRef<number>(teleportTrigger?.seq || 0);
+  const pendingBallspielResetRef = useRef<boolean>(false);
+  const lastBallspielResetSeqRef = useRef<number>(ballspielResetSeq);
 
   const triggerFogBurst = () => {
     fogBurstTimerRef.current = 9.5;
@@ -1287,9 +1410,18 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     avatarRole,
     sundayCliqueActive,
     onOpenStationDialog,
+    customCrewMembers,
     newspaperEnabled,
     newspaperHasNewBadge,
     onOpenNewspaperModal,
+    monitorCameraMode,
+    manualSlowCruiseActive,
+    onSlalomRoundComplete,
+    onOpenLeaderboardModal,
+    isPlayingArcade,
+    onOpenArcadeMachine,
+    ballspielResetSeq,
+    onBallspielRoundFinished,
   });
 
   useEffect(() => {
@@ -1380,9 +1512,18 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       avatarRole,
       sundayCliqueActive,
       onOpenStationDialog,
+      customCrewMembers,
       newspaperEnabled,
       newspaperHasNewBadge,
       onOpenNewspaperModal,
+      monitorCameraMode,
+      manualSlowCruiseActive,
+      onSlalomRoundComplete,
+      onOpenLeaderboardModal,
+      isPlayingArcade,
+      onOpenArcadeMachine,
+      ballspielResetSeq,
+      onBallspielRoundFinished,
     };
   }, [
     playerName,
@@ -1468,9 +1609,18 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     avatarRole,
     sundayCliqueActive,
     onOpenStationDialog,
+    customCrewMembers,
     newspaperEnabled,
     newspaperHasNewBadge,
     onOpenNewspaperModal,
+    monitorCameraMode,
+    manualSlowCruiseActive,
+    onSlalomRoundComplete,
+    onOpenLeaderboardModal,
+    isPlayingArcade,
+    onOpenArcadeMachine,
+    ballspielResetSeq,
+    onBallspielRoundFinished,
   ]);
 
   useEffect(() => {
@@ -1489,6 +1639,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       pendingTeleportRef.current = teleportTrigger;
     }
   }, [teleportTrigger]);
+
+  useEffect(() => {
+    if (ballspielResetSeq !== lastBallspielResetSeqRef.current) {
+      lastBallspielResetSeqRef.current = ballspielResetSeq;
+      pendingBallspielResetRef.current = true;
+    }
+  }, [ballspielResetSeq]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1604,8 +1761,6 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
 
     // Nurse / Paramedic ("Schwester Gudrun") + Stretcher Team Rescue Sequence State
     // Enters and exits exclusively through one of the two offset Schleusen-Banden!
-    let topWallLogoClickCount = 0;
-    let lastTopWallLogoClickTime = 0;
 
     const saniNurse = {
       active: false,
@@ -1698,6 +1853,19 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       { id: 9, x: 790, y: 205, side: 'left', wobbleTimer: 0, passed: false },
       { id: 10, x: 630, y: 245, side: 'right', wobbleTimer: 0, passed: false },
     ];
+
+    // True Slalom Zigzag (Left/Right Alternation), Progression & Ballspiel Anti-Farming State
+    let lastScoredPylonId: number | null = null;
+    let lastPassSide: 'left' | 'right' | null = null;
+    let prevSlalomCheckX = player.x;
+    let slalomRoundsCompleted = 0;
+    let slalomGatesInCurrentRound = 0;
+    let lastScoredBallId: string | null = null;
+    let lastBallScoreTimeMs = 0;
+    let lastBallScorePlayerX = 0;
+    let lastBallScorePlayerY = 0;
+    let ballDistanceSkatedSinceLastScore = 999;
+    let ballThrowSeqCounter = 1;
 
     // Folding Chairs Round-Course (Rundum-Parcours around the entire flat parquet rink)
     const jumpChairs: JumpObstacleChair[] = [
@@ -2165,6 +2333,67 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       }
 
       // 3. In "Ballspiel" mode: Player as Skate-Guard throws toward 16-Bit Neon Crosshair (or passes to Ordner Manni!)
+      // 2c. Check Custom Crew Station Members proximity ([E] interaction)
+      if (p.customCrewMembers && p.customCrewMembers.length > 0) {
+        for (const cm of p.customCrewMembers) {
+          if (Math.hypot(player.x - cm.x, player.y - cm.y) <= 115) {
+            p.onOpenStationDialog?.(cm.id);
+            player.speechBubble = `👾 ${cm.crewName} (${cm.stationTitle}): „${cm.quote}“`;
+            player.speechTimer = 3.0;
+            return;
+          }
+        }
+      }
+
+      // 2d. Check Newspaper Stand & Hallen-Ehrentafel proximity ([E] interaction)
+      const cbInteract = ARENA_LAYOUT.bottomEntrance.cashierBooth;
+      const newsStandInteractX = cbInteract.x + cbInteract.width / 2;
+      const newsStandInteractY = cbInteract.y + cbInteract.height + 36;
+      if (
+        p.newspaperEnabled !== false &&
+        Math.hypot(player.x - newsStandInteractX, player.y - newsStandInteractY) <=
+          84
+      ) {
+        p.onOpenNewspaperModal?.();
+        return;
+      }
+      const lbBoardInteractX = cbInteract.x + cbInteract.width + 66;
+      const lbBoardInteractY = cbInteract.y + cbInteract.height + 26;
+      if (
+        Math.hypot(player.x - lbBoardInteractX, player.y - lbBoardInteractY) <=
+        88
+      ) {
+        p.onOpenLeaderboardModal?.();
+        return;
+      }
+
+      // 2e. Check 80s Retro Arcade Cabinets proximity near the DJ-Kanzel ([E] interaction)
+      const arcadeCabs: {
+        id: 'monkey-stomp' | 'disco-invaders' | 'pac-roller';
+        label: string;
+        x: number;
+        y: number;
+      }[] = [
+        { id: 'monkey-stomp', label: 'MONKEY STOMP', x: 84, y: 264 },
+        { id: 'disco-invaders', label: 'DISCO INVADERS', x: 148, y: 264 },
+        { id: 'pac-roller', label: 'PAC-ROLLER', x: 212, y: 264 },
+      ];
+      let nearestCab: (typeof arcadeCabs)[0] | null = null;
+      let nearestCabDist = 9999;
+      for (const cab of arcadeCabs) {
+        const dCab = Math.hypot(player.x - cab.x, player.y - (cab.y + 18));
+        if (dCab < nearestCabDist) {
+          nearestCabDist = dCab;
+          nearestCab = cab;
+        }
+      }
+      if (nearestCab && nearestCabDist <= 76 && p.onOpenArcadeMachine) {
+        p.onOpenArcadeMachine(nearestCab.id);
+        player.speechBubble = `🕹️ ${nearestCab.label} gestartet! Park-Schutz aktiv!`;
+        player.speechTimer = 2.8;
+        return;
+      }
+
       if (p.hallGameMode === 'ballspiel') {
         const singleBall = softballs[0];
         if (singleBall) {
@@ -2173,6 +2402,13 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             (singleBall.state === 'FREE' &&
               Math.hypot(singleBall.x - player.x, singleBall.y - player.y) < 95)
           ) {
+            const currentSkaterSpeed = Math.hypot(player.vx, player.vy);
+            const minBallThrowSpeed = 355 * 0.35;
+            if (currentSkaterSpeed < minBallThrowSpeed) {
+              player.speechBubble = '⚡ Erst Schwung holen zum Werfen!';
+              player.speechTimer = 1.8;
+              return;
+            }
             const aimX = hasMouseMovedOnCanvas
               ? mouseWorldX
               : player.x + Math.cos(player.headingRad) * 220;
@@ -2317,6 +2553,21 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         return {
           x: (rawX - WORLD_WIDTH / 2) / zoomX + lookAheadX,
           y: (rawY - WORLD_HEIGHT / 2) / zoomY + lookAheadY,
+        };
+      }
+      if (
+        typeof window !== 'undefined' &&
+        window.innerWidth <= 1024 &&
+        !propsRef.current.buildModeEnabled
+      ) {
+        const followZoom = window.innerWidth < 640 ? 1.56 : 1.32;
+        const halfW = WORLD_WIDTH / (2 * followZoom);
+        const halfH = WORLD_HEIGHT / (2 * followZoom);
+        const camX = Math.max(halfW, Math.min(WORLD_WIDTH - halfW, player.x));
+        const camY = Math.max(halfH, Math.min(WORLD_HEIGHT - halfH, player.y));
+        return {
+          x: (rawX - WORLD_WIDTH / 2) / followZoom + camX,
+          y: (rawY - WORLD_HEIGHT / 2) / followZoom + camY,
         };
       }
       return { x: rawX, y: rawY };
@@ -2673,22 +2924,6 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         return;
       }
 
-      // Hidden Admin PIN Access: Double-click on the large upper back-wall "PALLADIUM HANAU • ROLLER DISCO" neon sign (center x=1075, y=10..108)
-      if (Math.abs(worldX - 1075) <= 305 && worldY >= 4 && worldY <= 114) {
-        const nowTopClick = performance.now();
-        if (nowTopClick - lastTopWallLogoClickTime < 650) {
-          topWallLogoClickCount += 1;
-        } else {
-          topWallLogoClickCount = 1;
-        }
-        lastTopWallLogoClickTime = nowTopClick;
-        if (topWallLogoClickCount >= 2) {
-          topWallLogoClickCount = 0;
-          propsRef.current.onRequestAdminPinModal?.();
-          return;
-        }
-      }
-
       // Easter-Egg: 3x click on the center Palladium logo triggers "✨ CREATED BY JÜRGEN BECKER (JR) ✨"
       if (
         Math.hypot(
@@ -2719,6 +2954,14 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         Math.hypot(worldX - newsStandX, worldY - newsStandY) <= 44
       ) {
         propsRef.current.onOpenNewspaperModal?.();
+        return;
+      }
+
+      // Check click on 80s Arcade Hallen-Ehrentafel ("🏆 BESTENLISTE") at the entrance wall
+      const lbBoardX = cb.x + cb.width + 66;
+      const lbBoardY = cb.y + cb.height + 26;
+      if (Math.hypot(worldX - lbBoardX, worldY - lbBoardY) <= 46) {
+        propsRef.current.onOpenLeaderboardModal?.();
         return;
       }
 
@@ -2833,6 +3076,42 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           propsRef.current.onOpenProShopModal();
         }
         return;
+      }
+
+      // Check click on Custom Crew Station Members placed on the rink
+      if (
+        propsRef.current.customCrewMembers &&
+        propsRef.current.customCrewMembers.length > 0
+      ) {
+        for (const cm of propsRef.current.customCrewMembers) {
+          if (Math.hypot(worldX - cm.x, worldY - cm.y) <= 44) {
+            propsRef.current.onOpenStationDialog?.(cm.id);
+            return;
+          }
+        }
+      }
+
+      // Check click on 3 Retro 80s Arcade Cabinets in the Arcade corner near the DJ-Kanzel
+      const clickArcadeCabs: {
+        id: 'monkey-stomp' | 'disco-invaders' | 'pac-roller';
+        label: string;
+        x: number;
+        y: number;
+      }[] = [
+        { id: 'monkey-stomp', label: 'MONKEY STOMP', x: 84, y: 264 },
+        { id: 'disco-invaders', label: 'DISCO INVADERS', x: 148, y: 264 },
+        { id: 'pac-roller', label: 'PAC-ROLLER', x: 212, y: 264 },
+      ];
+      for (const cab of clickArcadeCabs) {
+        if (
+          Math.abs(worldX - cab.x) <= 28 &&
+          Math.abs(worldY - cab.y) <= 28
+        ) {
+          propsRef.current.onOpenArcadeMachine?.(cab.id);
+          player.speechBubble = `🕹️ ${cab.label} gestartet! Park-Schutz aktiv!`;
+          player.speechTimer = 2.6;
+          return;
+        }
       }
 
       if (propsRef.current.hallGameMode === 'ballspiel') {
@@ -2979,6 +3258,10 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     let lastMultiplayerEmitTime = 0;
     let shuffleTrainTimer = 8.0;
     let shuffleTrainActiveSec = 0;
+    let excursionTriggerTimer = 7.5;
+    let cultChatterTimer = 11.0;
+    let ballspielElapsedSec = 0;
+    let ballspielRoundEnded = false;
     const remotePlayersMap = new Map<string, InterpolatedRemotePlayer>();
 
     const stepFrame = (now: number) => {
@@ -3142,6 +3425,65 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         fogBurstTimerRef.current = fogBurstTimer;
       }
 
+      const resetBallspielRosterAndStopwatch = () => {
+        const fullRoster = buildTrackNpcsForDifficulty(
+          'pro',
+          p.customLayout?.npcAnchors
+        );
+        const guardsOnly = fullRoster.filter((n) => n.role === 'guard');
+        const skaters15 = fullRoster
+          .filter((n) => n.role !== 'guard')
+          .slice(0, 15)
+          .map((n, sIdx) => ({
+            ...n,
+            eliminated: false,
+            eliminatedOrder: undefined,
+            hitOutTimer: 0,
+            sittingBarrierSpot: null,
+            excursionPhase: 'idle' as const,
+            ballspielTargetX: 520 + (sIdx % 5) * 235,
+            ballspielTargetY: 220 + Math.floor(sIdx / 5) * 240,
+            ballspielRetargetTimer: 0.8 + (sIdx % 4) * 0.45,
+          }));
+        trackNpcs.splice(0, trackNpcs.length, ...guardsOnly, ...skaters15);
+        player.ballspielHits = 0;
+        ballspielElapsedSec = 0;
+        ballspielRoundEnded = false;
+        lastScoredBallId = null;
+        lastBallScoreTimeMs = 0;
+        ballDistanceSkatedSinceLastScore = 999;
+
+        softballs.splice(0, softballs.length, {
+          x: player.x + Math.cos(player.headingRad) * 24,
+          y: player.y + Math.sin(player.headingRad) * 24,
+          vx: 0,
+          vy: 0,
+          bouncesLeft: 2,
+          color: '#39ff14',
+          fromPlayer: true,
+          state: 'HELD',
+          holderId: 'player',
+          holdTimer: 0,
+          freeTimer: 0,
+        });
+      };
+
+      if (pendingBallspielResetRef.current) {
+        pendingBallspielResetRef.current = false;
+        if (p.hallGameMode === 'ballspiel') {
+          player.x = 720;
+          player.y = 740;
+          player.vx = 0;
+          player.vy = 0;
+          player.headingRad = 0;
+          player.crashTimer = 0;
+          resetBallspielRosterAndStopwatch();
+          player.speechBubble =
+            '🔄 Neue Ballspiel-Runde gestartet! Stoppuhr läuft ab 0,0 s!';
+          player.speechTimer = 3.2;
+        }
+      }
+
       if (p.hallGameMode !== prevHallGameMode) {
         prevHallGameMode = p.hallGameMode;
 
@@ -3157,52 +3499,19 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         }
 
         if (p.hallGameMode === 'ballspiel') {
-          // Lock a fixed 15-NPC participant roster for the Ballspiel round (2 guards + 15 target skaters = 17 total)
-          const fullRoster = buildTrackNpcsForDifficulty(
-            'pro',
-            p.customLayout?.npcAnchors
-          );
-          const guardsOnly = fullRoster.filter((n) => n.role === 'guard');
-          const skaters15 = fullRoster
-            .filter((n) => n.role !== 'guard')
-            .slice(0, 15)
-            .map((n, sIdx) => ({
-              ...n,
-              eliminated: false,
-              eliminatedOrder: undefined,
-              hitOutTimer: 0,
-              sittingBarrierSpot: null,
-              ballspielTargetX: 520 + (sIdx % 5) * 235,
-              ballspielTargetY: 220 + Math.floor(sIdx / 5) * 240,
-              ballspielRetargetTimer: 0.8 + (sIdx % 4) * 0.45,
-            }));
-          trackNpcs.splice(0, trackNpcs.length, ...guardsOnly, ...skaters15);
-          player.ballspielHits = 0;
-
-          // Rule #1: Player immediately takes the ball as Skate-Guard with 16-Bit-Neon-Crosshair!
-          softballs.splice(0, softballs.length, {
-            x: player.x + Math.cos(player.headingRad) * 24,
-            y: player.y + Math.sin(player.headingRad) * 24,
-            vx: 0,
-            vy: 0,
-            bouncesLeft: 2,
-            color: '#39ff14',
-            fromPlayer: true,
-            state: 'HELD',
-            holderId: 'player',
-            holdTimer: 0,
-            freeTimer: 0,
-          });
+          resetBallspielRosterAndStopwatch();
 
           player.speechBubble =
             '🏐 Du hast den Ball! Ziele mit dem Neon-Fadenkreuz & wirf mit [Space] oder Linksklick!';
           player.speechTimer = 4.5;
 
           djSpeechBubble =
-            '🎤 "Ballspiel startet! Du bist Skate-Guard mit dem Ball — wirf per Space oder Linksklick!"';
+            '🎤 "Ballspiel-Bestzeitjagd startet! Wer räumt die Bahn am schnellsten leer?"';
           djSpeechTimer = 5.5;
           speakNpcBubble(djSpeechBubble, p.activeDjName || 'DJ MAGIC FORCE', 'male');
         } else {
+          ballspielElapsedSec = 0;
+          ballspielRoundEnded = false;
           // Restore normal difficulty NPC roster when leaving Ballspiel (returning each NPC to its saved homeX/homeY anchor!)
           const restoredNpcs = buildTrackNpcsForDifficulty(
             p.difficulty,
@@ -3212,6 +3521,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             eliminated: false,
             eliminatedOrder: undefined,
             hitOutTimer: 0,
+            excursionPhase: 'idle' as const,
           }));
           trackNpcs.splice(0, trackNpcs.length, ...restoredNpcs);
           softballs.length = 0;
@@ -3226,8 +3536,15 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               'male'
             );
           } else if (p.hallGameMode === 'slalom') {
+            lastScoredPylonId = null;
+            lastPassSide = null;
+            prevSlalomCheckX = player.x;
+            slalomCones.forEach((c) => {
+              c.passed = false;
+              c.wobbleTimer = 0;
+            });
             djSpeechBubble =
-              '🎤 "Slalom-Parcours eröffnet! Zeigt eure saubersten Kurven!"';
+              '🎤 "Slalom-Parcours eröffnet! Echter Links-Rechts-Zickzack um die Pylonen zählt!"';
             djSpeechTimer = 5.5;
             speakNpcBubble(
               djSpeechBubble,
@@ -3683,6 +4000,17 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
       const slipstreamMult = player.isSlipstreamActive ? 1.22 : 1.0;
 
       const vipDiscoMult = p.vipDiscoSkatesEquipped ? 1.08 : 1.0;
+      const isSlowSkateDirection =
+        p.skateDirection === 'cw' || p.lightingMode === 'slow-skating';
+      const isManualSlowCruise =
+        Boolean(p.manualSlowCruiseActive) ||
+        Boolean(keysDown['shift'] || keysDown['ShiftLeft'] || keysDown['ShiftRight']);
+      const slowSkateThrottleMult =
+        isSlowSkateDirection || isManualSlowCruise ? 0.45 : 1.0;
+      const slalomSpeedBonusMult =
+        p.hallGameMode === 'slalom'
+          ? 1 + Math.min(0.8, slalomRoundsCompleted * 0.08)
+          : 1.0;
       const maxSpeed =
         355 *
         ownSkatesSpeedBonus *
@@ -3690,10 +4018,16 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         streetShoesPenalty *
         bearingsMult *
         slushMult *
-        slipstreamMult;
+        slipstreamMult *
+        slowSkateThrottleMult *
+        slalomSpeedBonusMult;
       const airControlMult = player.isJumping ? 0.65 : 1.0;
+      const preSpeedForAccel = Math.hypot(player.vx, player.vy);
+      const gentleStartMult =
+        preSpeedForAccel < 95 ? 0.65 + (preSpeedForAccel / 95) * 0.35 : 1.0;
       const accel =
-        540 *
+        405 *
+        gentleStartMult *
         ownSkatesAccelBonus *
         (hasSkatesEquipped ? 1.0 : 0.72) *
         platesMult *
@@ -3751,18 +4085,30 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         player.vy = (player.vy / speed) * maxSpeed;
       }
 
-      player.x += player.vx * dt;
-      player.y += player.vy * dt;
+      // Park- & Schutz-Modus während eines 80er-Arcade-Spiels an der DJ-Kanzel:
+      // Spieler wird automatisch sicher in der Arcade-Nische (148, 304) geparkt und ist vor Bällen & Remplern geschützt!
+      if (p.isPlayingArcade) {
+        player.x = 148;
+        player.y = 304;
+        player.vx = 0;
+        player.vy = 0;
+        player.headingRad = -Math.PI / 2;
+        player.crashTimer = 0;
+        player.medicRescueTimer = 0;
+      } else {
+        player.x += player.vx * dt;
+        player.y += player.vy * dt;
 
-      if (speed > 8) {
-        const targetHeading = Math.atan2(player.vy, player.vx);
-        const turnRate = p.hasOwnSkates ? 13.0 : 11.5;
-        player.headingRad = rotateShortest(
-          player.headingRad,
-          targetHeading,
-          dt * turnRate
-        );
-        player.stridePhase += speed * dt * 0.032;
+        if (speed > 8) {
+          const targetHeading = Math.atan2(player.vy, player.vx);
+          const turnRate = p.hasOwnSkates ? 13.0 : 11.5;
+          player.headingRad = rotateShortest(
+            player.headingRad,
+            targetHeading,
+            dt * turnRate
+          );
+          player.stridePhase += speed * dt * 0.032;
+        }
       }
 
       // Prevent stepping onto the wooden rink parquet through the Schleusen-Banden in street shoes (!hasSkatesEquipped)
@@ -4069,6 +4415,131 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           ? ['reg-2', 'reg-4', 'reg-6', 'reg-8']
           : [];
 
+        // Lebendige Wegpunkt-Routinen (Snack-Bar, Spinde, WC-Flur) & Kult-KI-Sprüche im Free-Skate-Modus
+        if (
+          p.hallGameMode === 'free-skate' &&
+          !isSlowSkating &&
+          !isSpringerStaffelShow &&
+          !p.buildModeEnabled
+        ) {
+          excursionTriggerTimer -= dt;
+          if (excursionTriggerTimer <= 0) {
+            excursionTriggerTimer = 11.0 + Math.random() * 6.0;
+            const activeExcursions = trackNpcs.filter(
+              (n) => n.excursionPhase && n.excursionPhase !== 'idle'
+            ).length;
+            if (activeExcursions < 2) {
+              const candidates = trackNpcs.filter(
+                (n) =>
+                  n.role !== 'guard' &&
+                  (!n.excursionPhase || n.excursionPhase === 'idle') &&
+                  !shuffleTrainMemberIds.includes(n.id) &&
+                  n.y > 580
+              );
+              if (candidates.length > 0) {
+                const chosen =
+                  candidates[Math.floor(Math.random() * candidates.length)];
+                const spots: {
+                  id: 'snackbar' | 'lockers' | 'wc';
+                  x: number;
+                  y: number;
+                  gate: 'left' | 'right';
+                  startBubble: string;
+                }[] = [
+                  {
+                    id: 'snackbar',
+                    x: 565,
+                    y: 932,
+                    gate: 'left',
+                    startBubble: '🥤 Kurz zur Snack-Bar auf ein Slush-Puppie!',
+                  },
+                  {
+                    id: 'lockers',
+                    x: 1585,
+                    y: 934,
+                    gate: 'right',
+                    startBubble: '🗄️ Kurz an die Schließfächer!',
+                  },
+                  {
+                    id: 'wc',
+                    x: 118,
+                    y: 854,
+                    gate: 'left',
+                    startBubble: '🚰 Kurzer Boxenstopp im Vorbereich!',
+                  },
+                ];
+                const pickSpot =
+                  spots[Math.floor(Math.random() * spots.length)];
+                chosen.excursionPhase = 'exiting-rink';
+                chosen.excursionSpotId = pickSpot.id;
+                chosen.excursionTargetX = pickSpot.x;
+                chosen.excursionTargetY = pickSpot.y;
+                chosen.excursionGateSide = pickSpot.gate;
+                chosen.excursionPauseTimer = 0;
+                chosen.speechText = pickSpot.startBubble;
+                chosen.speechTimer = 3.2;
+              }
+            }
+          }
+
+          cultChatterTimer -= dt;
+          if (cultChatterTimer <= 0) {
+            cultChatterTimer = 9.5 + Math.random() * 5.5;
+            const cultIds = [
+              'cult-skate-cat',
+              'cult-walkman-moni',
+              'cult-breakdance-benni',
+            ];
+            const pickId =
+              cultIds[Math.floor(Math.random() * cultIds.length)];
+            const cultNpc = trackNpcs.find((n) => n.id === pickId);
+            if (
+              cultNpc &&
+              (!cultNpc.excursionPhase || cultNpc.excursionPhase === 'idle') &&
+              cultNpc.speechTimer <= 0
+            ) {
+              if (pickId === 'cult-skate-cat') {
+                const catQuotes = [
+                  '🐱 Miau! Samtpfoten auf acht Sims-Rollen!',
+                  '🐾 Schnurr-Kurvenlage im Palladium Hanau!',
+                  '😺 Die Hallenkatze rollt immer auf der Ideallinie!',
+                ];
+                cultNpc.speechText =
+                  catQuotes[Math.floor(Math.random() * catQuotes.length)];
+                cultNpc.speechTimer = 3.8;
+              } else if (pickId === 'cult-walkman-moni') {
+                const moniQuotes = [
+                  '🎧 Walkman-Kassette Seite B – Italo-Disco auf Anschlag!',
+                  '📻 Frische Batterien im Walkman & Neon-Stulpen an!',
+                  '🎶 Boah, dieser Bass von DJ Magic Force!',
+                ];
+                cultNpc.speechText =
+                  moniQuotes[Math.floor(Math.random() * moniQuotes.length)];
+                cultNpc.speechTimer = 3.8;
+              } else if (pickId === 'cult-breakdance-benni') {
+                const benniQuotes = [
+                  '🕺 Electric Boogie & 360°-Spin an der Bande!',
+                  '⚡ Breakdance-Freeze auf acht Rollen!',
+                  '🔥 Hanau ’86 – zeig mir deinen besten Spin!',
+                ];
+                cultNpc.speechText =
+                  benniQuotes[Math.floor(Math.random() * benniQuotes.length)];
+                cultNpc.speechTimer = 3.8;
+                if ((cultNpc.jumpZ || 0) === 0) {
+                  cultNpc.jumpVz = 195;
+                }
+              }
+            }
+          }
+        } else {
+          // Reset any active excursion cleanly when switching to a hall game mode
+          for (const n of trackNpcs) {
+            if (n.excursionPhase && n.excursionPhase !== 'idle') {
+              n.excursionPhase = 'idle';
+            }
+          }
+        }
+
         // Pre-enforce minimum longitudinal & lateral separation between solo AI skaters on the oval (45–50 px spacing, smooth lane overtaking)
         const soloNpcs = trackNpcs.filter(
           (n) =>
@@ -4257,6 +4728,116 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
           if (npc.hitOutTimer > 0) {
             npc.hitOutTimer = Math.max(0, npc.hitOutTimer - dt);
             return;
+          }
+
+          // Autonomous Waypoint Excursions (Snack-Bar, Spinde, WC-Flur) in Free-Skate mode
+          if (
+            p.hallGameMode === 'free-skate' &&
+            npc.excursionPhase &&
+            npc.excursionPhase !== 'idle'
+          ) {
+            const gateWp =
+              npc.excursionGateSide === 'right' ? gRightWp : gLeftWp;
+            if (npc.excursionPhase === 'exiting-rink') {
+              const targetX = gateWp.x;
+              const targetY = gateWp.y + 30;
+              const dx = targetX - npc.x;
+              const dy = targetY - npc.y;
+              const dist = Math.max(1, Math.hypot(dx, dy));
+              const spd = 235;
+              npc.vx = (dx / dist) * spd;
+              npc.vy = (dy / dist) * spd;
+              npc.x += npc.vx * dt;
+              npc.y += npc.vy * dt;
+              npc.headingRad = rotateShortest(
+                npc.headingRad,
+                Math.atan2(dy, dx),
+                dt * 10
+              );
+              if (npc.y >= gateWp.y + 18 || dist < 18) {
+                npc.excursionPhase = 'going-to-spot';
+              }
+              return;
+            }
+            if (npc.excursionPhase === 'going-to-spot') {
+              const tx = npc.excursionTargetX ?? gateWp.x;
+              const ty = npc.excursionTargetY ?? 930;
+              const dx = tx - npc.x;
+              const dy = ty - npc.y;
+              const dist = Math.hypot(dx, dy);
+              if (dist > 12) {
+                const spd = 215;
+                npc.vx = (dx / dist) * spd;
+                npc.vy = (dy / dist) * spd;
+                npc.x += npc.vx * dt;
+                npc.y += npc.vy * dt;
+                npc.headingRad = rotateShortest(
+                  npc.headingRad,
+                  Math.atan2(dy, dx),
+                  dt * 10
+                );
+              } else {
+                npc.vx = 0;
+                npc.vy = 0;
+                npc.excursionPhase = 'at-spot';
+                npc.excursionPauseTimer = 4.2;
+                if (npc.excursionSpotId === 'snackbar') {
+                  npc.speechText =
+                    '🍧 Mmmh, eiskaltes Slush-Puppie an der Snack-Bar!';
+                } else if (npc.excursionSpotId === 'lockers') {
+                  npc.speechText =
+                    '🗄️ Schnell am Spind die Schnürsenkel nachgezogen!';
+                } else {
+                  npc.speechText =
+                    '💧 Kurze Erfrischungspause – gleich geht’s weiter!';
+                }
+                npc.speechTimer = 4.0;
+              }
+              return;
+            }
+            if (npc.excursionPhase === 'at-spot') {
+              npc.vx = 0;
+              npc.vy = 0;
+              npc.excursionPauseTimer =
+                (npc.excursionPauseTimer || 0) - dt;
+              if ((npc.excursionPauseTimer || 0) <= 0) {
+                npc.excursionPhase = 'returning-to-gate';
+                npc.speechText = '🛼 Frisch gestärkt zurück auf die Bahn!';
+                npc.speechTimer = 2.6;
+              }
+              return;
+            }
+            if (npc.excursionPhase === 'returning-to-gate') {
+              const targetX = gateWp.x;
+              const targetY = rink.y + rink.height - 62;
+              const needsCorridorAlign =
+                Math.abs(npc.x - gateWp.x) > 26 && npc.y > gateWp.y + 6;
+              const stepX = gateWp.x;
+              const stepY = needsCorridorAlign ? gateWp.y + 24 : targetY;
+              const dx = stepX - npc.x;
+              const dy = stepY - npc.y;
+              const dist = Math.max(1, Math.hypot(dx, dy));
+              const spd = 235;
+              npc.vx = (dx / dist) * spd;
+              npc.vy = (dy / dist) * spd;
+              npc.x += npc.vx * dt;
+              npc.y += npc.vy * dt;
+              npc.headingRad = rotateShortest(
+                npc.headingRad,
+                Math.atan2(dy, dx),
+                dt * 10
+              );
+              if (npc.y <= rink.y + rink.height - 48) {
+                npc.excursionPhase = 'idle';
+                const orb = computeNpcOrbitFromPosition(
+                  npc.x,
+                  npc.y,
+                  npc.role
+                );
+                npc.orbitAngle = orb.orbitAngle;
+              }
+              return;
+            }
           }
 
           // Check whether this NPC's anchor (homeX/homeY) was explicitly placed in the Vorbereich/Bistro outside the rink
@@ -4628,7 +5209,7 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               (npc.id === 'reg-4' ||
                 npc.id === 'speed-1' ||
                 npc.id === 'reg-12');
-            const speedMult = isClockwiseSkate ? 0.64 : 1.0;
+            const speedMult = isClockwiseSkate ? 0.45 : 1.0;
             npc.orbitAngle = normalizeAngle(
               npc.orbitAngle + orbitDirSign * npc.baseSpeed * speedMult * dt
             );
@@ -4827,7 +5408,11 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             }
           }
 
-          if (!player.isJumping && player.medicRescueTimer <= 0) {
+          if (
+            !p.isPlayingArcade &&
+            !player.isJumping &&
+            player.medicRescueTimer <= 0
+          ) {
             const dist = Math.hypot(player.x - npc.x, player.y - npc.y);
             const minDist = player.radius + 24;
             if (dist < minDist && dist > 0.1) {
@@ -5187,12 +5772,52 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
             guardManni.speechTimer = 2.4;
           }
 
-          // Strictly ONLY flying THROWN balls eliminate AI skaters!
+          // Strictly ONLY flying THROWN balls eliminate AI skaters — with Anti-Farming checks
+          // (lastScoredBallId, >= 2.5s cooldown, and minimum skated distance between scores!)
+          ballDistanceSkatedSinceLastScore +=
+            Math.hypot(player.vx, player.vy) * dt;
           if (ball.state === 'THROWN') {
+            if (!ball.id) {
+              ball.id = `ball_${ballThrowSeqCounter++}`;
+            }
             for (const npc of trackNpcs) {
               if (npc.role === 'guard' || npc.eliminated || npc.hitOutTimer > 0)
                 continue;
               if (Math.hypot(ball.x - npc.x, ball.y - npc.y) < 36) {
+                const candidateBallScoreId = `${ball.id}_${npc.id}`;
+                const cooldownElapsedMs = now - lastBallScoreTimeMs;
+                const movedFromLastScoreSpot =
+                  lastBallScoreTimeMs === 0 ||
+                  ballDistanceSkatedSinceLastScore >= 85 ||
+                  Math.hypot(
+                    player.x - lastBallScorePlayerX,
+                    player.y - lastBallScorePlayerY
+                  ) >= 70;
+
+                if (
+                  candidateBallScoreId === lastScoredBallId ||
+                  (lastBallScoreTimeMs > 0 && cooldownElapsedMs < 2500) ||
+                  !movedFromLastScoreSpot
+                ) {
+                  // Anti-farming: ball bounces off without awarding duplicate/stationary points
+                  ball.state = 'FREE';
+                  ball.freeTimer = 0;
+                  ball.vx = -ball.vx * 0.35;
+                  ball.vy = -ball.vy * 0.35;
+                  if (!movedFromLastScoreSpot) {
+                    player.speechBubble =
+                      '⚠️ Bitte erst weiterrollen vor dem nächsten Treffer!';
+                    player.speechTimer = 1.6;
+                  }
+                  break;
+                }
+
+                lastScoredBallId = candidateBallScoreId;
+                lastBallScoreTimeMs = now;
+                lastBallScorePlayerX = player.x;
+                lastBallScorePlayerY = player.y;
+                ballDistanceSkatedSinceLastScore = 0;
+
                 const elimCountSoFar = trackNpcs.filter(
                   (n) => n.eliminated
                 ).length;
@@ -5248,10 +5873,11 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               ? Math.hypot(guardManni.x - ball.x, guardManni.y - ball.y)
               : 9999;
 
-            if (distToPlayer < 48) {
+            if (distToPlayer < 48 && !player.isJumping) {
               ball.state = 'HELD';
               ball.holderId = 'player';
               ball.fromPlayer = true;
+              ball.id = `ball_${ballThrowSeqCounter++}`;
               ball.freeTimer = 0;
               ball.color = '#39ff14';
             } else if (guardManni && distToManni < 40) {
@@ -5274,52 +5900,190 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
                 ball.state = 'HELD';
                 ball.holderId = 'player';
                 ball.fromPlayer = true;
+                ball.id = `ball_${ballThrowSeqCounter++}`;
                 ball.freeTimer = 0;
                 ball.color = '#39ff14';
               }
             }
           }
         }
+
+        // Ballspiel-Bestzeitjagd ("Last Skater Standing"): Live-Stoppuhr & 3 klare Stopp-Bedingungen
+        const activeNonGuardNpcs = trackNpcs.filter((n) => n.role !== 'guard');
+        const totalBallspielTargets = activeNonGuardNpcs.length;
+        const remainingBallspielTargets = activeNonGuardNpcs.filter(
+          (n) => !n.eliminated
+        ).length;
+
+        if (totalBallspielTargets === 0) {
+          // 3. Abbruch bei leerer Bahn: Stoppt sofort und setzt sauber zurück
+          ballspielElapsedSec = 0;
+          ballspielRoundEnded = true;
+        } else if (!ballspielRoundEnded) {
+          ballspielElapsedSec += dt;
+          if (remainingBallspielTargets === 0) {
+            // 1. Regulärer Sieg: Alle anderen Skater abgeworfen (Last Skater Standing)
+            ballspielRoundEnded = true;
+            const finalSec = Math.round(ballspielElapsedSec * 10) / 10;
+            soundFX.playChallengeUnlocked();
+            player.speechBubble = `🏆 BAHN LEERGERÄUMT in ${finalSec.toFixed(1)}s!`;
+            player.speechTimer = 4.5;
+            p.onBallspielRoundFinished?.({
+              elapsedSec: finalSec,
+              totalSkaters: totalBallspielTargets,
+              reason: 'victory',
+            });
+          } else if (ballspielElapsedSec >= 180.0) {
+            // 2. Sicherheits-Zeitlimit: Automatisch nach 3:00 Minuten (180.0s) beenden
+            ballspielElapsedSec = 180.0;
+            ballspielRoundEnded = true;
+            player.speechBubble =
+              '⏱️ 3:00 Min. Zeitlimit erreicht! Ballspiel-Runde beendet.';
+            player.speechTimer = 4.0;
+            p.onBallspielRoundFinished?.({
+              elapsedSec: 180.0,
+              totalSkaters: totalBallspielTargets,
+              reason: 'timeout',
+            });
+          }
+        }
       } else {
         softballs.length = 0;
+        ballspielElapsedSec = 0;
+        ballspielRoundEnded = false;
       }
 
       if (p.hallGameMode === 'slalom') {
+        if (
+          !onRinkFloor &&
+          (slalomRoundsCompleted > 0 || slalomGatesInCurrentRound > 0)
+        ) {
+          slalomRoundsCompleted = 0;
+          slalomGatesInCurrentRound = 0;
+          player.slalomCombo = 0;
+          lastScoredPylonId = null;
+          lastPassSide = null;
+          player.speechBubble =
+            '🚧 Parcours verlassen! Slalom-Runde & Tempo auf 100 % zurückgesetzt.';
+          player.speechTimer = 1.6;
+        }
         for (const cone of slalomCones) {
           if (cone.wobbleTimer > 0) {
             cone.wobbleTimer = Math.max(0, cone.wobbleTimer - dt);
           }
           const dist = Math.hypot(player.x - cone.x, player.y - cone.y);
-          if (dist < 28 && !player.isJumping) {
+          if (dist < 26 && !player.isJumping) {
+            // Direct collision with cone: 0 points & reset slalom combo, round & speed bonus!
             if (cone.wobbleTimer <= 0) {
               cone.wobbleTimer = 1.5;
               player.slalomCombo = 0;
-              player.speechBubble = 'Hütchen berührt!';
-              player.speechTimer = 1.2;
+              slalomRoundsCompleted = 0;
+              slalomGatesInCurrentRound = 0;
+              lastScoredPylonId = cone.id;
+              lastPassSide = null;
+              cone.passed = false;
+              player.speechBubble =
+                '💥 Hütchen berührt! Runden-Zähler & Tempo auf 100 % zurückgesetzt!';
+              player.speechTimer = 1.6;
               soundFX.playCrash(false);
             }
-          } else if (dist < 64 && dist >= 28 && !cone.passed) {
-            cone.passed = true;
-            player.slalomCombo += 1;
-            soundFX.playSlalomCombo(player.slalomCombo);
-            p.onAwardObstaclePoints?.(10);
-            floatingScores.push({
-              x: player.x,
-              y: player.y - 34,
-              startY: player.y - 34,
-              text: '+10 Pkt',
-              age: 0,
-              duration: 1.15,
-            });
-            p.onChallengeProgress('slalom_10_gates', player.slalomCombo, true);
-            if (player.slalomCombo >= 10) {
-              p.onCertificateEvent?.('clean_slalom');
-            }
-            window.setTimeout(() => {
+            continue;
+          }
+
+          // True Slalom Gate Pass Detection: check if skater crossed the pylon's X-axis plane
+          const crossedConeX =
+            (prevSlalomCheckX - cone.x) * (player.x - cone.x) <= 0 &&
+            prevSlalomCheckX !== player.x;
+          const lateralOffset = player.y - cone.y;
+          const absLateral = Math.abs(lateralOffset);
+
+          if (
+            crossedConeX &&
+            Math.abs(player.vx) > 30 &&
+            absLateral >= 18 &&
+            absLateral <= 95 &&
+            cone.wobbleTimer <= 0
+          ) {
+            // Determine side ('left' | 'right') relative to the axis of the slalom straight
+            // (Top straight y < 500 vs. bottom straight y >= 500)
+            const rowCenterY = cone.y >= 500 ? 735 : 225;
+            const currentSide: 'left' | 'right' =
+              player.y < rowCenterY ? 'left' : 'right';
+
+            if (cone.id === lastScoredPylonId) {
+              // Rule 2: Turning around and re-passing the SAME pylon awards 0 points & resets combo!
+              player.slalomCombo = 0;
+              slalomGatesInCurrentRound = 0;
+              lastPassSide = null;
               cone.passed = false;
-            }, 3500);
+              player.speechBubble =
+                '⚠️ Wenden an derselben Pylone zählt nicht! Combo: 0x';
+              player.speechTimer = 1.5;
+            } else if (lastPassSide !== null && currentSide === lastPassSide) {
+              // Rule 3: Passing on the SAME side as the previous pylon (no zigzag) awards 0 points & resets combo!
+              player.slalomCombo = 0;
+              slalomGatesInCurrentRound = 0;
+              lastScoredPylonId = cone.id;
+              lastPassSide = currentSide;
+              cone.passed = false;
+              player.speechBubble =
+                '⚠️ Gleiche Seite! Echter Links-Rechts-Zickzack nötig!';
+              player.speechTimer = 1.5;
+            } else {
+              // Valid alternating Left/Right Slalom Pass!
+              cone.passed = true;
+              lastScoredPylonId = cone.id;
+              lastPassSide = currentSide;
+              player.slalomCombo += 1;
+              slalomGatesInCurrentRound += 1;
+              soundFX.playSlalomCombo(player.slalomCombo);
+              p.onAwardObstaclePoints?.(10);
+
+              if (slalomGatesInCurrentRound >= 5) {
+                slalomGatesInCurrentRound = 0;
+                slalomRoundsCompleted += 1;
+                const nextTempoPct =
+                  100 + Math.min(80, slalomRoundsCompleted * 8);
+                p.onSlalomRoundComplete?.(slalomRoundsCompleted, 2);
+                floatingScores.push({
+                  x: player.x,
+                  y: player.y - 44,
+                  startY: player.y - 44,
+                  text: `🏁 SLALOM-RUNDE #${slalomRoundsCompleted} • +2 PIXEL • ${nextTempoPct}% TEMPO!`,
+                  age: 0,
+                  duration: 1.55,
+                });
+                player.speechBubble = `🏁 Slalom-Runde ${slalomRoundsCompleted} geschafft! +2 Pixel & Tempo ${nextTempoPct} %!`;
+                player.speechTimer = 2.2;
+              } else {
+                floatingScores.push({
+                  x: player.x,
+                  y: player.y - 34,
+                  startY: player.y - 34,
+                  text: `+10 (${currentSide === 'left' ? 'LINKS' : 'RECHTS'})`,
+                  age: 0,
+                  duration: 1.15,
+                });
+              }
+
+              p.onChallengeProgress(
+                'slalom_10_gates',
+                player.slalomCombo,
+                true
+              );
+              if (player.slalomCombo >= 10) {
+                p.onCertificateEvent?.('clean_slalom');
+              }
+              window.setTimeout(() => {
+                cone.passed = false;
+              }, 3500);
+            }
           }
         }
+        prevSlalomCheckX = player.x;
+      } else {
+        slalomRoundsCompleted = 0;
+        slalomGatesInCurrentRound = 0;
       }
 
       if (p.hallGameMode === 'stuhlsprung') {
@@ -5548,18 +6312,21 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         floatingScores
       );
 
-      // Mirror main canvas onto the Admin Live-Monitor / Rückfahrkamera canvas if open.
-      // When the admin clicks a style card in "BAHN-STYLES & EPOCHEN-LOOKS" (`p.monitorPreviewStyle`),
-      // render that selected style directly into the Live-Monitor in real time!
-      const monitorEl = document.getElementById(
-        'admin-live-monitor-canvas'
-      ) as HTMLCanvasElement | null;
+      // Mirror main canvas onto the single sticky Admin Live-Bahnkamera (with Lokal vs. Multiplayer-Halle camera switcher)
+      const monitorEl = document.querySelector<HTMLCanvasElement>(
+        '#admin-center-live-camera-canvas'
+      );
       if (monitorEl) {
+        const previewStyle = p.monitorPreviewStyle || arenaStyleRef.current;
+        const forceMpView = p.monitorCameraMode === 'multiplayer';
         const mCtx = monitorEl.getContext('2d');
         if (mCtx) {
           mCtx.imageSmoothingEnabled = false;
-          const previewStyle = p.monitorPreviewStyle || arenaStyleRef.current;
-          if (previewStyle !== arenaStyleRef.current) {
+          mCtx.clearRect(0, 0, monitorEl.width, monitorEl.height);
+          if (
+            previewStyle !== arenaStyleRef.current ||
+            forceMpView !== Boolean(p.isMultiplayerActive)
+          ) {
             mCtx.save();
             mCtx.scale(
               monitorEl.width / WORLD_WIDTH,
@@ -5570,6 +6337,9 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
               now,
               {
                 ...p,
+                isMultiplayerActive: forceMpView
+                  ? true
+                  : p.isMultiplayerActive,
                 centerStageMode: centerArenaRef.current,
                 fogMachineEnabled: fogEnabledRef.current,
                 arenaStyle: previewStyle,
@@ -5718,13 +6488,54 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
                 player.y -
                   (ARENA_LAYOUT.lockers.y + ARENA_LAYOUT.lockers.height / 2)
               ) <=
-                Math.max(
-                  ARENA_LAYOUT.lockers.width,
-                  ARENA_LAYOUT.lockers.height
-                ) /
-                  2 +
-                  58
-          ),
+                  Math.max(
+                    ARENA_LAYOUT.lockers.width,
+                    ARENA_LAYOUT.lockers.height
+                  ) /
+                    2 +
+                    58
+            ),
+          nearNewspaperStand:
+            propsRef.current.newspaperEnabled !== false &&
+            Math.hypot(
+              player.x -
+                (ARENA_LAYOUT.bottomEntrance.cashierBooth.x +
+                  ARENA_LAYOUT.bottomEntrance.cashierBooth.width / 2),
+              player.y -
+                (ARENA_LAYOUT.bottomEntrance.cashierBooth.y +
+                  ARENA_LAYOUT.bottomEntrance.cashierBooth.height +
+                  36)
+            ) <= 84,
+          nearLeaderboardBoard:
+            Math.hypot(
+              player.x -
+                (ARENA_LAYOUT.bottomEntrance.cashierBooth.x +
+                  ARENA_LAYOUT.bottomEntrance.cashierBooth.width +
+                  66),
+              player.y -
+                (ARENA_LAYOUT.bottomEntrance.cashierBooth.y +
+                  ARENA_LAYOUT.bottomEntrance.cashierBooth.height +
+                  26)
+            ) <= 88,
+          nearCustomCrewId:
+            (propsRef.current.customCrewMembers || []).find(
+              (cm) => Math.hypot(player.x - cm.x, player.y - cm.y) <= 78
+            )?.id || null,
+          slalomRound: slalomRoundsCompleted,
+          slalomSpeedPercent: 100 + Math.min(80, slalomRoundsCompleted * 8),
+          nearArcadeMachine:
+            (
+              [
+                { id: 'monkey-stomp' as const, x: 84, y: 264 },
+                { id: 'disco-invaders' as const, x: 148, y: 264 },
+                { id: 'pac-roller' as const, x: 212, y: 264 },
+              ].find(
+                (cab) =>
+                  Math.hypot(player.x - cab.x, player.y - (cab.y + 18)) <= 76
+              ) || null
+            )?.id || null,
+          ballspielElapsedSec: Math.round(ballspielElapsedSec * 10) / 10,
+          isArcadeProtected: Boolean(p.isPlayingArcade),
         });
       }
 
@@ -6360,8 +7171,10 @@ function renderCompleteScene(
     mobilitySelected?: boolean;
     avatarRole?: 'standard' | 'kid' | 'stammgast';
     sundayCliqueActive?: boolean;
+    customCrewMembers?: CustomCrewStationMember[];
     newspaperEnabled?: boolean;
     newspaperHasNewBadge?: boolean;
+    isPlayingArcade?: boolean;
   },
   player: {
     x: number;
@@ -6471,6 +7284,20 @@ function renderCompleteScene(
     ctx.translate(WORLD_WIDTH / 2, WORLD_HEIGHT / 2);
     ctx.scale(zoomX, zoomY);
     ctx.translate(-lookAheadX, -lookAheadY);
+  } else if (
+    typeof window !== 'undefined' &&
+    window.innerWidth <= 1024 &&
+    !p.buildModeEnabled
+  ) {
+    // 3b. Responsive Follow-Cam Zoom on Mobile & Tablet (max-width: 1024px)
+    const followZoom = window.innerWidth < 640 ? 1.56 : 1.32;
+    const halfW = WORLD_WIDTH / (2 * followZoom);
+    const halfH = WORLD_HEIGHT / (2 * followZoom);
+    const camX = Math.max(halfW, Math.min(WORLD_WIDTH - halfW, player.x));
+    const camY = Math.max(halfH, Math.min(WORLD_HEIGHT - halfH, player.y));
+    ctx.translate(WORLD_WIDTH / 2, WORLD_HEIGHT / 2);
+    ctx.scale(followZoom, followZoom);
+    ctx.translate(-camX, -camY);
   }
 
   // 1. OUTER HALL FLOOR & EPOCH STYLE WALL/FLOOR TREATMENT
@@ -7087,8 +7914,10 @@ function renderCompleteScene(
         softballs[0].state === 'HELD' &&
         softballs[0].holderId === 'player'
     );
+    const hasEnoughThrowSpeed =
+      Math.hypot(player.vx, player.vy) >= 355 * 0.35;
 
-    if (ballHeldByPlayer) {
+    if (ballHeldByPlayer && hasEnoughThrowSpeed) {
       const crossX = Math.round(
         hasMouseMovedOnCanvas
           ? mouseWorldX
@@ -7347,6 +8176,64 @@ function renderCompleteScene(
             ? 'green'
             : undefined,
       });
+
+      // Cult NPC signature 80s visual details (Skate Cat ears & tail, Walkman-Moni foam headphones, Breakdance-Benni headband)
+      if (npc.id === 'cult-skate-cat') {
+        ctx.save();
+        ctx.translate(npc.x, npc.y - (npc.jumpZ || 0));
+        ctx.rotate(npc.headingRad);
+        // Orange-Gold Cat Tail wagging behind
+        const wag = Math.sin(now * 0.012) * 5;
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 3.5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-12, 0);
+        ctx.quadraticCurveTo(-22, wag, -26, wag * 1.4);
+        ctx.stroke();
+        // Cute Cat Ears on head
+        ctx.fillStyle = '#f59e0b';
+        ctx.strokeStyle = '#fde047';
+        ctx.lineWidth = 1.2;
+        [-7, 7].forEach((ey) => {
+          ctx.beginPath();
+          ctx.moveTo(4, ey - 3);
+          ctx.lineTo(10, ey);
+          ctx.lineTo(2, ey + 3);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        });
+        ctx.restore();
+      } else if (npc.id === 'cult-walkman-moni') {
+        ctx.save();
+        ctx.translate(npc.x, npc.y - (npc.jumpZ || 0));
+        ctx.rotate(npc.headingRad);
+        // 80s Silver Headband & Bright Orange Foam Walkman Earpads
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, -11);
+        ctx.lineTo(0, 11);
+        ctx.stroke();
+        ctx.fillStyle = '#f97316';
+        ctx.beginPath();
+        ctx.arc(0, -11, 3.6, 0, Math.PI * 2);
+        ctx.arc(0, 11, 3.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      } else if (npc.id === 'cult-breakdance-benni') {
+        ctx.save();
+        ctx.translate(npc.x, npc.y - (npc.jumpZ || 0));
+        ctx.rotate(npc.headingRad);
+        // Neon Yellow/Red 80s Breakdance Headband
+        ctx.strokeStyle = '#fde047';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(0, 0, 10, -Math.PI * 0.65, Math.PI * 0.65);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     // Render Special Ghost Skaters (When enabled in Admin Terminal — only in Solo mode!)
@@ -7516,6 +8403,231 @@ function renderCompleteScene(
     ctx.restore();
   }
 
+  // 9c-2. RENDER CLICKABLE 80s ARCADE LEADERBOARD ("🏆 EHRENTAFEL") ON ENTRANCE WALL
+  {
+    const cb = ARENA_LAYOUT.bottomEntrance.cashierBooth;
+    const lbX = cb.x + cb.width + 66;
+    const lbY = cb.y + cb.height + 26;
+    ctx.save();
+    ctx.translate(lbX, lbY);
+
+    ctx.fillStyle = '#0f172a';
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.roundRect(-40, -18, 80, 36, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Mini Arcade Trophy & Highscore Bars
+    ctx.fillStyle = '#fde047';
+    ctx.font = 'bold 11px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('🏆', -34, 4);
+
+    ctx.fillStyle = '#fde047';
+    ctx.font = 'bold 8px "JetBrains Mono", monospace';
+    ctx.fillText('EHRENTAFEL', -17, -3);
+    ctx.fillStyle = '#39ff14';
+    ctx.fillText('TOP 10 [E]', -17, 8);
+
+    ctx.restore();
+  }
+
+  // 9c-3. RENDER 3 CLICKABLE 80s RETRO ARCADE CABINETS IN THE ARCADE CORNER NEAR THE DJ-KANZEL
+  {
+    const arcadeMachines: {
+      id: 'monkey-stomp' | 'disco-invaders' | 'pac-roller';
+      title: string;
+      shortTag: string;
+      x: number;
+      y: number;
+      cabColor: string;
+      trimColor: string;
+      screenColor: string;
+      icon: string;
+    }[] = [
+      {
+        id: 'monkey-stomp',
+        title: 'MONKEY STOMP',
+        shortTag: 'DONKEY-86',
+        x: 84,
+        y: 264,
+        cabColor: '#451a03',
+        trimColor: '#f59e0b',
+        screenColor: '#fde047',
+        icon: '🦍',
+      },
+      {
+        id: 'disco-invaders',
+        title: 'DISCO INVADERS',
+        shortTag: 'SPACE-86',
+        x: 148,
+        y: 264,
+        cabColor: '#0f172a',
+        trimColor: '#00f0ff',
+        screenColor: '#38bdf8',
+        icon: '👾',
+      },
+      {
+        id: 'pac-roller',
+        title: 'PAC-ROLLER',
+        shortTag: 'MAZE-86',
+        x: 212,
+        y: 264,
+        cabColor: '#1e1b4b',
+        trimColor: '#fde047',
+        screenColor: '#39ff14',
+        icon: '🍒',
+      },
+    ];
+
+    // Subtle neon carpet runner under the 3 arcade cabinets
+    ctx.save();
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.86)';
+    ctx.strokeStyle = '#ff2a85';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.roundRect(48, 240, 200, 48, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#fde047';
+    ctx.font = 'bold 7.5px "Silkscreen", "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('🕹️ 80er ARCADE-ECKE [KLICK / E]', 148, 235);
+    ctx.restore();
+
+    for (const mac of arcadeMachines) {
+      const distPlayer = Math.hypot(player.x - mac.x, player.y - (mac.y + 18));
+      const isNear = distPlayer <= 76;
+      ctx.save();
+      ctx.translate(mac.x, mac.y);
+
+      if (isNear) {
+        ctx.shadowColor = mac.trimColor;
+        ctx.shadowBlur = 12;
+      }
+
+      // Cabinet Housing
+      ctx.fillStyle = mac.cabColor;
+      ctx.strokeStyle = mac.trimColor;
+      ctx.lineWidth = isNear ? 2.4 : 1.8;
+      ctx.beginPath();
+      ctx.roundRect(-24, -18, 48, 36, 5);
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // Illuminated Top Marquee
+      ctx.fillStyle = mac.trimColor;
+      ctx.fillRect(-21, -15, 42, 6);
+      ctx.fillStyle = '#050811';
+      ctx.font = 'bold 5.5px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(mac.shortTag, 0, -10.5);
+
+      // Glowing CRT Screen with animated scanline pulse
+      ctx.fillStyle = '#050814';
+      ctx.fillRect(-18, -7, 36, 15);
+      ctx.strokeStyle = mac.screenColor;
+      ctx.lineWidth = 1.1;
+      ctx.strokeRect(-18, -7, 36, 15);
+
+      const pulseX = Math.sin(now * 0.006 + mac.x) * 6;
+      ctx.fillStyle = mac.screenColor;
+      ctx.font = 'bold 9px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(mac.icon, pulseX, 4);
+
+      // Control Panel (Red Joystick + Arcade Buttons)
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(-20, 9, 40, 6);
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(-9, 12, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#39ff14';
+      ctx.fillRect(4, 10.5, 3, 3);
+      ctx.fillStyle = '#fde047';
+      ctx.fillRect(9, 10.5, 3, 3);
+
+      if (isNear) {
+        ctx.fillStyle = '#050811';
+        ctx.strokeStyle = '#39ff14';
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        ctx.roundRect(-28, 20, 56, 12, 4);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#39ff14';
+        ctx.font = 'bold 6.5px "JetBrains Mono", monospace';
+        ctx.fillText('[E] SPIELEN', 0, 28);
+      }
+
+      ctx.restore();
+    }
+  }
+
+  // 9d. RENDER CUSTOM CREW MEMBERS FROM "12. ADMIN-CREW-GALERIE" AS INTERACTIVE 16-BIT NPCS ON THE RINK
+  if (p.customCrewMembers && p.customCrewMembers.length > 0) {
+    for (const cm of p.customCrewMembers) {
+      // Subtle station pedestal ring under custom crew member
+      ctx.save();
+      ctx.translate(cm.x, cm.y);
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+      ctx.strokeStyle = cm.accentColor || '#00f0ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(0, 14, 24, 10, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Station title mini sign below feet
+      ctx.fillStyle = '#050811';
+      ctx.strokeStyle = '#fde047';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.roundRect(-48, 22, 96, 14, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fde047';
+      ctx.font = 'bold 7.5px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(
+        (cm.stationTitle || 'CREW-STATION').slice(0, 18),
+        0,
+        31.5
+      );
+      ctx.restore();
+
+      const distToPlayer = Math.hypot(player.x - cm.x, player.y - cm.y);
+      renderCharacterSprite(ctx, now, {
+        x: cm.x,
+        y: cm.y,
+        headingRad: Math.atan2(player.y - cm.y, player.x - cm.x),
+        jumpZ: 0,
+        gender: 'male',
+        isWheelchair: false,
+        isSkateGuard: false,
+        isSpeedSkater: false,
+        isGhost: false,
+        isPalladiumanerStaff: true,
+        shirtColor: cm.shirtColor || '#ec4899',
+        accentColor: cm.accentColor || '#00f0ff',
+        wheelColor: '#fde047',
+        name: `👾 ${cm.crewName}`,
+        showName: true,
+        isBlacklight,
+        crashTimer: 0,
+        speechBubble:
+          distToPlayer <= 135 && speechBubblesOn
+            ? `💬 [Klick / E] ${cm.quote}`
+            : null,
+      });
+    }
+  }
+
   // 10. RENDER PLAYER CHARACTER (Supports [H] Kengol-Bucket-Hat, VIP Disco-Rollschuhe, 80s Trick Moves [1]-[4], & Neon Wristbands!)
   const displayPlayerName =
     p.isAnonymousGuest || !p.playerName.trim() ? 'JR' : p.playerName.trim();
@@ -7579,6 +8691,35 @@ function renderCompleteScene(
     activeCharm: p.upgrades.activeCharm || null,
     avatarRole: p.avatarRole || 'standard',
   });
+
+  // 10a. RENDER PARK- & SCHUTZ-MODUS SHIELD WHEN PLAYER IS PLAYING AN 80s ARCADE CABINET
+  if (p.isPlayingArcade) {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    const pulse = 0.65 + Math.sin(now * 0.008) * 0.25;
+    ctx.strokeStyle = `rgba(0, 240, 255, ${pulse})`;
+    ctx.fillStyle = 'rgba(0, 240, 255, 0.14)';
+    ctx.lineWidth = 2.6;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.arc(0, 0, 32, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#050811';
+    ctx.strokeStyle = '#fde047';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.roundRect(-58, 22, 116, 15, 5);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fde047';
+    ctx.font = 'bold 7.5px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('🛡️ PARK-SCHUTZ AKTIV', 0, 32);
+    ctx.restore();
+  }
 
   // 10b. WARME SONNTAGS-CLIQUE NACHMITTAGSBELEUCHTUNG (Golden Hour Sunlight Tint)
   if (p.sundayCliqueActive && !isPutzlicht) {
@@ -13126,6 +14267,8 @@ function render80sDancefloorFogBanks(
  * colorful 80s jackets/shirts, jeans/skirts, animated skating legs & roller skates,
  * and semi-transparent cyan-glowing full-body silhouettes with shimmering pixel outlines for Ghost Skaters!
  */
+let offscreen16BitCharCanvas: HTMLCanvasElement | null = null;
+
 function render16BitPixelCharacterSprite(
   ctx: CanvasRenderingContext2D,
   now: number,
@@ -13207,16 +14350,18 @@ function render16BitPixelCharacterSprite(
   ctx.imageSmoothingEnabled = false;
   ctx.translate(x, y);
 
-  // Ground shadow under skates
+  // Clean oval ground shadow under skates (NO rectangular bounding box!)
+  const shadowScale = Math.max(0.45, 1 - opts.jumpZ / 160);
   ctx.fillStyle = opts.isGhost
-    ? 'rgba(0, 240, 255, 0.25)'
-    : 'rgba(0, 0, 0, 0.46)';
-  ctx.fillRect(-18, 12, 36, 10);
-  ctx.fillRect(-14, 10, 28, 14);
+    ? 'rgba(0, 240, 255, 0.24)'
+    : 'rgba(0, 0, 0, 0.42)';
+  ctx.beginPath();
+  ctx.ellipse(0, 14, 15 * shadowScale, 6.5 * shadowScale, 0, 0, Math.PI * 2);
+  ctx.fill();
 
   ctx.translate(0, -pxSnap(opts.jumpZ));
 
-  // Optional Underglow or Ghost Cyan Aura
+  // Optional Underglow or Ghost Cyan Aura: strictly a soft oval at the skates — NEVER a rectangular box around the body!
   if (opts.underglowColor || opts.isGhost) {
     const glowMap: Record<string, string> = {
       pink: '#ff2a85',
@@ -13224,31 +14369,42 @@ function render16BitPixelCharacterSprite(
       green: '#39ff14',
       gold: '#fde047',
     };
+    ctx.save();
     ctx.fillStyle = opts.isGhost
       ? '#00f0ff'
       : glowMap[opts.underglowColor || 'cyan'] || '#00f0ff';
     ctx.globalAlpha = opts.isGhost
-      ? 0.22 + Math.sin(now * 0.01) * 0.08
-      : 0.3;
-    ctx.fillRect(-20, -24, 40, 44);
-    ctx.globalAlpha = 1;
+      ? 0.22 + Math.sin(now * 0.01) * 0.06
+      : 0.28;
+    ctx.beginPath();
+    ctx.ellipse(0, 14, 18, 7.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
-  ctx.save();
-  ctx.scale(flipX, 1);
-
-  if (opts.isGhost) {
-    ctx.globalAlpha = 0.72 + Math.sin(now * 0.012 + absHash) * 0.1;
+  // Offscreen 16-Bit Sprite Canvas with explicit clearRect(0, 0, width, height) and strict alpha = 0 cleanup
+  const spriteW = 48;
+  const spriteH = 60;
+  if (!offscreen16BitCharCanvas) {
+    offscreen16BitCharCanvas = document.createElement('canvas');
+    offscreen16BitCharCanvas.width = spriteW;
+    offscreen16BitCharCanvas.height = spriteH;
   }
+  const sCtx = offscreen16BitCharCanvas.getContext('2d');
+  if (!sCtx) {
+    ctx.restore();
+    return;
+  }
+  sCtx.imageSmoothingEnabled = false;
+  sCtx.clearRect(0, 0, spriteW, spriteH);
 
-  // Helper to draw a crisp 2x2 pixel block on the 24x32 full-body grid
-  // Grid coordinates: gx in [0..23], gy in [0..31], anchored so feet sit around y = +16
+  // Helper to draw a crisp pixel block on the 24x32 full-body grid onto the cleared offscreen canvas
   const P = 1.75; // 24 * 1.75 = 42px wide, 32 * 1.75 = 56px tall
-  const ox = -12 * P;
-  const oy = -22 * P;
+  const ox = 3;
+  const oy = 2;
   const rectPx = (gx: number, gy: number, gw: number, gh: number, col: string) => {
-    ctx.fillStyle = col;
-    ctx.fillRect(
+    sCtx.fillStyle = col;
+    sCtx.fillRect(
       Math.round(ox + gx * P),
       Math.round(oy + gy * P),
       Math.max(1, Math.round(gw * P)),
@@ -13440,6 +14596,31 @@ function render16BitPixelCharacterSprite(
     }
   }
 
+  // Enforce strict transparency on offscreen sprite: set any pixel with alpha < 128 to (0, 0, 0, 0)
+  const spriteImgData = sCtx.getImageData(0, 0, spriteW, spriteH);
+  const sData = spriteImgData.data;
+  for (let i = 0; i < sData.length; i += 4) {
+    if (sData[i + 3] < 128) {
+      sData[i] = 0;
+      sData[i + 1] = 0;
+      sData[i + 2] = 0;
+      sData[i + 3] = 0;
+    } else {
+      sData[i + 3] = 255;
+    }
+  }
+  sCtx.putImageData(spriteImgData, 0, 0);
+
+  ctx.save();
+  ctx.scale(flipX, 1);
+  if (opts.isGhost) {
+    ctx.globalAlpha = 0.72 + Math.sin(now * 0.012 + absHash) * 0.1;
+  }
+  ctx.drawImage(
+    offscreen16BitCharCanvas,
+    Math.round(-12 * P - ox),
+    Math.round(-22 * P - oy)
+  );
   ctx.restore();
   ctx.restore();
 

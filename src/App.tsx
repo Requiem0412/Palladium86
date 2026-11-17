@@ -140,7 +140,41 @@ import {
   TesterFeedbackItem,
   convertImageFileTo16BitPixelDataUrl,
   getStation16BitPortraitDataUrl,
+  CUSTOM_CREW_SPAWN_PRESETS,
+  CustomCrewSpawnSpotId,
+  CustomCrewStationMember,
+  HandheldPosState,
+  loadHandheldPosState,
+  saveHandheldPosState,
+  DEFAULT_NEWSPAPER_TIPS,
+  DEFAULT_ROLE_KEYS,
+  exportNewspaperFacebookEditionPng,
+  loadUnlockedRoleHandheldSession,
+  RoleHandheldType,
+  RoleKeysConfig,
+  saveUnlockedRoleHandheldSession,
+  loadPlayerPixels,
+  savePlayerPixels,
+  loadSlalomRecord,
+  saveSlalomRecord,
+  HallLeaderboardEntry,
+  loadLocalHallLeaderboard,
+  fetchHallLeaderboard,
+  upsertHallLeaderboardPlayer,
+  resetHallLeaderboardSeason,
+  computeHallRankInfo,
+  DEFAULT_RANK_THRESHOLDS,
+  LicenseStampsState,
+  loadBallspielBestTimeSec,
+  loadLicenseStamps,
+  saveBallspielBestTimeSec,
+  saveLicenseStamps,
 } from './utils/storageAndStats';
+import { PaperDriverLicenseModal } from './components/PaperDriverLicenseModal';
+import {
+  ArcadeMachineId,
+  RetroArcadeCabinetsModal,
+} from './components/RetroArcadeCabinetsModal';
 import {
   addCloudGuestListName,
   clearCloudGuestbook,
@@ -271,7 +305,10 @@ interface AdminSyncPayload {
   newspaperIssueId?: number;
   newspaperHeadline?: string;
   newspaperBody?: string;
+  newspaperTips?: string;
   newspaperUpdatedAt?: string;
+  hallPowerEnabled?: boolean;
+  roleKeys?: RoleKeysConfig;
 }
 
 type MultiplayerPacket =
@@ -483,7 +520,7 @@ export function App() {
     string | null
   >(null);
   const [adminTab, setAdminTab] = useState<
-    'track' | 'light_dj' | 'access' | 'look_build'
+    'track' | 'light_dj' | 'access' | 'look_build' | 'ranks_points'
   >('track');
   const [springerStaffelShowSec, setSpringerStaffelShowSec] =
     useState<number>(0);
@@ -825,14 +862,92 @@ export function App() {
   const [newSongRequestInput, setNewSongRequestInput] = useState<string>('');
   const [songRequestToast, setSongRequestToast] = useState<string | null>(null);
 
-  // 12. 80er-Pixel-Dialoge an den 5 Stationen & Admin-Crew-Galerie State
-  const [activeStationDialog, setActiveStationDialog] =
-    useState<StationDialogId | null>(null);
+  // 12. 80er-Pixel-Dialoge an den 5 Stationen & Admin-Crew-Galerie State (inkl. beliebig vieler eigener Crew-Mitglieder)
+  const [activeStationDialog, setActiveStationDialog] = useState<
+    StationDialogId | string | null
+  >(null);
   const [stationDialogToast, setStationDialogToast] = useState<string | null>(
     null
   );
-  const [uploadingCrewPortraitId, setUploadingCrewPortraitId] =
-    useState<StationDialogId | null>(null);
+  const [uploadingCrewPortraitId, setUploadingCrewPortraitId] = useState<
+    StationDialogId | string | null
+  >(null);
+  const [showAddCustomCrewForm, setShowAddCustomCrewForm] =
+    useState<boolean>(false);
+  const [newCrewStationTitle, setNewCrewStationTitle] = useState<string>(
+    '6. SECURITY & EINLASS-CHECK'
+  );
+  const [newCrewName, setNewCrewName] = useState<string>('Security-Sammy');
+  const [newCrewQuote, setNewCrewQuote] = useState<string>(
+    'Nur mit sauberen Rollen und guter 80er-Laune aufs Parkett!'
+  );
+  const [newCrewSpawnSpot, setNewCrewSpawnSpot] =
+    useState<CustomCrewSpawnSpotId>('eingang');
+  const [newCrewPortraitUrl, setNewCrewPortraitUrl] = useState<string>('');
+  const [newCrewCustomX, setNewCrewCustomX] = useState<number>(1620);
+  const [newCrewCustomY, setNewCrewCustomY] = useState<number>(895);
+
+  // 2. Live-Bahnkamera (Echtzeit-Vorschau zentriert in der Hallenleiter-Regie)
+  const [showAdminCenterCamera, setShowAdminCenterCamera] =
+    useState<boolean>(true);
+  const [isAdminCenterCameraEnlarged, setIsAdminCenterCameraEnlarged] =
+    useState<boolean>(false);
+
+  // 3. Frei verschiebbares & fixierbares „DOT MATRIX REGIE • PALLADIUM“ Handheld (localStorage: p86_handheld_pos)
+  const [handheldPos, setHandheldPos] = useState<HandheldPosState>(() =>
+    loadHandheldPosState()
+  );
+  const [isDraggingHandheld, setIsDraggingHandheld] = useState<boolean>(false);
+  const handheldDragOffsetRef = useRef<{
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+  const handheldContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    saveHandheldPosState(handheldPos);
+  }, [handheldPos]);
+
+  useEffect(() => {
+    if (!isDraggingHandheld) return;
+    const clampHandheldCoords = (clientX: number, clientY: number) => {
+      const off = handheldDragOffsetRef.current;
+      if (!off) return;
+      const boxW = handheldContainerRef.current?.offsetWidth || 264;
+      const boxH = handheldContainerRef.current?.offsetHeight || 160;
+      const maxLeft = Math.max(8, window.innerWidth - boxW - 8);
+      const maxTop = Math.max(8, window.innerHeight - boxH - 8);
+      const nextLeft = Math.max(8, Math.min(maxLeft, Math.round(clientX - off.offsetX)));
+      const nextTop = Math.max(8, Math.min(maxTop, Math.round(clientY - off.offsetY)));
+      setHandheldPos((prev) => ({
+        ...prev,
+        left: nextLeft,
+        top: nextTop,
+      }));
+    };
+    const handleMouseMove = (e: MouseEvent) => {
+      clampHandheldCoords(e.clientX, e.clientY);
+    };
+    const handleTouchMove = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      clampHandheldCoords(t.clientX, t.clientY);
+    };
+    const handleEnd = () => {
+      setIsDraggingHandheld(false);
+      handheldDragOffsetRef.current = null;
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    window.addEventListener('touchend', handleEnd);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleEnd);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleEnd);
+    };
+  }, [isDraggingHandheld]);
 
   // Lighting & Schedule Automation States
   const [blacklightTimerSec, setBlacklightTimerSec] = useState<number>(0);
@@ -858,6 +973,163 @@ export function App() {
     const params = new URLSearchParams(window.location.search);
     const c = params.get('controller')?.trim();
     return c && c.length > 0 ? c : null;
+  }, []);
+
+  // 1b. ?regie=1 URL parameter for Hallenleiter-Login & 4b. ?handheld=dj|licht|presse Fullscreen Role Handheld
+  const initialHasRegieUrlParam = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    const params = new URLSearchParams(window.location.search);
+    const regie = params.get('regie')?.trim().toLowerCase();
+    return regie === '1' || regie === 'true';
+  }, []);
+
+  const initialHandheldUrlRole = useMemo<RoleHandheldType | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    const h = (params.get('rolle') || params.get('handheld'))
+      ?.trim()
+      .toLowerCase();
+    if (h === 'dj' || h === 'licht' || h === 'presse') {
+      return h;
+    }
+    return null;
+  }, []);
+
+  const initialHandheldUrlKey = useMemo<string>(() => {
+    if (typeof window === 'undefined') return '';
+    const params = new URLSearchParams(window.location.search);
+    return (params.get('key') || '').trim();
+  }, []);
+
+  const [unlockedRoleHandheld, setUnlockedRoleHandheld] =
+    useState<RoleHandheldType | null>(() => {
+      const saved = loadUnlockedRoleHandheldSession();
+      if (initialHandheldUrlRole && initialHandheldUrlKey) {
+        const currentSettings = loadAdminSettings();
+        const roleKeys = currentSettings.roleKeys || DEFAULT_ROLE_KEYS;
+        const expected = (roleKeys[initialHandheldUrlRole] || '').trim();
+        const upperKey = initialHandheldUrlKey.toUpperCase();
+        const defaultRoleKey =
+          DEFAULT_ROLE_KEYS[initialHandheldUrlRole].toUpperCase();
+        if (
+          (expected && upperKey === expected.toUpperCase()) ||
+          upperKey === defaultRoleKey ||
+          initialHandheldUrlKey === ADMIN_PIN ||
+          upperKey === MASTER_ADMIN_KEY
+        ) {
+          saveUnlockedRoleHandheldSession(initialHandheldUrlRole);
+          return initialHandheldUrlRole;
+        }
+      }
+      return saved;
+    });
+
+  const [activeHandheldTab, setActiveHandheldTab] = useState<
+    'all' | RoleHandheldType
+  >(() => initialHandheldUrlRole || loadUnlockedRoleHandheldSession() || 'all');
+  const [showRoleKeyLoginModal, setShowRoleKeyLoginModal] =
+    useState<boolean>(false);
+  const [roleKeyLoginInput, setRoleKeyLoginInput] = useState<string>(
+    () => initialHandheldUrlKey || ''
+  );
+  const [roleKeyLoginError, setRoleKeyLoginError] = useState<string | null>(
+    null
+  );
+  const [qrModalRole, setQrModalRole] = useState<RoleHandheldType | null>(null);
+  const [roleKeyCopiedToast, setRoleKeyCopiedToast] = useState<string | null>(
+    null
+  );
+  const [facebookDownloadToast, setFacebookDownloadToast] = useState<
+    string | null
+  >(null);
+
+  // 4. Sticky Live-Monitor Camera Mode ('local' | 'multiplayer'), 5. Pixel Currency, 7. Manual Slow-Cruise, 9. Slalom Record & 10. Hallen-Bestenliste
+  const [adminMonitorCameraMode, setAdminMonitorCameraMode] = useState<
+    'local' | 'multiplayer'
+  >('local');
+  const [manualSlowCruiseActive, setManualSlowCruiseActive] =
+    useState<boolean>(false);
+  const [playerPixels, setPlayerPixels] = useState<number>(() =>
+    loadPlayerPixels()
+  );
+  const [slalomRecord, setSlalomRecord] = useState<number>(() =>
+    loadSlalomRecord()
+  );
+  const [showLeaderboardModal, setShowLeaderboardModal] =
+    useState<boolean>(false);
+  const [leaderboardTab, setLeaderboardTab] = useState<
+    'slalom' | 'points' | 'pixels' | 'ballspiel'
+  >('slalom');
+  const [leaderboardEntries, setLeaderboardEntries] = useState<
+    HallLeaderboardEntry[]
+  >(() => loadLocalHallLeaderboard());
+  const [leaderboardSeasonToast, setLeaderboardSeasonToast] = useState<
+    string | null
+  >(null);
+
+  // PAKET 3: Grauer 80er-Papierführerschein Stempel, Spielbare Retro-Automaten & Ballspiel-Bestzeitjagd
+  const [licenseStamps, setLicenseStamps] = useState<LicenseStampsState>(() =>
+    loadLicenseStamps()
+  );
+  const [activeArcadeGameId, setActiveArcadeGameId] =
+    useState<ArcadeMachineId | null>(null);
+  const [ballspielBestTimeSec, setBallspielBestTimeSec] = useState<number>(
+    () => loadBallspielBestTimeSec() || 0
+  );
+  const [ballspielResetSeq, setBallspielResetSeq] = useState<number>(0);
+  const [ballspielSummaryBanner, setBallspielSummaryBanner] = useState<{
+    elapsedSec: number;
+    totalSkaters: number;
+    reason: 'victory' | 'timeout';
+    isNewRecord: boolean;
+    bonusPixels: number;
+    bonusXp: number;
+    autoReturnSec: number;
+  } | null>(null);
+  const [regieAwardToast, setRegieAwardToast] = useState<string | null>(null);
+
+  // 2b. Minimalist Visitor Quick-Menu ("☰") & 3. Responsive Touch / Portrait States
+  const [showVisitorQuickMenu, setShowVisitorQuickMenu] =
+    useState<boolean>(false);
+  const [portraitHintDismissed, setPortraitHintDismissed] =
+    useState<boolean>(false);
+  const [isPortraitSmallScreen, setIsPortraitSmallScreen] = useState<boolean>(
+    () =>
+      typeof window !== 'undefined' &&
+      window.innerWidth < 600 &&
+      window.innerHeight > window.innerWidth
+  );
+  const [isTouchDevice, setIsTouchDevice] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      window.matchMedia?.('(pointer: coarse)').matches ||
+      navigator.maxTouchPoints > 0 ||
+      window.innerWidth <= 1024
+    );
+  });
+  const [touchStickKnob, setTouchStickKnob] = useState<{
+    x: number;
+    y: number;
+  }>({ x: 0, y: 0 });
+
+  useEffect(() => {
+    const updateViewportFlags = () => {
+      if (typeof window === 'undefined') return;
+      setIsPortraitSmallScreen(
+        window.innerWidth < 600 && window.innerHeight > window.innerWidth
+      );
+      setIsTouchDevice(
+        window.matchMedia?.('(pointer: coarse)').matches ||
+          navigator.maxTouchPoints > 0 ||
+          window.innerWidth <= 1024
+      );
+    };
+    window.addEventListener('resize', updateViewportFlags);
+    window.addEventListener('orientationchange', updateViewportFlags);
+    return () => {
+      window.removeEventListener('resize', updateViewportFlags);
+      window.removeEventListener('orientationchange', updateViewportFlags);
+    };
   }, []);
 
   const remoteControllerInputRef = useRef<{
@@ -887,15 +1159,18 @@ export function App() {
   });
   const controllerHostPeerRef = useRef<Peer | null>(null);
 
-  // Admin PIN Authentication (sessionStorage) — hidden for invited guests unless they unlock with Admin-PIN
+  // Admin PIN Authentication (sessionStorage) — opened ONLY via ?regie=1 or Ctrl+Shift+L / Cmd+Shift+L
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() =>
     initialUrlRoomId ? false : loadAdminUnlockedSession()
   );
-  const [showAdminPinModal, setShowAdminPinModal] = useState<boolean>(false);
-  const [showAdminTerminal, setShowAdminTerminal] = useState<boolean>(false);
+  const [showAdminPinModal, setShowAdminPinModal] = useState<boolean>(() =>
+    initialHasRegieUrlParam && !loadAdminUnlockedSession()
+  );
+  const [showAdminTerminal, setShowAdminTerminal] = useState<boolean>(() =>
+    initialHasRegieUrlParam && loadAdminUnlockedSession()
+  );
   const [pinInput, setPinInput] = useState<string>('');
   const [pinError, setPinError] = useState<string | null>(null);
-  const logoClickTimestampsRef = useRef<number[]>([]);
 
   // ============================================================================
   // PEERJS / WEBRTC REAL-TIME MULTIPLAYER STATE (HOST & GUEST)
@@ -1899,7 +2174,9 @@ export function App() {
       if (
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
-        (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 'a')
+        (e.key.toLowerCase() === 'l' ||
+          e.key.toLowerCase() === 'r' ||
+          e.key.toLowerCase() === 'a')
       ) {
         e.preventDefault();
         if (isAdminUnlocked && !isTesterAccount) {
@@ -1915,20 +2192,14 @@ export function App() {
       // Wenn in einem Eingabefeld getippt wird: alle globalen Spiel-Shortcuts pausieren!
       if (isInput) return;
 
-      if (e.key.toLowerCase() === 'i' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        e.preventDefault();
-        setIsBottomBarCollapsed((prev) => !prev);
-        return;
-      }
-
-      // Game-Boy-Regie-Handheld per Taste [R] ein-/ausklappen (wenn Admin & Baumenü AUS)
+      // Game-Boy-Regie-Handheld per Taste [R] ein-/ausklappen (wenn Admin oder eingeloggte Rolle & Baumenü AUS)
       if (
         e.key.toLowerCase() === 'r' &&
         !e.ctrlKey &&
         !e.metaKey &&
         !e.altKey &&
-        isAdminUnlocked &&
-        !isTesterAccount &&
+        ((isAdminUnlocked && !isTesterAccount) ||
+          unlockedRoleHandheld !== null) &&
         !buildModeEnabled
       ) {
         e.preventDefault();
@@ -1975,6 +2246,7 @@ export function App() {
     showExplorerCertificateModal,
     showLockerModal,
     showNewspaperModal,
+    unlockedRoleHandheld,
   ]);
 
   const handleRedeemDrinkChipAtRental = useCallback(() => {
@@ -2016,23 +2288,6 @@ export function App() {
     setHasRentedSkates(false);
     setDrinkChipAvailable(true);
   }, []);
-
-  const handleLogoClick = () => {
-    const now = performance.now();
-    const recent = logoClickTimestampsRef.current.filter((t) => now - t < 1100);
-    recent.push(now);
-    logoClickTimestampsRef.current = recent;
-    if (recent.length >= 3) {
-      logoClickTimestampsRef.current = [];
-      if (isAdminUnlocked && !isTesterAccount) {
-        setShowAdminTerminal(true);
-      } else {
-        setPinInput('');
-        setPinError(null);
-        setShowAdminPinModal(true);
-      }
-    }
-  };
 
   const handleVerifyAdminPin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2201,7 +2456,10 @@ export function App() {
       newspaperBody:
         adminSettings.newspaperBody ||
         'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
+      newspaperTips: adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS,
       newspaperUpdatedAt: adminSettings.newspaperUpdatedAt || '15.11.2026',
+      hallPowerEnabled: adminSettings.hallPowerEnabled !== false,
+      roleKeys: adminSettings.roleKeys || DEFAULT_ROLE_KEYS,
     };
   }, [
     lightingMode,
@@ -2256,7 +2514,10 @@ export function App() {
     adminSettings.newspaperIssueId,
     adminSettings.newspaperHeadline,
     adminSettings.newspaperBody,
+    adminSettings.newspaperTips,
     adminSettings.newspaperUpdatedAt,
+    adminSettings.hallPowerEnabled,
+    adminSettings.roleKeys,
   ]);
 
   const applyIncomingAdminSync = useCallback(
@@ -2377,10 +2638,32 @@ export function App() {
           typeof s.newspaperBody === 'string'
             ? s.newspaperBody
             : prev.newspaperBody,
+        newspaperTips:
+          typeof s.newspaperTips === 'string'
+            ? s.newspaperTips
+            : prev.newspaperTips,
         newspaperUpdatedAt:
           typeof s.newspaperUpdatedAt === 'string'
             ? s.newspaperUpdatedAt
             : prev.newspaperUpdatedAt,
+        hallPowerEnabled:
+          typeof s.hallPowerEnabled === 'boolean'
+            ? s.hallPowerEnabled
+            : prev.hallPowerEnabled,
+        roleKeys:
+          s.roleKeys && typeof s.roleKeys === 'object'
+            ? {
+                dj: s.roleKeys.dj || prev.roleKeys?.dj || DEFAULT_ROLE_KEYS.dj,
+                licht:
+                  s.roleKeys.licht ||
+                  prev.roleKeys?.licht ||
+                  DEFAULT_ROLE_KEYS.licht,
+                presse:
+                  s.roleKeys.presse ||
+                  prev.roleKeys?.presse ||
+                  DEFAULT_ROLE_KEYS.presse,
+              }
+            : prev.roleKeys,
       }));
       if (typeof s.strobeBurstCount === 'number') {
         setStrobeBurstCount(s.strobeBurstCount);
@@ -2502,8 +2785,11 @@ export function App() {
           }
         }
       });
-    } else if (mpRole === 'guest' && isAdminUnlocked) {
-      // Admin with PIN has Regie priority even when connected as guest
+    } else if (
+      mpRole === 'guest' &&
+      (isAdminUnlocked || unlockedRoleHandheld !== null)
+    ) {
+      // Admin or unlocked Role Handheld has Regie sync priority even when connected as guest
       const conn = guestConnRef.current;
       if (conn && conn.open) {
         try {
@@ -2514,13 +2800,18 @@ export function App() {
       }
     }
     // 3. Live-Regie-Synchronisation via Supabase (public.hall_settings, ID = 1)
-    if (isAdminUnlocked || isDjBoothUnlocked) {
+    if (
+      isAdminUnlocked ||
+      isDjBoothUnlocked ||
+      unlockedRoleHandheld !== null
+    ) {
       void upsertCloudHallSettings(payload, lastSyncedAnnouncementRef.current);
     }
   }, [
     mpRole,
     isAdminUnlocked,
     isDjBoothUnlocked,
+    unlockedRoleHandheld,
     buildCurrentAdminSyncPayload,
   ]);
 
@@ -4510,6 +4801,13 @@ export function App() {
     totalEarnedPoints - (upgrades.spentPoints || 0)
   );
 
+  // PAKET 3: Hallen-Rang & Papierführerschein-Farbe anhand der Hallen-Punkte (XP)
+  const hallRankInfo = useMemo(
+    () =>
+      computeHallRankInfo(totalEarnedPoints, adminSettings.rankThresholds),
+    [totalEarnedPoints, adminSettings.rankThresholds]
+  );
+
   // 2. Cloud-Sicherung für Spielerprofile (public.players) via Upsert
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -4810,15 +5108,22 @@ export function App() {
     const expected = (
       (import.meta.env.VITE_DJ_PASSWORD as string | undefined) || 'MAGIC86'
     ).trim();
+    const roleDjKey = (
+      adminSettings.roleKeys?.dj || DEFAULT_ROLE_KEYS.dj
+    ).trim();
     const entered = djPasswordInput.trim();
     if (
       entered === expected ||
       entered.toUpperCase() === expected.toUpperCase() ||
+      entered.toUpperCase() === roleDjKey.toUpperCase() ||
       entered.toUpperCase() === 'MAGIC86' ||
       entered === ADMIN_PIN ||
       entered.toUpperCase() === MASTER_ADMIN_KEY
     ) {
       setIsDjBoothUnlocked(true);
+      setUnlockedRoleHandheld('dj');
+      setActiveHandheldTab('dj');
+      saveUnlockedRoleHandheldSession('dj');
       try {
         window.sessionStorage.setItem('palladium_dj_unlocked_v1', 'true');
       } catch {
@@ -4828,9 +5133,401 @@ export function App() {
       setShowDjBoothModal(true);
       setDjPasswordError(null);
     } else {
-      setDjPasswordError('Falsches DJ-Passwort! (Tipp: VITE_DJ_PASSWORD / MAGIC86)');
+      setDjPasswordError('Ungültiger Zugangs-Key. Bitte erneut versuchen.');
     }
   };
+
+  const handleVerifyRoleHandheldKey = (e: React.FormEvent) => {
+    e.preventDefault();
+    const entered = roleKeyLoginInput.trim().toUpperCase();
+    const rk: RoleKeysConfig = adminSettings.roleKeys || DEFAULT_ROLE_KEYS;
+    if (
+      entered === ADMIN_PIN ||
+      entered === MASTER_ADMIN_KEY.toUpperCase()
+    ) {
+      setIsAdminUnlocked(true);
+      saveAdminUnlockedSession(true);
+      setUnlockedRoleHandheld('dj');
+      setActiveHandheldTab('all');
+      setShowRoleKeyLoginModal(false);
+      setRoleKeyLoginError(null);
+      setShowGameBoyHandheld(true);
+      setIsGameBoyExpanded(true);
+      return;
+    }
+    if (
+      entered === (rk.dj || DEFAULT_ROLE_KEYS.dj).trim().toUpperCase() ||
+      entered === 'DJ-PALLADIUM' ||
+      entered === 'DJ-BEAT-86'
+    ) {
+      setUnlockedRoleHandheld('dj');
+      setActiveHandheldTab('dj');
+      saveUnlockedRoleHandheldSession('dj');
+      setIsDjBoothUnlocked(true);
+      setShowRoleKeyLoginModal(false);
+      setRoleKeyLoginError(null);
+      setShowGameBoyHandheld(true);
+      setIsGameBoyExpanded(true);
+      return;
+    }
+    if (
+      entered === (rk.licht || DEFAULT_ROLE_KEYS.licht).trim().toUpperCase() ||
+      entered === 'LICHT-PALLADIUM' ||
+      entered === 'LICHT-NEON-86'
+    ) {
+      setUnlockedRoleHandheld('licht');
+      setActiveHandheldTab('licht');
+      saveUnlockedRoleHandheldSession('licht');
+      setShowRoleKeyLoginModal(false);
+      setRoleKeyLoginError(null);
+      setShowGameBoyHandheld(true);
+      setIsGameBoyExpanded(true);
+      return;
+    }
+    if (
+      entered ===
+        (rk.presse || DEFAULT_ROLE_KEYS.presse).trim().toUpperCase() ||
+      entered === 'PRESSE-PALLADIUM' ||
+      entered === 'PRESSE-KURIER-86'
+    ) {
+      setUnlockedRoleHandheld('presse');
+      setActiveHandheldTab('presse');
+      saveUnlockedRoleHandheldSession('presse');
+      setShowRoleKeyLoginModal(false);
+      setRoleKeyLoginError(null);
+      setShowGameBoyHandheld(true);
+      setIsGameBoyExpanded(true);
+      return;
+    }
+    setRoleKeyLoginError('Ungültiger Rollen-Key. Bitte beim Hallenleiter erfragen.');
+  };
+
+  const handleOpenLeaderboardModal = useCallback(() => {
+    soundFX.unlockAudioContext();
+    setShowLeaderboardModal(true);
+    void fetchHallLeaderboard().then((list) => {
+      setLeaderboardEntries(list);
+    });
+  }, []);
+
+  const handleSlalomRoundComplete = useCallback(
+    (round: number, bonusPixels: number) => {
+      setPlayerPixels((prev) => {
+        const next = prev + bonusPixels;
+        savePlayerPixels(next);
+        return next;
+      });
+      setSlalomRecord((prevRec) => {
+        const nextRec = Math.max(prevRec, round);
+        saveSlalomRecord(nextRec);
+        return nextRec;
+      });
+      setLicenseStamps((prev) => {
+        if (prev.slalomExam) return prev;
+        const next: LicenseStampsState = {
+          ...prev,
+          slalomExam: true,
+        };
+        saveLicenseStamps(next);
+        return next;
+      });
+    },
+    []
+  );
+
+  // Automatische Stempel-Synchronisation für besuchte 5 Stationen & Kurier-Vielleser
+  useEffect(() => {
+    const coreStations = ['kasse', 'verleih', 'proshop', 'snackbar', 'dj'];
+    if (
+      activeStationDialog &&
+      coreStations.includes(activeStationDialog)
+    ) {
+      setLicenseStamps((prev) => {
+        const already = prev.visitedStations.includes(activeStationDialog);
+        const nextVisited = already
+          ? prev.visitedStations
+          : [...prev.visitedStations, activeStationDialog];
+        const all5 = coreStations.every((s) => nextVisited.includes(s));
+        if (already && prev.fiveStationsVisited === all5) return prev;
+        const next: LicenseStampsState = {
+          ...prev,
+          visitedStations: nextVisited,
+          fiveStationsVisited: prev.fiveStationsVisited || all5,
+        };
+        saveLicenseStamps(next);
+        return next;
+      });
+    }
+  }, [activeStationDialog]);
+
+  useEffect(() => {
+    const vielleserDone =
+      Boolean(certificatesState.unlocked.vielleser_5?.unlocked) ||
+      (certificatesState.readNewspaperIssues?.length || 0) >= 5;
+    const slalomDone = slalomRecord >= 1;
+    const ballDone = ballspielBestTimeSec > 0;
+    setLicenseStamps((prev) => {
+      if (
+        (vielleserDone && !prev.kurierReader) ||
+        (slalomDone && !prev.slalomExam) ||
+        (ballDone && !prev.ballspielChamp)
+      ) {
+        const next: LicenseStampsState = {
+          ...prev,
+          kurierReader: prev.kurierReader || vielleserDone,
+          slalomExam: prev.slalomExam || slalomDone,
+          ballspielChamp: prev.ballspielChamp || ballDone,
+        };
+        saveLicenseStamps(next);
+        return next;
+      }
+      return prev;
+    });
+  }, [
+    ballspielBestTimeSec,
+    certificatesState.readNewspaperIssues,
+    certificatesState.unlocked.vielleser_5,
+    slalomRecord,
+  ]);
+
+  // 5. Ballspiel-Bestzeitjagd ("Last Skater Standing"): Runden-Ende & 10s Auto-Return
+  const handleBallspielRoundFinished = useCallback(
+    ({
+      elapsedSec,
+      totalSkaters,
+      reason,
+    }: {
+      elapsedSec: number;
+      totalSkaters: number;
+      reason: 'victory' | 'timeout';
+    }) => {
+      const cleanSec = Math.max(0.5, Math.round(elapsedSec * 10) / 10);
+      let isNewRecord = false;
+      if (reason === 'victory') {
+        if (ballspielBestTimeSec <= 0 || cleanSec < ballspielBestTimeSec) {
+          isNewRecord = true;
+          setBallspielBestTimeSec(cleanSec);
+          saveBallspielBestTimeSec(cleanSec);
+        }
+        setLicenseStamps((prev) => {
+          if (prev.ballspielChamp) return prev;
+          const next: LicenseStampsState = {
+            ...prev,
+            ballspielChamp: true,
+          };
+          saveLicenseStamps(next);
+          return next;
+        });
+      }
+      const bonusPixels =
+        reason === 'victory' ? (isNewRecord ? 45 : 25) : 10;
+      const bonusXp =
+        reason === 'victory' ? (isNewRecord ? 180 : 90) : 30;
+      setPlayerPixels((prev) => {
+        const next = prev + bonusPixels;
+        savePlayerPixels(next);
+        return next;
+      });
+      setUpgrades((u) => ({
+        ...u,
+        bonusPoints: (u.bonusPoints || 0) + bonusXp,
+      }));
+      soundFX.playChallengeUnlocked();
+      setBallspielSummaryBanner({
+        elapsedSec: cleanSec,
+        totalSkaters,
+        reason,
+        isNewRecord,
+        bonusPixels,
+        bonusXp,
+        autoReturnSec: 10,
+      });
+    },
+    [ballspielBestTimeSec]
+  );
+
+  useEffect(() => {
+    if (hallGameMode !== 'ballspiel' && ballspielSummaryBanner) {
+      setBallspielSummaryBanner(null);
+    }
+  }, [hallGameMode, ballspielSummaryBanner]);
+
+  useEffect(() => {
+    if (!ballspielSummaryBanner) return;
+    const timer = window.setInterval(() => {
+      setBallspielSummaryBanner((prev) => {
+        if (!prev) return null;
+        if (prev.autoReturnSec <= 1) {
+          setHallGameMode('free-skate');
+          return null;
+        }
+        return {
+          ...prev,
+          autoReturnSec: prev.autoReturnSec - 1,
+        };
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [ballspielSummaryBanner]);
+
+  const handleAwardArcadeReward = useCallback(
+    (earnedPixels: number, earnedXp: number, gameLabel: string) => {
+      setPlayerPixels((prev) => {
+        const next = prev + earnedPixels;
+        savePlayerPixels(next);
+        return next;
+      });
+      setUpgrades((u) => ({
+        ...u,
+        bonusPoints: (u.bonusPoints || 0) + earnedXp,
+      }));
+      showTaskCompletedBanner(
+        `${gameLabel}: +${earnedPixels} Pixel & +${earnedXp} XP`
+      );
+    },
+    [showTaskCompletedBanner]
+  );
+
+  // Sync player's current Slalom record, Hallen-Punkte, Pixel count & Ballspiel-Bestzeit to the Hallen-Ehrentafel leaderboard
+  useEffect(() => {
+    if (!isCurtainOpen) return;
+    const timer = window.setTimeout(() => {
+      void upsertHallLeaderboardPlayer({
+        id: cloudPlayerId,
+        name: (playerName || 'Gast-Skater').trim(),
+        shirtColor: playerShirtColor || '#00f0ff',
+        slalomRounds: slalomRecord,
+        hallPoints: totalEarnedPoints,
+        pixelsCollected: playerPixels,
+        ballspielBestTimeSec:
+          ballspielBestTimeSec > 0 ? ballspielBestTimeSec : undefined,
+      }).then((updated) => {
+        setLeaderboardEntries(updated);
+      });
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [
+    ballspielBestTimeSec,
+    cloudPlayerId,
+    isCurtainOpen,
+    playerName,
+    playerPixels,
+    playerShirtColor,
+    slalomRecord,
+    totalEarnedPoints,
+  ]);
+
+  const handleDownloadFacebookNewspaper = useCallback(async () => {
+    await exportNewspaperFacebookEditionPng({
+      issueId: currentNewspaperIssueId,
+      updatedAt: adminSettings.newspaperUpdatedAt || '15.11.2026',
+      headline:
+        adminSettings.newspaperHeadline ||
+        'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
+      body:
+        adminSettings.newspaperBody ||
+        'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
+      tips: adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS,
+      versionLabel: APP_VERSION_LABEL,
+    });
+    setFacebookDownloadToast(
+      '✅ Facebook-PNG (1200×1200 px) gespeichert & Post-Text kopiert!'
+    );
+    window.setTimeout(() => setFacebookDownloadToast(null), 4500);
+  }, [
+    adminSettings.newspaperBody,
+    adminSettings.newspaperHeadline,
+    adminSettings.newspaperTips,
+    adminSettings.newspaperUpdatedAt,
+    currentNewspaperIssueId,
+  ]);
+
+  const handleTouchStickPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const maxR = rect.width * 0.4;
+    const rawX = e.clientX - cx;
+    const rawY = e.clientY - cy;
+    const dist = Math.hypot(rawX, rawY);
+    const scale = dist > maxR ? maxR / dist : 1;
+    const nx = (rawX * scale) / maxR;
+    const ny = (rawY * scale) / maxR;
+    remoteControllerInputRef.current.dx = Math.round(nx * 100) / 100;
+    remoteControllerInputRef.current.dy = Math.round(ny * 100) / 100;
+    setTouchStickKnob({ x: rawX * scale, y: rawY * scale });
+  };
+
+  const resetTouchStickPointer = () => {
+    remoteControllerInputRef.current.dx = 0;
+    remoteControllerInputRef.current.dy = 0;
+    setTouchStickKnob({ x: 0, y: 0 });
+  };
+
+  const triggerNearStationOrNewspaperInteraction = useCallback(() => {
+    if (telemetry.nearArcadeMachine) {
+      soundFX.unlockAudioContext();
+      setActiveArcadeGameId(telemetry.nearArcadeMachine);
+      return;
+    }
+    if (telemetry.nearNewspaperStand && adminSettings.newspaperEnabled !== false) {
+      handleOpenNewspaperModal();
+      return;
+    }
+    if (telemetry.nearLeaderboardBoard) {
+      handleOpenLeaderboardModal();
+      return;
+    }
+    if (telemetry.nearCustomCrewId) {
+      soundFX.unlockAudioContext();
+      setStationDialogToast(null);
+      setActiveStationDialog(telemetry.nearCustomCrewId);
+      return;
+    }
+    if (telemetry.nearCashier) {
+      soundFX.unlockAudioContext();
+      setStationDialogToast(null);
+      setActiveStationDialog('kasse');
+      return;
+    }
+    if (telemetry.nearSkateRental) {
+      soundFX.unlockAudioContext();
+      setStationDialogToast(null);
+      setActiveStationDialog('verleih');
+      return;
+    }
+    if (telemetry.nearProShop) {
+      soundFX.unlockAudioContext();
+      setStationDialogToast(null);
+      setActiveStationDialog('proshop');
+      return;
+    }
+    if (telemetry.nearBistroCounter) {
+      soundFX.unlockAudioContext();
+      setStationDialogToast(null);
+      setActiveStationDialog('snackbar');
+      return;
+    }
+    if (telemetry.nearDjTower) {
+      soundFX.unlockAudioContext();
+      setStationDialogToast(null);
+      setActiveStationDialog('dj');
+      return;
+    }
+    remoteControllerInputRef.current.interact = true;
+  }, [
+    adminSettings.newspaperEnabled,
+    handleOpenLeaderboardModal,
+    handleOpenNewspaperModal,
+    telemetry.nearBistroCounter,
+    telemetry.nearCashier,
+    telemetry.nearCustomCrewId,
+    telemetry.nearDjTower,
+    telemetry.nearLeaderboardBoard,
+    telemetry.nearNewspaperStand,
+    telemetry.nearProShop,
+    telemetry.nearSkateRental,
+  ]);
 
   const handleSubmitSongRequest = useCallback(
     (trackText: string) => {
@@ -4893,176 +5590,650 @@ export function App() {
     ]
   );
 
-  return (
-    <div className="relative h-screen w-screen overflow-hidden bg-[#070A12] text-[#FFF8E7] select-none flex flex-col">
-      {/* TOP RETRO HUD BAR (Full Widescreen Width) */}
-      <header className="z-30 flex items-center justify-between gap-2 px-3 py-1.5 bg-[#0B0E17]/95 border-b border-fuchsia-500/35 shadow-[0_4px_20px_rgba(0,0,0,0.65)] text-xs">
-        {/* Left: Logo (3x click for Admin) + Version + Active Mode Badges */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            type="button"
-            onClick={handleLogoClick}
-            title="Palladium Roller Arena Hanau (3x Klick oder Ctrl+Shift+A für Hallenleiter-Regie)"
-            className="flex items-center gap-2 px-2.5 py-1 rounded bg-gradient-to-r from-fuchsia-950/90 via-indigo-950/90 to-slate-900 border border-fuchsia-400/50 hover:border-cyan-400 transition cursor-pointer"
-          >
-            <span className="font-display font-extrabold tracking-wider text-sm text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 via-amber-200 to-cyan-300">
-              ✦ PALLADIUM HANAU &apos;86
-            </span>
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-200 border border-fuchsia-400/30">
-              {APP_VERSION_LABEL}
-            </span>
-          </button>
+  const canUseRoleHandheld =
+    (isAdminUnlocked && !isTesterAccount) || unlockedRoleHandheld !== null;
+  const effectiveHandheldRole: 'all' | RoleHandheldType =
+    isAdminUnlocked && !isTesterAccount
+      ? activeHandheldTab
+      : unlockedRoleHandheld || 'dj';
 
-          {/* Kompaktes Spind-Menü (SPINDE) Button für Spieler */}
-          <button
-            type="button"
-            onClick={() => {
-              handleIntroStepComplete('open_locker');
-              setShowLockerModal((v) => !v);
-            }}
-            title="Mein Spind & Hallen-Guide: Ausrüstung, Aufgaben & Rundgang, Live-Events & Tester-Feedback"
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border cursor-pointer text-[11px] font-mono font-bold transition ${
-              showLockerModal || telemetry.nearLockers
-                ? 'bg-cyan-950/90 border-cyan-400 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.45)]'
-                : 'bg-slate-900/90 hover:bg-slate-800 border-cyan-500/50 text-cyan-200'
-            }`}
-          >
-            <span>🗄️ Spind</span>
-            <span className="px-1.5 py-0.5 rounded bg-amber-400/20 border border-amber-300/60 text-amber-200 text-[10px]">
-              {(introTour.open_locker ? 1 : 0) +
-                (introTour.fetch_drink ? 1 : 0) +
-                (introTour.skate_rink ? 1 : 0) +
-                (introTour.try_ballspiel ? 1 : 0) <
-              4
-                ? `${
-                    (introTour.open_locker ? 1 : 0) +
-                    (introTour.fetch_drink ? 1 : 0) +
-                    (introTour.skate_rink ? 1 : 0) +
-                    (introTour.try_ballspiel ? 1 : 0)
-                  }/4`
-                : `${completedChallengesCount}/${PALLADIUM_CHALLENGES.length}`}
-            </span>
-            {lockerSettings.vipDiscoSkatesEquipped && (
-              <span className="text-amber-300 text-[10px]">🪩</span>
-            )}
-            {lockerSettings.drinksInLocker > 0 && (
-              <span className="px-1 rounded bg-cyan-500/20 text-cyan-200 text-[10px]">
-                🥤{lockerSettings.drinksInLocker}
+  const getRoleHandheldShareUrl = (role: RoleHandheldType) => {
+    const rk = adminSettings.roleKeys || DEFAULT_ROLE_KEYS;
+    const keyVal = rk[role] || DEFAULT_ROLE_KEYS[role];
+    if (typeof window === 'undefined') {
+      return `https://palladium-arena-s94k2.vercel.app/?rolle=${role}&key=${encodeURIComponent(keyVal)}`;
+    }
+    const base = `${window.location.origin}${window.location.pathname}`;
+    return `${base}?rolle=${role}&key=${encodeURIComponent(keyVal)}`;
+  };
+
+  // Render Role-Handheld Content (used both in floating Handheld and in ?handheld=dj|licht|presse Fullscreen mode)
+  const renderRoleHandheldControls = (isFullscreen: boolean) => {
+    const btnSizeClass = isFullscreen
+      ? 'py-3 px-3 text-xs sm:text-sm rounded-xl'
+      : 'py-1.5 px-2 text-[9.5px] rounded-full';
+
+    if (effectiveHandheldRole === 'dj') {
+      const slots = (adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS).slice(0, 9);
+      return (
+        <div className="space-y-2.5">
+          {/* Musik-Mix & Track-Wechsel */}
+          <div className="p-2 rounded-lg bg-[#1d2029] text-white space-y-1.5">
+            <div className="flex items-center justify-between text-[9.5px] text-amber-300 font-bold">
+              <span>🎧 DJ-MIX &amp; AIRHORN</span>
+              <button
+                type="button"
+                onClick={() => handleTriggerDjSoundboard('airhorn', 'AIRHORN')}
+                className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-black cursor-pointer"
+              >
+                📣 AIRHORN
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {slots.map((slot, idx) => (
+                <button
+                  key={slot.id}
+                  type="button"
+                  onClick={() => handleTriggerDjJingle(slot)}
+                  className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] active:translate-y-0.5 text-amber-100 border-b-3 border-[#4d0d22] font-black tracking-tight shadow cursor-pointer truncate`}
+                >
+                  [{idx + 1}] {slot.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* LED-Lauftext & 1-Klick Durchsagen */}
+          <div className="p-2 rounded-lg bg-[#1d2029] text-white space-y-1.5">
+            <label className="block text-[9px] text-cyan-300 font-bold uppercase">
+              📡 LED-Lauftext am DJ-Pult:
+            </label>
+            <input
+              type="text"
+              value={adminSettings.djTickerText || DEFAULT_DJ_TICKER}
+              onChange={(e) =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  djTickerText: e.target.value,
+                }))
+              }
+              className="w-full px-2 py-1 rounded bg-slate-950 border border-cyan-400/50 text-cyan-200 text-[10.5px]"
+            />
+            <div className="grid grid-cols-2 gap-1.5 pt-1">
+              {HALL_ANNOUNCEMENT_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => handleTriggerHallAnnouncementPreset(preset)}
+                  className={`${btnSizeClass} bg-[#6b1435] hover:bg-[#8f1b47] text-amber-200 border-b-2 border-[#3d0a1c] font-bold truncate cursor-pointer`}
+                >
+                  {preset.buttonLabel}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (effectiveHandheldRole === 'licht') {
+      const powerOn = adminSettings.hallPowerEnabled !== false;
+      return (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() =>
+                setAdminSettings((s) => {
+                  const nextPower = s.hallPowerEnabled === false;
+                  return {
+                    ...s,
+                    hallPowerEnabled: nextPower,
+                    fullHallPutzlichtEnabled: nextPower
+                      ? false
+                      : s.fullHallPutzlichtEnabled,
+                  };
+                })
+              }
+              className={`${btnSizeClass} font-black border-b-3 shadow cursor-pointer ${
+                powerOn
+                  ? 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-950'
+                  : 'bg-rose-800 hover:bg-rose-700 text-amber-200 border-rose-950 animate-pulse'
+              }`}
+            >
+              ⚡ STROM: {powerOn ? 'AN' : 'AUS'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setLightingMode('disco')}
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] text-white border-b-3 border-[#4d0d22] font-black shadow cursor-pointer`}
+            >
+              🪩 DISCO-LICHT
+            </button>
+            <button
+              type="button"
+              onClick={() => setLightingMode('blacklight')}
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] text-white border-b-3 border-[#4d0d22] font-black shadow cursor-pointer`}
+            >
+              🟣 UV-SCHWARZLICHT
+            </button>
+            <button
+              type="button"
+              onClick={() => setLightingMode('slow-skating')}
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] text-white border-b-3 border-[#4d0d22] font-black shadow cursor-pointer`}
+            >
+              💜 SLOW-SKATE
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  fullHallPutzlichtEnabled: !s.fullHallPutzlichtEnabled,
+                }))
+              }
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] text-white border-b-3 border-[#4d0d22] font-black shadow cursor-pointer`}
+            >
+              💡 PUTZLICHT: {adminSettings.fullHallPutzlichtEnabled ? 'AN' : 'AUS'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAdminSettings((s) => ({ ...s, fogMachineEnabled: true }));
+                setFogBurstCount((c) => c + 1);
+                soundFX.playDjSoundboardEffect('fog-hiss');
+              }}
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] text-white border-b-3 border-[#4d0d22] font-black shadow cursor-pointer`}
+            >
+              💨 NEBEL-STOSS
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  skateDirection: s.skateDirection === 'cw' ? 'ccw' : 'cw',
+                }))
+              }
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] text-white border-b-3 border-[#4d0d22] font-black shadow cursor-pointer`}
+            >
+              🔄 RICHTUNG: {adminSettings.skateDirection === 'cw' ? 'CW' : 'CCW'}
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setHallGameMode((m) =>
+                  m === 'free-skate'
+                    ? 'ballspiel'
+                    : m === 'ballspiel'
+                    ? 'slalom'
+                    : m === 'slalom'
+                    ? 'springerstaffel'
+                    : 'free-skate'
+                )
+              }
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] text-amber-200 border-b-3 border-[#4d0d22] font-black shadow cursor-pointer truncate`}
+            >
+              🛼 MODUS: {hallGameMode.toUpperCase()}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (effectiveHandheldRole === 'presse') {
+      return (
+        <div className="space-y-2 p-2 rounded-lg bg-[#1d2029] text-white">
+          <div className="flex items-center justify-between text-[9.5px] text-amber-300 font-bold">
+            <span>📰 REDAKTION • AUSGABE #{currentNewspaperIssueId}</span>
+            <span>{adminSettings.newspaperUpdatedAt || '15.11.2026'}</span>
+          </div>
+          <div>
+            <label className="block text-[8.5px] text-amber-200 font-bold mb-0.5">
+              Schlagzeile:
+            </label>
+            <input
+              type="text"
+              value={adminSettings.newspaperHeadline || ''}
+              onChange={(e) =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  newspaperHeadline: e.target.value,
+                }))
+              }
+              className="w-full px-2 py-1 rounded bg-slate-950 border border-amber-400/50 text-amber-100 text-[10.5px]"
+            />
+          </div>
+          <div>
+            <label className="block text-[8.5px] text-cyan-200 font-bold mb-0.5">
+              Redaktions-Meldung:
+            </label>
+            <textarea
+              rows={isFullscreen ? 4 : 2}
+              value={adminSettings.newspaperBody || ''}
+              onChange={(e) =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  newspaperBody: e.target.value,
+                }))
+              }
+              className="w-full px-2 py-1 rounded bg-slate-950 border border-cyan-400/50 text-slate-100 text-[10px]"
+            />
+          </div>
+          <div>
+            <label className="block text-[8.5px] text-emerald-200 font-bold mb-0.5">
+              Tipps (1 Tipp pro Zeile):
+            </label>
+            <textarea
+              rows={isFullscreen ? 3 : 2}
+              value={
+                adminSettings.newspaperTips ?? DEFAULT_NEWSPAPER_TIPS
+              }
+              onChange={(e) =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  newspaperTips: e.target.value,
+                }))
+              }
+              className="w-full px-2 py-1 rounded bg-slate-950 border border-emerald-400/50 text-emerald-100 text-[10px]"
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 pt-1">
+            <button
+              type="button"
+              onClick={handleOpenNewspaperModal}
+              className="py-1.5 px-2 rounded bg-slate-800 hover:bg-slate-700 border border-cyan-400/60 text-cyan-200 text-[9.5px] font-bold cursor-pointer"
+            >
+              👁️ Vorschau
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const nextIssueId =
+                  Math.max(1, Number(adminSettings.newspaperIssueId) || 1) + 1;
+                const updatedDate = new Date().toLocaleDateString('de-DE', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                });
+                setAdminSettings((prev) => {
+                  const next: AdminPersistentSettings = {
+                    ...prev,
+                    newspaperEnabled: true,
+                    newspaperIssueId: nextIssueId,
+                    newspaperUpdatedAt: updatedDate,
+                  };
+                  saveAdminSettings(next);
+                  return next;
+                });
+                soundFX.playChallengeUnlocked();
+              }}
+              className="py-1.5 px-2 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[9.5px] font-black cursor-pointer"
+            >
+              🚀 Live veröffentlichen
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadFacebookNewspaper}
+              className="py-1.5 px-2 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[9.5px] font-black cursor-pointer"
+            >
+              📸 Als Bild für Facebook speichern (PNG)
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // Default 'all' Launchpad for Hallenleiter
+    return (
+      <div className="mt-2 grid grid-cols-2 gap-1.5">
+        {(
+          adminSettings.handheldActionIds || [
+            'light_disco',
+            'light_blacklight',
+            'fog_burst',
+            'direction',
+            'mode_ball',
+            'putzlicht',
+          ]
+        ).map((actId) => {
+          const actionMap: Record<
+            string,
+            { label: string; run: () => void }
+          > = {
+            light_disco: {
+              label: '🪩 DISCO',
+              run: () => setLightingMode('disco'),
+            },
+            light_blacklight: {
+              label: '🟣 UV-LICHT',
+              run: () => setLightingMode('blacklight'),
+            },
+            light_slow: {
+              label: '💜 SLOW-SKATE',
+              run: () => setLightingMode('slow-skating'),
+            },
+            putzlicht: {
+              label: adminSettings.fullHallPutzlichtEnabled
+                ? '💡 PUTZ: AN'
+                : '💡 PUTZ: AUS',
+              run: () =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  fullHallPutzlichtEnabled: !s.fullHallPutzlichtEnabled,
+                })),
+            },
+            fog_burst: {
+              label: '💨 NEBEL-STOSS',
+              run: () => setFogBurstCount((c) => c + 1),
+            },
+            direction: {
+              label:
+                adminSettings.skateDirection === 'cw'
+                  ? '🔄 RICHTUNG: CW'
+                  : '🔄 RICHTUNG: CCW',
+              run: () =>
+                setAdminSettings((s) => ({
+                  ...s,
+                  skateDirection: s.skateDirection === 'cw' ? 'ccw' : 'cw',
+                })),
+            },
+            mode_free: {
+              label: '🛼 FREILAUF',
+              run: () => setHallGameMode('free-skate'),
+            },
+            mode_ball: {
+              label: '🏐 BALLSPIEL',
+              run: () =>
+                setHallGameMode((m) =>
+                  m === 'ballspiel' ? 'free-skate' : 'ballspiel'
+                ),
+            },
+            mode_slalom: {
+              label: '🦺 SLALOM',
+              run: () =>
+                setHallGameMode((m) =>
+                  m === 'slalom' ? 'free-skate' : 'slalom'
+                ),
+            },
+            mode_staffel: {
+              label: '⚡ STAFFEL',
+              run: () =>
+                setHallGameMode((m) =>
+                  m === 'springerstaffel' ? 'free-skate' : 'springerstaffel'
+                ),
+            },
+            stage_band: {
+              label:
+                centerStageMode === 'band'
+                  ? '🎸 BÜHNE: BAND'
+                  : '🏝️ BÜHNE: INSELN',
+              run: () =>
+                setCenterStageMode((m) =>
+                  m === 'band' ? 'islands' : 'band'
+                ),
+            },
+            horn: {
+              label: '📣 AIRHORN',
+              run: () => handleTriggerDjSoundboard('airhorn', 'AIRHORN'),
+            },
+            gong_towing: {
+              label: '🚓 ABSCHLEPPEN',
+              run: () =>
+                handleTriggerHallAnnouncementPreset(
+                  HALL_ANNOUNCEMENT_PRESETS[0]
+                ),
+            },
+          };
+          const item = actionMap[actId];
+          if (!item) return null;
+          return (
+            <button
+              key={actId}
+              type="button"
+              onClick={item.run}
+              className={`${btnSizeClass} bg-[#8b1d41] hover:bg-[#a6234e] active:translate-y-0.5 text-white border-b-3 border-[#4d0d22] font-mono font-black tracking-tight shadow cursor-pointer truncate`}
+            >
+              {item.label}
+            </button>
+          );
+        })}
+
+        {(adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS)
+          .filter((slot) => slot.showInHandheld)
+          .map((slot) => (
+            <button
+              key={`handheld_sample_${slot.id}`}
+              type="button"
+              onClick={() => handleTriggerDjJingle(slot)}
+              className={`${btnSizeClass} bg-[#6b1435] hover:bg-[#8f1b47] active:translate-y-0.5 text-amber-200 border-b-3 border-[#3d0a1c] font-mono font-black tracking-tight shadow cursor-pointer truncate`}
+              title={`DJ-Sample abspielen: ${slot.label}`}
+            >
+              🎵 {slot.label}
+            </button>
+          ))}
+      </div>
+    );
+  };
+
+  // FULLSCREEN SECOND-SCREEN ROLE HANDHELD MODE (?handheld=dj|licht|presse):
+  // Disables the 2D arena canvas and shows only the touch-optimized Retro-Handheld fullscreen (100vw x 100dvh).
+  if (initialHandheldUrlRole) {
+    const roleLabel =
+      initialHandheldUrlRole === 'dj'
+        ? '🎧 DJ-HANDHELD'
+        : initialHandheldUrlRole === 'licht'
+        ? '💡 LICHT & STROM HANDHELD'
+        : '📰 PRESSE-REDAKTION HANDHELD';
+    const isAuthorizedForUrlRole =
+      (isAdminUnlocked && !isTesterAccount) ||
+      unlockedRoleHandheld === initialHandheldUrlRole;
+
+    return (
+      <div className="fixed inset-0 w-screen h-dvh overflow-y-auto bg-[#12131a] text-slate-900 font-mono select-none p-3 sm:p-5 flex flex-col items-center justify-center">
+        {facebookDownloadToast && (
+          <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[120] px-4 py-2 rounded-xl bg-emerald-950 border-2 border-emerald-400 text-emerald-200 text-xs font-bold shadow-xl">
+            {facebookDownloadToast}
+          </div>
+        )}
+        <div className="w-full max-w-lg rounded-3xl bg-[#d4d4cc] border-4 border-[#8e8e84] shadow-[0_16px_50px_rgba(0,0,0,0.85)] p-4 space-y-3">
+          <div className="flex items-center justify-between border-b-2 border-[#b0b0a6] pb-2">
+            <div>
+              <div className="text-[10px] font-black tracking-wider text-[#333652]">
+                DOT MATRIX SECOND-SCREEN • PALLADIUM HANAU
+              </div>
+              <div className="text-sm font-black text-slate-900">
+                {roleLabel}
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setQrModalRole(initialHandheldUrlRole)}
+                className="px-2.5 py-1 rounded-lg bg-[#306230] text-[#e0f8cf] text-xs font-black cursor-pointer"
+              >
+                📱 QR
+              </button>
+              <a
+                href={
+                  typeof window !== 'undefined' ? window.location.pathname : '/'
+                }
+                className="px-2.5 py-1 rounded-lg bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] text-xs font-black"
+              >
+                🛼 Zur Bahn
+              </a>
+            </div>
+          </div>
+
+          {/* Green LCD Live Hall Status */}
+          <div className="rounded-xl bg-[#5a5a66] p-2.5 border-2 border-[#43434d] shadow-inner">
+            <div className="flex items-center justify-between text-[9px] text-slate-200 mb-1">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-2.5 h-2.5 rounded-full bg-rose-500 shadow-[0_0_6px_#f43f5e]" />
+                LIVE-SYNC • HALL_SETTINGS #1
               </span>
-            )}
-          </button>
-
-          {/* Slipstream Active Indicator */}
-          {telemetry.isSlipstreamActive && (
-            <span className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-950/90 border border-cyan-400 text-cyan-200 font-mono font-bold text-[11px] shadow-[0_0_12px_rgba(34,211,238,0.5)]">
-              💨 Windschatten aktiv!
-            </span>
-          )}
-
-          {/* Slow-Skating Announcement Badge in HUD */}
-          {lightingMode === 'slow-skating' && (
-            <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-gradient-to-r from-amber-950/95 via-rose-950/95 to-fuchsia-950/95 border border-amber-300 text-amber-200 font-mono font-bold text-[11px] shadow-[0_0_14px_rgba(251,191,36,0.45)] animate-pulse">
-              🪩 JETZT BEGINNT DAS SLOW-SKATING!
-            </span>
-          )}
-
-          {/* Active Singleplayer Difficulty & Skate Status Badge */}
-          <span
-            title="Aktuelle Erfahrungsstufe & Rollschuh-Status (fixiert durch Eintrittsstempel)"
-            className="px-2 py-0.5 rounded bg-slate-900/90 border border-slate-700 text-slate-200 font-mono text-[11px] flex items-center gap-1.5"
-          >
-            <span>
-              {difficulty === 'beginner'
-                ? '🟢 Anfänger'
-                : difficulty === 'pro'
-                ? '🔴 Profi'
-                : '🟡 Fortgeschr.'}
-            </span>
-            <span className="text-slate-600">•</span>
-            <span
-              className={
-                hasOwnSkates
-                  ? 'text-emerald-300 font-bold'
-                  : hasRentedSkates
-                  ? 'text-sky-300 font-bold'
-                  : 'text-amber-300 font-bold animate-pulse'
-              }
-            >
-              {hasOwnSkates
-                ? '🛼 Eigene Skates'
-                : hasRentedSkates
-                ? '🛼 Leih-Skates'
-                : '👟 Straßenschuhe (Verleih [E])'}
-            </span>
-          </span>
-
-          {/* Freigetränk-Chip Status */}
-          {drinkChipAvailable && (
-            <span
-              title={
-                hasOwnSkates
-                  ? 'Dein Freigetränk-Chip kann an der Bistro-Theke [E] für ein extra Getränk eingelöst werden!'
-                  : 'Tausche deinen Freigetränk-Chip am Rollschuh-Verleih [E] gegen 80er-Leih-Rollschuhe!'
-              }
-              className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/80 text-amber-200 font-mono font-bold text-[11px] shadow-[0_0_10px_rgba(251,191,36,0.28)]"
-            >
-              🪙 1x Freigetränk-Chip
-            </span>
-          )}
-
-          {/* Gratis Welcome Gift Vouchers in Inventory */}
-          {(telemetry.freeSlushCount > 0 || telemetry.freeBlobaCount > 0) && (
-            <span
-              title="Willkommensgeschenk an der Kasse – einlösbar an der Bistro-Theke [E]"
-              className="px-2 py-0.5 rounded bg-fuchsia-950/90 border border-amber-300/70 text-amber-200 font-mono text-[11px] shadow-[0_0_10px_rgba(251,191,36,0.25)]"
-            >
-              🎁 Gratis:{' '}
-              {telemetry.freeSlushCount > 0 && (
-                <span className="text-cyan-300 font-bold mr-1.5">
-                  {telemetry.freeSlushCount}x Slush
+              <span className="text-amber-200 font-bold">
+                {APP_VERSION_LABEL}
+              </span>
+            </div>
+            <div className="rounded bg-[#8bac0f] border-2 border-[#306230] px-3 py-2 text-[#0f380f] text-xs leading-snug shadow-inner">
+              <div className="flex items-center justify-between font-black border-b border-[#306230]/40 pb-1">
+                <span>LICHT: {lightingMode.toUpperCase()}</span>
+                <span>
+                  RICHTUNG:{' '}
+                  {adminSettings.skateDirection === 'cw' ? '↻ CW' : '↺ CCW'}
                 </span>
-              )}
-              {telemetry.freeBlobaCount > 0 && (
-                <span className="text-amber-300 font-bold">
-                  {telemetry.freeBlobaCount}x Bloba
+              </div>
+              <div className="flex items-center justify-between mt-1 font-bold">
+                <span>MODUS: {hallGameMode.toUpperCase()}</span>
+                <span>
+                  STROM:{' '}
+                  {adminSettings.hallPowerEnabled !== false ? 'AN' : 'AUS'}
                 </span>
+              </div>
+            </div>
+          </div>
+
+          {!isAuthorizedForUrlRole ? (
+            <form
+              onSubmit={handleVerifyRoleHandheldKey}
+              className="p-4 rounded-2xl bg-[#1d2029] text-white space-y-3"
+            >
+              <div className="text-xs font-bold text-amber-300">
+                🔐 Bitte Rollen-Key für {roleLabel} eingeben:
+              </div>
+              <input
+                type="password"
+                autoFocus
+                value={roleKeyLoginInput}
+                onChange={(e) => {
+                  setRoleKeyLoginInput(e.target.value);
+                  if (roleKeyLoginError) setRoleKeyLoginError(null);
+                }}
+                placeholder="Rollen-Key eingeben..."
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-amber-400/70 text-sm text-amber-200 focus:outline-none"
+              />
+              {roleKeyLoginError && (
+                <div className="text-xs text-rose-300 font-bold">
+                  ⚠️ {roleKeyLoginError}
+                </div>
               )}
-            </span>
-          )}
-
-          {/* Active Drink Timers */}
-          {telemetry.slushTimerSec > 0 && (
-            <span className="px-2 py-0.5 rounded bg-sky-950/90 border border-sky-400/60 text-sky-200 font-mono text-[11px]">
-              🍧 Slush-Cool: {telemetry.slushTimerSec}s
-            </span>
-          )}
-          {telemetry.blobaColaTimerSec > 0 && (
-            <span className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/60 text-amber-200 font-mono text-[11px]">
-              🥤 Bloba-Kick: {telemetry.blobaColaTimerSec}s
-            </span>
-          )}
-
-          {/* True Palladiumaner Gold Star Badge */}
-          {isTruePalladiumaner && (
-            <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-300 text-amber-200 font-mono font-bold text-[11px]">
-              ★ Echter Palladiumaner
-            </span>
+              <button
+                type="submit"
+                className="w-full py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs cursor-pointer"
+              >
+                🔓 Handheld freischalten
+              </button>
+            </form>
+          ) : (
+            renderRoleHandheldControls(true)
           )}
         </div>
 
-        {/* Center: Clickable Middle Avatar Circle + Live Telemetry Counters */}
-        <div className="flex items-center gap-2.5">
+        {/* QR Modal inside Fullscreen Handheld Mode */}
+        {qrModalRole && (
+          <div
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 p-4"
+            onClick={() => setQrModalRole(null)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-sm rounded-2xl bg-[#140F23] border-2 border-cyan-400 p-4 text-white font-mono space-y-3 text-center"
+            >
+              <div className="text-xs font-black text-cyan-300 uppercase">
+                📱 QR-Code Second-Screen ({qrModalRole.toUpperCase()})
+              </div>
+              <div className="bg-white p-3 rounded-xl inline-block mx-auto">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
+                    getRoleHandheldShareUrl(qrModalRole)
+                  )}`}
+                  alt="Handheld QR Code"
+                  className="w-44 h-44"
+                />
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  readOnly
+                  value={getRoleHandheldShareUrl(qrModalRole)}
+                  className="flex-1 px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-[10px] text-cyan-200"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                      navigator.clipboard.writeText(
+                        getRoleHandheldShareUrl(qrModalRole)
+                      );
+                      setRoleKeyCopiedToast('✅ Handheld-Link kopiert!');
+                      window.setTimeout(() => setRoleKeyCopiedToast(null), 2500);
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded bg-cyan-400 text-slate-950 text-[10px] font-black cursor-pointer"
+                >
+                  📋 Link kopieren
+                </button>
+              </div>
+              {roleKeyCopiedToast && (
+                <div className="text-[10px] text-emerald-300 font-bold">
+                  {roleKeyCopiedToast}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setQrModalRole(null)}
+                className="w-full py-1.5 rounded-lg bg-slate-800 text-slate-200 text-xs font-bold cursor-pointer"
+              >
+                Schließen
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative h-dvh w-screen overflow-hidden bg-[#070A12] text-[#FFF8E7] select-none flex flex-col">
+      {/* MAIN FULLSCREEN ARENA CONTAINER (100vw x 100dvh - CLEAN-SCREEN-FIRST) */}
+      <main className="relative flex-1 w-full h-full overflow-hidden flex items-center justify-center bg-[#070A12]">
+        {/* SUBTLE PORTRAIT HINT FOR SMARTPHONES (< 600px) */}
+        {isPortraitSmallScreen && !portraitHintDismissed && (
+          <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-3 py-1 rounded-full bg-slate-950/90 border border-amber-400/70 text-amber-200 font-mono text-[10.5px] shadow-lg">
+            <span>📱 Für beste Sicht Handy quer halten</span>
+            <button
+              type="button"
+              onClick={() => setPortraitHintDismissed(true)}
+              className="text-slate-400 hover:text-white font-bold cursor-pointer"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {/* FACEBOOK NEWSPAPER DOWNLOAD TOAST */}
+        {facebookDownloadToast && (
+          <div className="fixed top-14 left-1/2 -translate-x-1/2 z-[110] px-4 py-2 rounded-full bg-emerald-950/95 border-2 border-emerald-400 text-emerald-200 font-mono text-xs font-black shadow-[0_0_24px_rgba(16,185,129,0.65)]">
+            {facebookDownloadToast}
+          </div>
+        )}
+
+        {/* ================================================================= */}
+        {/* 2. MINIMALISTISCHES ECK-HUD FÜR BESUCHER (95% FREIE BAHN)         */}
+        {/* ================================================================= */}
+        {/* OBEN LINKS: Avatar-Kreis (öffnet grauen 80er-Papierführerschein) + Skater-Name, Rang & Punkte */}
+        <div className="fixed top-2.5 left-2.5 z-30 flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => {
               soundFX.playChallengeUnlocked();
               setShowExplorerCertificateModal(true);
             }}
-            title="Profil-Zertifikat öffnen: „Entdecker auf acht Rollen“ (Urkunde mit eigenem Avatar, Erstellungsdatum & Arena-Siegel)"
-            className="group relative w-9 h-9 rounded-full bg-gradient-to-br from-fuchsia-950 via-slate-900 to-cyan-950 border-2 border-amber-300 hover:border-cyan-300 shadow-[0_0_16px_rgba(251,191,36,0.55)] hover:scale-105 transition cursor-pointer flex items-center justify-center shrink-0"
+            title={`80er-Papierführerschein öffnen (${hallRankInfo.title} • ${hallRankInfo.paperLabel})`}
+            className="group relative w-9 h-9 rounded-full bg-gradient-to-br from-fuchsia-950 via-slate-900 to-cyan-950 border-2 border-amber-300 hover:border-cyan-300 shadow-[0_0_14px_rgba(251,191,36,0.5)] hover:scale-105 transition cursor-pointer flex items-center justify-center shrink-0"
           >
             <svg viewBox="0 0 40 40" className="w-7 h-7 overflow-visible">
-              {/* Neon Aura */}
               <circle
                 cx="20"
                 cy="20"
@@ -5073,7 +6244,6 @@ export function App() {
                 strokeDasharray="3 2"
                 opacity="0.75"
               />
-              {/* Kengol Hat or 80s Hairband */}
               {kengolHatEnabled ? (
                 <path
                   d="M11 13 Q20 6 29 13 Z"
@@ -5084,285 +6254,367 @@ export function App() {
               ) : (
                 <rect x="13" y="10" width="14" height="2.5" rx="1" fill="#22d3ee" />
               )}
-              {/* Head */}
               <circle cx="20" cy="15" r="5" fill="#fde68a" />
-              {/* 80s Shirt in Player's Outfit Color */}
               <path
                 d="M12 28 C12 21 28 21 28 28 Z"
                 fill={playerShirtColor || '#ff2a85'}
                 stroke="#ffffff"
                 strokeWidth="1"
               />
-              {/* 8 Rollerskate Wheels / Neon Wheelchair */}
               <circle cx="14" cy="32" r="2.2" fill="#22d3ee" />
               <circle cx="18" cy="32" r="2.2" fill="#fde047" />
               <circle cx="22" cy="32" r="2.2" fill="#fde047" />
               <circle cx="26" cy="32" r="2.2" fill="#22d3ee" />
             </svg>
             <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-amber-400 text-slate-950 font-mono text-[9px] font-black flex items-center justify-center border border-white shadow">
-              🏅
+              {hallRankInfo.icon}
             </span>
           </button>
 
-          <div className="hidden xl:flex items-center gap-3 font-mono text-xs bg-slate-950/90 px-3 py-1 rounded border border-slate-800">
-            <div>
-              <span className="text-slate-400 mr-1">RUNDEN:</span>
-              <span className="text-cyan-300 font-bold">{telemetry.laps}</span>
-            </div>
-            <span className="text-slate-700">|</span>
-            <div>
-              <span className="text-slate-400 mr-1">TEMPO:</span>
-              <span className="text-emerald-300 font-bold">
-                {telemetry.speed.toFixed(1)} km/h
-              </span>
-            </div>
-            <span className="text-slate-700">|</span>
-            <div>
-              <span className="text-slate-400 mr-1">STÜRZE:</span>
-              <span className="text-rose-400 font-bold">{telemetry.crashes}</span>
-            </div>
-            {hallGameMode === 'ballspiel' && (
-              <>
-                <span className="text-slate-700">|</span>
-                <div className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/80 text-amber-200 font-bold shadow-[0_0_10px_rgba(251,191,36,0.3)]">
-                  🏐 IM SPIEL: {telemetry.ballspielRemaining} /{' '}
-                  {telemetry.ballspielTotal}
-                </div>
-                <span className="text-slate-700">|</span>
-                <div>
-                  <span className="text-amber-300 mr-1">TREFFER:</span>
-                  <span className="text-amber-200 font-bold">
-                    {telemetry.ballspielScore}
-                  </span>
-                </div>
-              </>
-            )}
-            {hallGameMode === 'slalom' && (
-              <>
-                <span className="text-slate-700">|</span>
-                <div>
-                  <span className="text-fuchsia-300 mr-1">SLALOM-COMBO:</span>
-                  <span className="text-fuchsia-200 font-bold">
-                    {telemetry.slalomCombo}x
-                  </span>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Right: Quick Action Buttons + Public Visitor Volume Slider */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <button
-            type="button"
-            onClick={() => setShowChronicleModal(true)}
-            title="Hanauer Rollschuh-Chronik & Start-Einstellungen wieder einblenden"
-            className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-amber-400/60 text-amber-100 font-medium transition cursor-pointer"
-          >
-            📜 Chronik
-          </button>
-
           <button
             type="button"
             onClick={() => {
               handleIntroStepComplete('open_locker');
-              setLockerTab('tasks');
-              setShowLockerModal(true);
+              setShowLockerModal((v) => !v);
             }}
-            className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-amber-400/50 text-amber-200 font-medium transition cursor-pointer"
+            title="Spind & Profil öffnen"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#0B0E17]/88 hover:bg-slate-900 border border-cyan-400/50 text-xs font-mono shadow-lg backdrop-blur-xs cursor-pointer transition"
           >
-            ✅ Aufgaben ({completedChallengesCount}/{PALLADIUM_CHALLENGES.length})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              handleIntroStepComplete('open_locker');
-              setLockerTab('events');
-              setShowLockerModal(true);
-            }}
-            className={`px-2.5 py-1 rounded border font-medium transition cursor-pointer ${
-              hallGameMode !== 'free-skate' || springerStaffelShowSec > 0
-                ? 'bg-fuchsia-950/90 border-fuchsia-400 text-fuchsia-200 shadow-[0_0_10px_rgba(232,121,249,0.4)]'
-                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-cyan-200'
-            }`}
-          >
-            🎪 Live-Events
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowProShopModal(true)}
-            className={`px-2.5 py-1 rounded border font-medium transition cursor-pointer ${
-              telemetry.nearProShop || hasFreeProShopStampReward
-                ? 'bg-cyan-950 border-cyan-400 text-cyan-200 animate-pulse'
-                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
-            }`}
-          >
-            🛠️ Pro-Shop
-            {hasFreeProShopStampReward ? ' (🎁 Gratis!)' : ''}
-          </button>
-
-          {/* 10er-Stempelkarte Button in Top HUD */}
-          <button
-            type="button"
-            onClick={() => setShowStampCardModal(true)}
-            title="Digitale 10er-Stempelkarte (1x Start-Freigetränk nach Wahl + Gratis-Pro-Shop-Prämie bei 10/10)"
-            className={`px-2.5 py-1 rounded border font-mono font-bold transition cursor-pointer ${
-              hasFreeProShopStampReward
-                ? 'bg-amber-950/90 border-amber-400 text-amber-200 shadow-[0_0_12px_rgba(251,191,36,0.45)] animate-pulse'
-                : 'bg-slate-900 hover:bg-slate-800 border-amber-400/50 text-amber-200'
-            }`}
-          >
-            🎫 Stempel: {stampCard.stamps} / 10
-          </button>
-
-          {/* 📱 Handy-Controller QR-Code Button + Gebündelter Eingabe-Status */}
-          <button
-            type="button"
-            onClick={() => setShowPhoneControllerModal(true)}
-            title="Smartphone als 80er-Touch-Gamepad per QR-Code verbinden (?controller=ROOM_ID)"
-            className={`px-2.5 py-1 rounded border font-mono font-medium transition cursor-pointer flex items-center gap-1.5 ${
-              phonePadConnected || telemetry.gamepadConnected
-                ? 'bg-emerald-950/90 border-emerald-400 text-emerald-200 shadow-[0_0_12px_rgba(16,185,129,0.5)]'
-                : 'bg-slate-900 hover:bg-slate-800 border-cyan-500/40 text-cyan-200'
-            }`}
-          >
-            <span>📱 Handy-Controller</span>
-            {phonePadConnected ? (
-              <span className="px-1.5 py-0.5 rounded bg-emerald-400 text-slate-950 font-black text-[9.5px] animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.85)]">
-                📱 Handy-Pad verbunden
-              </span>
-            ) : telemetry.gamepadConnected ? (
-              <span
-                title={telemetry.gamepadName}
-                className="px-1.5 py-0.5 rounded bg-cyan-400 text-slate-950 font-black text-[9.5px] animate-pulse shadow-[0_0_8px_rgba(34,211,238,0.85)]"
-              >
-                🎮 Gamepad verbunden
-              </span>
-            ) : (
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 text-[9.5px]">
-                ⌨️ Tastatur aktiv • ⚪ Kein Pad
-              </span>
-            )}
-          </button>
-
-          {/* 📺 80er-CRT-Filter (Scanlines) Quick Toggle */}
-          <button
-            type="button"
-            onClick={() => setCrtFilterEnabled((v) => !v)}
-            title="Optionaler 80er-CRT-Filter (Scanlines & Röhrenmonitor-Look) ein-/ausschalten"
-            className={`px-2 py-1 rounded border font-mono text-[11px] transition cursor-pointer ${
-              crtFilterEnabled
-                ? 'bg-fuchsia-950/90 border-fuchsia-400 text-fuchsia-200 shadow-[0_0_10px_rgba(232,121,249,0.4)]'
-                : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-300'
-            }`}
-          >
-            📺 CRT: {crtFilterEnabled ? 'AN' : 'AUS'}
-          </button>
-
-          {/* Public Visitor Volume Slider + Mute Toggle */}
-          <div
-            title="Persönliche Hallen-Lautstärke (wird lokal für deinen Browser gespeichert)"
-            className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-900 border border-slate-700"
-          >
-            <button
-              type="button"
-              onClick={() => {
-                const nextMuted = !isMuted;
-                setIsMuted(nextMuted);
-                soundFX.setMuted(nextMuted);
-                setLockerSettings((prev) => ({
-                  ...prev,
-                  discoSoundEnabled: !nextMuted,
-                }));
-              }}
-              className={`font-mono text-[11px] cursor-pointer ${
-                isMuted ? 'text-rose-300' : 'text-emerald-300'
+            <span className="font-bold text-white truncate max-w-[90px] sm:max-w-[140px]">
+              {(playerName || 'Skater').trim()}
+            </span>
+            <span
+              className={`hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-black ${
+                hallRankInfo.level === 6
+                  ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_10px_rgba(251,191,36,0.7)]'
+                  : 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200'
               }`}
             >
-              {isMuted || visitorVolume === 0 ? '🔇' : '🔊'}
-            </button>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              step={1}
-              value={isMuted ? 0 : Math.round(visitorVolume * 100)}
-              onChange={(e) => {
-                const pct = Number(e.target.value);
-                const norm = Math.max(0, Math.min(1, pct / 100));
-                setVisitorVolume(norm);
-                saveVisitorVolume(norm);
-                soundFX.setVolume(norm);
-                if (norm > 0 && isMuted) {
-                  setIsMuted(false);
-                  soundFX.setMuted(false);
-                  setLockerSettings((prev) => ({
-                    ...prev,
-                    discoSoundEnabled: true,
-                  }));
-                }
-              }}
-              className="w-16 h-1.5 accent-cyan-400 cursor-pointer"
-            />
-            <span className="font-mono text-[10px] text-slate-300 w-7 text-right">
-              {isMuted ? '0%' : `${Math.round(visitorVolume * 100)}%`}
+              {hallRankInfo.icon} {hallRankInfo.title}
             </span>
-          </div>
-
-          {/* Live Multiplayer Status Badge in Top HUD */}
-          {isMultiplayerActive && (
-            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-cyan-950/90 border border-cyan-400 text-cyan-200 font-mono font-bold text-[11px] shadow-[0_0_12px_rgba(34,211,238,0.4)]">
-              <span>🌐 LIVE ({remotePlayers.length + 1} Skater)</span>
-              {mpRole === 'guest' && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    cleanupPeerSession();
-                    setMpRole('solo');
-                    setMpStatus('idle');
-                  }}
-                  className="ml-1 px-1.5 py-0.5 rounded bg-rose-950 hover:bg-rose-900 border border-rose-400/60 text-rose-200 text-[10px] cursor-pointer"
-                >
-                  Verlassen
-                </button>
-              )}
+            <span className="px-1.5 py-0.5 rounded-full bg-amber-400/20 border border-amber-300/60 text-amber-200 text-[10.5px] font-black">
+              {totalEarnedPoints} XP
             </span>
-          )}
-
-          {/* 11. Eigene DJ-Kanzel Button (Passwortgeschützter 80er-Mischpult-Login) */}
-          <button
-            type="button"
-            onClick={handleOpenDjBooth}
-            title="Eigene DJ-Kanzel (Klecknix Twin-Decks • 3x3 Sampler-Launchpad • Hallen-Durchsagen • Musikwünsche)"
-            className={`px-2.5 py-1 rounded border font-mono font-bold transition cursor-pointer ${
-              showDjBoothModal || isDjBoothUnlocked
-                ? 'bg-fuchsia-950/90 border-fuchsia-400 text-fuchsia-200 shadow-[0_0_12px_rgba(232,121,249,0.45)]'
-                : 'bg-slate-900 hover:bg-slate-800 border-fuchsia-500/50 text-fuchsia-200'
-            }`}
-          >
-            🎧 DJ-Kanzel
+            <span className="px-1.5 py-0.5 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/60 text-fuchsia-200 text-[10.5px] font-black">
+              👾 {playerPixels} Pixel
+            </span>
           </button>
 
-          {/* Regie-Button erscheint erst NACH Entsperrung per Doppelklick auf Hallen-Logo oder Strg+Shift+R */}
+          {hallGameMode === 'slalom' && (
+            <div className="px-3 py-1 rounded-full bg-slate-950/92 border border-emerald-400/80 text-emerald-200 font-mono text-[10.5px] font-black shadow-lg">
+              🚧 Slalom-Runde: {telemetry.slalomRound || 0} • Tempo:{' '}
+              {telemetry.slalomSpeedPercent || 100} % • Rekord: {slalomRecord}{' '}
+              Runden
+            </div>
+          )}
+
+          {hallGameMode === 'ballspiel' && !ballspielSummaryBanner && (
+            <div className="px-3 py-1 rounded-full bg-slate-950/92 border border-amber-400/80 text-amber-200 font-mono text-[10.5px] font-black shadow-lg flex items-center gap-2">
+              <span>
+                ⏱️ {(telemetry.ballspielElapsedSec || 0).toFixed(1)} s
+              </span>
+              <span className="text-cyan-300">
+                🏐 Übrig: {telemetry.ballspielRemaining}/{telemetry.ballspielTotal}
+              </span>
+              {ballspielBestTimeSec > 0 && (
+                <span className="text-emerald-300">
+                  🏆 Bestzeit: {ballspielBestTimeSec.toFixed(1)} s
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 5. BALLSPIEL-BESTZEITJAGD ("LAST SKATER STANDING") RUNDEN-ENDE BANNER */}
+        {ballspielSummaryBanner && (
+          <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-lg rounded-2xl bg-[#100B20]/96 border-3 border-amber-300 shadow-[0_0_45px_rgba(251,191,36,0.65)] p-4 text-white font-mono space-y-2.5 backdrop-blur-md">
+            <div className="flex items-center justify-between gap-2 border-b border-amber-400/40 pb-2">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">
+                  🏐 BALLSPIEL-BESTZEITJAGD • LAST SKATER STANDING
+                </div>
+                <h3 className="font-display font-black text-base sm:text-lg text-amber-200">
+                  {ballspielSummaryBanner.reason === 'victory'
+                    ? '🎉 ALLE SKATER ABGEWORFEN!'
+                    : '⏱️ ZEITLIMIT (3:00 MIN.) ERREICHT!'}
+                </h3>
+              </div>
+              {ballspielSummaryBanner.isNewRecord && (
+                <span className="px-2.5 py-1 rounded-full bg-gradient-to-r from-amber-300 via-yellow-200 to-cyan-300 text-slate-950 text-[10px] font-black animate-bounce shadow">
+                  ✨ NEUER HALLEN-REKORD!
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-cyan-400/50">
+                <div className="text-[9.5px] text-slate-400 uppercase font-bold">
+                  ⏱️ Deine Rundenzeit ({ballspielSummaryBanner.totalSkaters} Skater)
+                </div>
+                <div className="text-lg font-black text-cyan-300 mt-0.5">
+                  {ballspielSummaryBanner.elapsedSec.toFixed(1)} Sek.
+                </div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-amber-400/50">
+                <div className="text-[9.5px] text-slate-400 uppercase font-bold">
+                  🏆 Hallen-Bestzeit
+                </div>
+                <div className="text-lg font-black text-amber-300 mt-0.5">
+                  {ballspielBestTimeSec > 0
+                    ? `${ballspielBestTimeSec.toFixed(1)} Sek.`
+                    : `${ballspielSummaryBanner.elapsedSec.toFixed(1)} Sek.`}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] px-2.5 py-1.5 rounded-lg bg-emerald-950/70 border border-emerald-400/50 text-emerald-200 font-bold">
+              <span>
+                🎁 Bonus: +{ballspielSummaryBanner.bonusPixels} Pixel &amp; +
+                {ballspielSummaryBanner.bonusXp} XP
+              </span>
+              <span className="text-amber-200">
+                Auto-Freies-Fahren in {ballspielSummaryBanner.autoReturnSec}s
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  soundFX.unlockAudioContext();
+                  setBallspielSummaryBanner(null);
+                  setHallGameMode('ballspiel');
+                  setBallspielResetSeq((s) => s + 1);
+                }}
+                className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-black border border-white cursor-pointer transition shadow"
+              >
+                🔄 Nochmal versuchen
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBallspielSummaryBanner(null);
+                  setHallGameMode('free-skate');
+                }}
+                className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black border border-white cursor-pointer transition shadow"
+              >
+                ✅ Zurück zum freien Fahren
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* OBEN RECHTS: Kompakter Sound-Button (🔊/🔇) + ein einziger Menü-Button (☰) */}
+        <div className="fixed top-2.5 right-2.5 z-30 flex items-center gap-1.5">
           {isAdminUnlocked && !isTesterAccount && (
             <button
               type="button"
               onClick={() => setShowAdminTerminal(true)}
-              className="px-2.5 py-1 rounded bg-rose-950/90 hover:bg-rose-900 border border-rose-400/70 text-rose-200 font-mono font-bold transition cursor-pointer"
+              className="px-2.5 py-1.5 rounded-full bg-rose-950/90 hover:bg-rose-900 border border-rose-400/70 text-rose-200 font-mono text-xs font-bold shadow-lg cursor-pointer transition"
             >
               🎛️ Regie
             </button>
           )}
-        </div>
-      </header>
 
-      {/* MAIN 16:9 WIDESCREEN ARENA CONTAINER */}
-      <main className="relative flex-1 w-full h-full overflow-hidden flex items-center justify-center bg-[#070A12]">
+          <button
+            type="button"
+            onClick={() => {
+              const nextMuted = !isMuted;
+              setIsMuted(nextMuted);
+              soundFX.setMuted(nextMuted);
+              setLockerSettings((prev) => ({
+                ...prev,
+                discoSoundEnabled: !nextMuted,
+              }));
+            }}
+            title={isMuted ? 'Ton einschalten' : 'Ton stummschalten'}
+            className={`w-9 h-9 rounded-full bg-[#0B0E17]/88 hover:bg-slate-900 border flex items-center justify-center text-sm shadow-lg backdrop-blur-xs cursor-pointer transition ${
+              isMuted
+                ? 'border-rose-400/60 text-rose-300'
+                : 'border-emerald-400/60 text-emerald-300'
+            }`}
+          >
+            {isMuted || visitorVolume === 0 ? '🔇' : '🔊'}
+          </button>
+
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowVisitorQuickMenu((v) => !v)}
+              title="Hallen-Menü öffnen"
+              className="relative h-9 px-3 rounded-full bg-[#0B0E17]/88 hover:bg-slate-900 border border-fuchsia-400/60 text-amber-100 font-mono text-sm font-black flex items-center gap-1.5 shadow-lg backdrop-blur-xs cursor-pointer transition"
+            >
+              <span>☰</span>
+              {hasUnreadNewspaperIssue &&
+                adminSettings.newspaperEnabled !== false && (
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping" />
+                )}
+            </button>
+
+            {showVisitorQuickMenu && (
+              <div className="absolute right-0 mt-2 w-72 max-h-[85dvh] overflow-y-auto rounded-2xl bg-[#0E0B1A]/98 border-2 border-fuchsia-400/80 shadow-[0_12px_40px_rgba(0,0,0,0.85)] p-3 font-mono text-xs text-white space-y-2 z-50">
+                <div className="flex items-center justify-between border-b border-fuchsia-500/30 pb-1.5">
+                  <span className="font-display font-black text-xs text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-300 via-amber-200 to-cyan-300">
+                    ✦ PALLADIUM HANAU &apos;86
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    {APP_VERSION_LABEL}
+                  </span>
+                </div>
+
+                {/* Lautstärke-Regler */}
+                <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg bg-slate-900/90 border border-slate-700">
+                  <span className="text-[11px] text-slate-300">🔊 Lautstärke</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={isMuted ? 0 : Math.round(visitorVolume * 100)}
+                    onChange={(e) => {
+                      const pct = Number(e.target.value);
+                      const norm = Math.max(0, Math.min(1, pct / 100));
+                      setVisitorVolume(norm);
+                      saveVisitorVolume(norm);
+                      soundFX.setVolume(norm);
+                      if (norm > 0 && isMuted) {
+                        setIsMuted(false);
+                        soundFX.setMuted(false);
+                      }
+                    }}
+                    className="w-24 h-1.5 accent-cyan-400 cursor-pointer"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 gap-1.5">
+                  {adminSettings.newspaperEnabled !== false && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowVisitorQuickMenu(false);
+                        handleOpenNewspaperModal();
+                      }}
+                      className="w-full px-3 py-2 rounded-xl bg-amber-950/80 hover:bg-amber-900/80 border border-amber-400/70 text-amber-100 font-bold text-left flex items-center justify-between cursor-pointer"
+                    >
+                      <span>📰 Palladium-Kurier (#{currentNewspaperIssueId})</span>
+                      {hasUnreadNewspaperIssue && (
+                        <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white text-[9.5px] font-black">
+                          NEU!
+                        </span>
+                      )}
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      handleOpenLeaderboardModal();
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-emerald-950/80 hover:bg-emerald-900/80 border border-emerald-400/70 text-emerald-100 font-bold text-left flex items-center justify-between cursor-pointer"
+                  >
+                    <span>🏆 Hallen-Bestenliste</span>
+                    <span className="text-[10px] text-amber-300">TOP 10</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      handleIntroStepComplete('open_locker');
+                      setLockerTab('gear');
+                      setShowLockerModal(true);
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-400/50 text-cyan-200 font-bold text-left flex items-center justify-between cursor-pointer"
+                  >
+                    <span>🗄️ Mein Spind &amp; Ausrüstung</span>
+                    <span className="text-[10px] text-amber-300">
+                      {completedChallengesCount}/{PALLADIUM_CHALLENGES.length}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      handleIntroStepComplete('open_locker');
+                      setLockerTab('tasks');
+                      setShowLockerModal(true);
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-200 font-bold text-left cursor-pointer"
+                  >
+                    ✅ Aufgaben &amp; Gästebuch
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      setShowProShopModal(true);
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-left flex items-center justify-between cursor-pointer"
+                  >
+                    <span>🛠️ Pro-Shop &amp; Moves</span>
+                    <span className="text-[10px] text-amber-300">
+                      👾 {playerPixels} Pixel
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      setShowStampCardModal(true);
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-200 font-bold text-left cursor-pointer"
+                  >
+                    🎫 10er-Stempelkarte ({stampCard.stamps}/10)
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      setShowChronicleModal(true);
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-200 font-bold text-left cursor-pointer"
+                  >
+                    🌐 Freunde einladen &amp; Chronik
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      setShowPhoneControllerModal(true);
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-left cursor-pointer"
+                  >
+                    📱 Handy-Gamepad &amp; Steuerung
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setCrtFilterEnabled((v) => !v)}
+                    className="w-full px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-left cursor-pointer"
+                  >
+                    📺 80er-CRT-Filter: {crtFilterEnabled ? 'AN' : 'AUS'}
+                  </button>
+
+                  <div className="p-2 rounded-xl bg-emerald-950/60 border border-emerald-400/40 text-[9.5px] text-emerald-200 leading-snug">
+                    👾 <strong>100 % kostenloses Fan-Projekt</strong> – hier wird
+                    ausschließlich mit gesammelten Spiel-Pixeln bezahlt, echtes
+                    Geld gibt es hier nicht!
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* 9. RETRO-LEUCHTBAND FÜR HALLEN-DURCHSAGEN & ABSCHLEPP-GONG AUF ALLEN BAHNEN */}
         {activeHallAnnouncementBanner && (
-          <div className="pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-4xl px-4 py-2 rounded-xl bg-gradient-to-r from-rose-950/95 via-[#1c0918]/95 to-amber-950/95 border-2 border-amber-400 text-amber-200 font-mono text-xs sm:text-sm font-black tracking-wider uppercase shadow-[0_0_32px_rgba(251,191,36,0.75)] flex items-center justify-center gap-3 animate-pulse">
+          <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-4xl px-4 py-2 rounded-xl bg-gradient-to-r from-rose-950/95 via-[#1c0918]/95 to-amber-950/95 border-2 border-amber-400 text-amber-200 font-mono text-xs sm:text-sm font-black tracking-wider uppercase shadow-[0_0_32px_rgba(251,191,36,0.75)] flex items-center justify-center gap-3 animate-pulse">
             <span className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] shrink-0">
               🔔 3-KLANG-GONG
             </span>
@@ -5378,16 +6630,24 @@ export function App() {
           />
         )}
 
+        {/* HALLEN-STROM AUS OVERLAY (WENN ÜBER LICHT-HANDHELD DEAKTIVIERT) */}
+        {adminSettings.hallPowerEnabled === false && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none fixed inset-0 z-20 bg-black/70 transition-opacity duration-500"
+          />
+        )}
+
         {/* HALL RADIO JOIN / EVENT ANNOUNCEMENT BANNER */}
         {hallRadioBanner && !activeHallAnnouncementBanner && (
-          <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-40 px-5 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 text-cyan-200 font-mono text-xs font-bold shadow-[0_0_24px_rgba(34,211,238,0.5)]">
+          <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-40 px-5 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 text-cyan-200 font-mono text-xs font-bold shadow-[0_0_24px_rgba(34,211,238,0.5)]">
             {hallRadioBanner}
           </div>
         )}
 
         {/* SCHLANKES, HALBTRANSPARENTES 80ER-NEON-BANNER OBEN MITTIG (~2.5s): "✅ Aufgabe abgeschlossen: [Titel] (+20 Pkt)" */}
         {introBannerText && (
-          <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-2 rounded-full bg-[#091124]/85 backdrop-blur-md border-2 border-cyan-400 text-emerald-200 font-mono text-xs sm:text-sm font-black tracking-wide shadow-[0_0_26px_rgba(0,240,255,0.65)] transition-opacity duration-300">
+          <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-50 px-5 py-2 rounded-full bg-[#091124]/85 backdrop-blur-md border-2 border-cyan-400 text-emerald-200 font-mono text-xs sm:text-sm font-black tracking-wide shadow-[0_0_26px_rgba(0,240,255,0.65)] transition-opacity duration-300">
             {introBannerText}
           </div>
         )}
@@ -5396,7 +6656,7 @@ export function App() {
         {newlyUnlockedCert && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-4 backdrop-blur-xs">
             <div
-              className={`relative w-full max-w-md rounded-2xl p-6 text-center shadow-[0_0_50px_rgba(251,191,36,0.65)] border-4 ${
+              className={`relative w-full max-w-md max-h-[90dvh] overflow-y-auto rounded-2xl p-6 text-center shadow-[0_0_50px_rgba(251,191,36,0.65)] border-4 ${
                 newlyUnlockedCert.tier === 'extreme-gold' ||
                 newlyUnlockedCert.tier === 'gold'
                   ? 'bg-gradient-to-br from-[#2b1c06] via-[#13192e] to-[#362205] border-amber-300'
@@ -5472,7 +6732,7 @@ export function App() {
 
         {/* COMPACT TOP STATUS BAR FOR ACTIVE ADMIN PREVIEW */}
         {previewStyle && (
-          <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-1.5 rounded-full bg-amber-950/95 border-2 border-amber-400 text-amber-100 font-mono text-xs font-bold shadow-[0_0_24px_rgba(251,191,36,0.55)] backdrop-blur-md">
+          <div className="absolute top-14 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-1.5 rounded-full bg-amber-950/95 border-2 border-amber-400 text-amber-100 font-mono text-xs font-bold shadow-[0_0_24px_rgba(251,191,36,0.55)] backdrop-blur-md">
             <span>
               👁️ ADMIN-VORSCHAU:{' '}
               <strong className="text-amber-300">
@@ -5500,26 +6760,140 @@ export function App() {
           </div>
         )}
 
-        {/* 6. GAME-BOY-REGIE-HANDHELD (DMG-01 RETRO HELLGRAU LAUNCHPAD FÜR ADMIN AUF DER BAHN) */}
-        {isAdminUnlocked &&
-          !isTesterAccount &&
+        {/* 6. & 4. GAME-BOY-REGIE-HANDHELD (NUR FÜR BERECHTIGTE: HALLENLEITER ODER EINGELOGGTE ROLLEN DJ / LICHT / PRESSE) */}
+        {canUseRoleHandheld &&
           isCurtainOpen &&
           showGameBoyHandheld &&
           !showAdminTerminal && (
-            <div className="fixed bottom-14 right-3 z-40 select-none font-mono">
-              <div className="w-[264px] rounded-tl-2xl rounded-tr-2xl rounded-bl-2xl rounded-br-[34px] bg-[#d4d4cc] border-4 border-[#8e8e84] shadow-[0_10px_30px_rgba(0,0,0,0.75)] p-2.5 text-slate-900">
-                {/* Top DMG Groove & Label */}
-                <div className="flex items-center justify-between border-b-2 border-[#b0b0a6] pb-1 mb-1.5 text-[9px] font-black tracking-wider text-[#333652]">
-                  <span>DOT MATRIX REGIE • PALLADIUM</span>
-                  <button
-                    type="button"
-                    onClick={() => setIsGameBoyExpanded((v) => !v)}
-                    className="px-1.5 py-0.5 rounded bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] text-[8.5px] font-bold cursor-pointer"
-                    title="Ein-/Ausklappen [R / START / SELECT]"
-                  >
-                    {isGameBoyExpanded ? '▼ MIN [R]' : '▲ PAD [R]'}
-                  </button>
+            <div
+              ref={handheldContainerRef}
+              style={
+                handheldPos.left !== null && handheldPos.top !== null
+                  ? { left: `${handheldPos.left}px`, top: `${handheldPos.top}px` }
+                  : undefined
+              }
+              className={`fixed z-40 select-none font-mono ${
+                handheldPos.left !== null && handheldPos.top !== null
+                  ? ''
+                  : 'bottom-4 right-3'
+              }`}
+            >
+              <div className="w-[286px] max-h-[88dvh] overflow-y-auto rounded-tl-2xl rounded-tr-2xl rounded-bl-2xl rounded-br-[34px] bg-[#d4d4cc] border-4 border-[#8e8e84] shadow-[0_10px_30px_rgba(0,0,0,0.75)] p-2.5 text-slate-900">
+                {/* Top DMG Groove & Draggable Header Bar */}
+                <div
+                  onMouseDown={(e) => {
+                    if (handheldPos.isPinned) return;
+                    if ((e.target as HTMLElement).closest('button')) return;
+                    const rect =
+                      handheldContainerRef.current?.getBoundingClientRect();
+                    if (!rect) return;
+                    handheldDragOffsetRef.current = {
+                      offsetX: e.clientX - rect.left,
+                      offsetY: e.clientY - rect.top,
+                    };
+                    setIsDraggingHandheld(true);
+                  }}
+                  onTouchStart={(e) => {
+                    if (handheldPos.isPinned) return;
+                    if ((e.target as HTMLElement).closest('button')) return;
+                    const t = e.touches[0];
+                    const rect =
+                      handheldContainerRef.current?.getBoundingClientRect();
+                    if (!t || !rect) return;
+                    handheldDragOffsetRef.current = {
+                      offsetX: t.clientX - rect.left,
+                      offsetY: t.clientY - rect.top,
+                    };
+                    setIsDraggingHandheld(true);
+                  }}
+                  style={{
+                    cursor: handheldPos.isPinned
+                      ? 'default'
+                      : isDraggingHandheld
+                      ? 'grabbing'
+                      : 'grab',
+                    userSelect: 'none',
+                  }}
+                  className="flex items-center justify-between gap-1 border-b-2 border-[#b0b0a6] pb-1 mb-1.5 text-[8.5px] font-black tracking-wider text-[#333652] select-none"
+                >
+                  <span className="truncate">
+                    DOT MATRIX REGIE •{' '}
+                    {effectiveHandheldRole === 'all'
+                      ? 'PALLADIUM'
+                      : effectiveHandheldRole.toUpperCase()}
+                  </span>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const targetQrRole: RoleHandheldType =
+                          effectiveHandheldRole === 'all'
+                            ? 'dj'
+                            : effectiveHandheldRole;
+                        setQrModalRole(targetQrRole);
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-[#306230] text-[#e0f8cf] text-[8px] font-bold cursor-pointer"
+                      title="QR-Code für Second-Screen auf Handy/Tablet anzeigen"
+                    >
+                      📱 QR
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setHandheldPos((prev) => ({
+                          ...prev,
+                          isPinned: !prev.isPinned,
+                        }));
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[8px] font-bold cursor-pointer border ${
+                        handheldPos.isPinned
+                          ? 'bg-[#306230] text-[#e0f8cf] border-[#0f380f]'
+                          : 'bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] border-[#8e8e84]'
+                      }`}
+                    >
+                      {handheldPos.isPinned ? '📌 FIX' : '🔓 FREI'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsGameBoyExpanded((v) => !v);
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] text-[8.5px] font-bold cursor-pointer"
+                    >
+                      {isGameBoyExpanded ? '▼ MIN' : '▲ PAD'}
+                    </button>
+                  </div>
                 </div>
+
+                {/* Role Switcher Tabs for Admin */}
+                {isAdminUnlocked && !isTesterAccount && (
+                  <div className="grid grid-cols-4 gap-1 mb-1.5 text-[8px] font-black">
+                    {(
+                      [
+                        { id: 'all', label: 'ALLE' },
+                        { id: 'dj', label: '🎧 DJ' },
+                        { id: 'licht', label: '💡 LICHT' },
+                        { id: 'presse', label: '📰 PRESSE' },
+                      ] as const
+                    ).map((rt) => (
+                      <button
+                        key={rt.id}
+                        type="button"
+                        onClick={() => setActiveHandheldTab(rt.id)}
+                        className={`py-0.5 rounded border cursor-pointer ${
+                          activeHandheldTab === rt.id
+                            ? 'bg-[#306230] text-[#e0f8cf] border-[#0f380f]'
+                            : 'bg-[#b8b8ae] text-[#1f2438] border-[#8e8e84]'
+                        }`}
+                      >
+                        {rt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {/* Dark Gray Screen Bezel + Red Battery LED + Green LCD */}
                 <div className="rounded-lg bg-[#5a5a66] p-2 border-2 border-[#43434d] shadow-inner">
@@ -5542,157 +6916,24 @@ export function App() {
                     <div className="flex items-center justify-between mt-0.5 text-[9.5px] font-bold">
                       <span>MODUS: {hallGameMode.toUpperCase()}</span>
                       <span>
-                        VIP:{' '}
-                        {adminSettings.vipGuestListOnly ? 'NUR VIP' : 'OFFEN'}
+                        STROM:{' '}
+                        {adminSettings.hallPowerEnabled !== false ? 'AN' : 'AUS'}
                       </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Expanded Bordeaux Red Launchpad Buttons */}
+                {/* Role-Specific or Master Controls */}
                 {isGameBoyExpanded && (
-                  <div className="mt-2 grid grid-cols-2 gap-1.5">
-                    {(
-                      adminSettings.handheldActionIds || [
-                        'light_disco',
-                        'light_blacklight',
-                        'fog_burst',
-                        'direction',
-                        'mode_ball',
-                        'putzlicht',
-                      ]
-                    ).map((actId) => {
-                      const actionMap: Record<
-                        string,
-                        { label: string; run: () => void }
-                      > = {
-                        light_disco: {
-                          label: '🪩 DISCO',
-                          run: () => setLightingMode('disco'),
-                        },
-                        light_blacklight: {
-                          label: '🟣 UV-LICHT',
-                          run: () => setLightingMode('blacklight'),
-                        },
-                        light_slow: {
-                          label: '💜 SLOW-SKATE',
-                          run: () => setLightingMode('slow-skating'),
-                        },
-                        putzlicht: {
-                          label: adminSettings.fullHallPutzlichtEnabled
-                            ? '💡 PUTZ: AN'
-                            : '💡 PUTZ: AUS',
-                          run: () =>
-                            setAdminSettings((s) => ({
-                              ...s,
-                              fullHallPutzlichtEnabled:
-                                !s.fullHallPutzlichtEnabled,
-                            })),
-                        },
-                        fog_burst: {
-                          label: '💨 NEBEL-STOSS',
-                          run: () => setFogBurstCount((c) => c + 1),
-                        },
-                        direction: {
-                          label:
-                            adminSettings.skateDirection === 'cw'
-                              ? '🔄 RICHTUNG: CW'
-                              : '🔄 RICHTUNG: CCW',
-                          run: () =>
-                            setAdminSettings((s) => ({
-                              ...s,
-                              skateDirection:
-                                s.skateDirection === 'cw' ? 'ccw' : 'cw',
-                            })),
-                        },
-                        mode_free: {
-                          label: '🛼 FREILAUF',
-                          run: () => setHallGameMode('free-skate'),
-                        },
-                        mode_ball: {
-                          label: '🏐 BALLSPIEL',
-                          run: () =>
-                            setHallGameMode((m) =>
-                              m === 'ballspiel' ? 'free-skate' : 'ballspiel'
-                            ),
-                        },
-                        mode_slalom: {
-                          label: '🦺 SLALOM',
-                          run: () =>
-                            setHallGameMode((m) =>
-                              m === 'slalom' ? 'free-skate' : 'slalom'
-                            ),
-                        },
-                        mode_staffel: {
-                          label: '⚡ STAFFEL',
-                          run: () =>
-                            setHallGameMode((m) =>
-                              m === 'springerstaffel'
-                                ? 'free-skate'
-                                : 'springerstaffel'
-                            ),
-                        },
-                        stage_band: {
-                          label:
-                            centerStageMode === 'band'
-                              ? '🎸 BÜHNE: BAND'
-                              : '🏝️ BÜHNE: INSELN',
-                          run: () =>
-                            setCenterStageMode((m) =>
-                              m === 'band' ? 'islands' : 'band'
-                            ),
-                        },
-                        horn: {
-                          label: '📣 AIRHORN',
-                          run: () =>
-                            handleTriggerDjSoundboard('airhorn', 'AIRHORN'),
-                        },
-                        gong_towing: {
-                          label: '🚓 ABSCHLEPPEN',
-                          run: () =>
-                            handleTriggerHallAnnouncementPreset(
-                              HALL_ANNOUNCEMENT_PRESETS[0]
-                            ),
-                        },
-                      };
-                      const item = actionMap[actId];
-                      if (!item) return null;
-                      return (
-                        <button
-                          key={actId}
-                          type="button"
-                          onClick={item.run}
-                          className="py-1.5 px-2 rounded-full bg-[#8b1d41] hover:bg-[#a6234e] active:translate-y-0.5 text-white border-b-3 border-[#4d0d22] font-mono text-[9.5px] font-black tracking-tight shadow cursor-pointer truncate"
-                        >
-                          {item.label}
-                        </button>
-                      );
-                    })}
-
-                    {/* 10. Per Checkbox zugewiesene Echte DJ-Audio-Samples auf dem Game-Boy-Regie-Handheld */}
-                    {(adminSettings.djJingleSlots || DEFAULT_DJ_JINGLE_SLOTS)
-                      .filter((slot) => slot.showInHandheld)
-                      .map((slot) => (
-                        <button
-                          key={`handheld_sample_${slot.id}`}
-                          type="button"
-                          onClick={() => handleTriggerDjJingle(slot)}
-                          className="py-1.5 px-2 rounded-full bg-[#6b1435] hover:bg-[#8f1b47] active:translate-y-0.5 text-amber-200 border-b-3 border-[#3d0a1c] font-mono text-[9px] font-black tracking-tight shadow cursor-pointer truncate"
-                          title={`DJ-Sample abspielen: ${slot.label}`}
-                        >
-                          🎵 {slot.label}
-                        </button>
-                      ))}
-                  </div>
+                  <div className="mt-2">{renderRoleHandheldControls(false)}</div>
                 )}
 
                 {/* Classic Diagonal Grey Rubber SELECT & START Buttons */}
-                <div className="mt-2 pt-1 flex items-center justify-center gap-4">
+                <div className="mt-2 pt-1 flex items-center justify-center gap-3">
                   <button
                     type="button"
                     onClick={() => setIsGameBoyExpanded((v) => !v)}
                     className="group flex flex-col items-center cursor-pointer"
-                    title="Ein-/Ausklappen (SELECT)"
                   >
                     <span className="w-8 h-2.5 rounded-full bg-[#686870] group-hover:bg-[#52525a] border border-[#45454c] -rotate-12 block shadow-inner" />
                     <span className="text-[8px] font-black tracking-widest text-[#333652] mt-0.5">
@@ -5703,20 +6944,30 @@ export function App() {
                     type="button"
                     onClick={() => setIsGameBoyExpanded((v) => !v)}
                     className="group flex flex-col items-center cursor-pointer"
-                    title="Ein-/Ausklappen (START)"
                   >
                     <span className="w-8 h-2.5 rounded-full bg-[#686870] group-hover:bg-[#52525a] border border-[#45454c] -rotate-12 block shadow-inner" />
                     <span className="text-[8px] font-black tracking-widest text-[#333652] mt-0.5">
                       START
                     </span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowAdminTerminal(true)}
-                    className="px-2 py-0.5 rounded bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] text-[8.5px] font-black cursor-pointer"
-                  >
-                    🎛️ REGIE
-                  </button>
+                  {(effectiveHandheldRole === 'dj' || isAdminUnlocked) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowDjBoothModal(true)}
+                      className="px-2 py-0.5 rounded bg-[#8b1d41] text-amber-100 text-[8.5px] font-black cursor-pointer"
+                    >
+                      🎧 PULT
+                    </button>
+                  )}
+                  {isAdminUnlocked && !isTesterAccount && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminTerminal(true)}
+                      className="px-2 py-0.5 rounded bg-[#b8b8ae] hover:bg-[#a4a49a] text-[#1f2438] text-[8.5px] font-black cursor-pointer"
+                    >
+                      🎛️ REGIE
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -5724,7 +6975,7 @@ export function App() {
 
         {/* COMPACT TOP BAR FOR ACTIVE BUILD MODE ("🛠️ BAUMENÜ") WHEN ADMIN MODAL IS CLOSED */}
         {isAdminUnlocked && !isTesterAccount && buildModeEnabled && !showAdminTerminal && (
-          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950/95 border-2 border-amber-400 text-amber-100 font-mono text-[10.5px] shadow-[0_0_25px_rgba(251,191,36,0.5)] backdrop-blur-md">
+          <div className="absolute top-14 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950/95 border-2 border-amber-400 text-amber-100 font-mono text-[10.5px] shadow-[0_0_25px_rgba(251,191,36,0.5)] backdrop-blur-md">
             <span className="font-bold text-amber-300">
               🛠️ BAUMENÜ (Drag • Zieh-Eck • Pfeil 1/10px • [R] Drehen)
             </span>
@@ -5968,59 +7219,24 @@ export function App() {
             setStationDialogToast(null);
             setActiveStationDialog(stationId);
           }}
+          customCrewMembers={adminSettings.customCrewMembers || []}
           newspaperEnabled={adminSettings.newspaperEnabled !== false}
           newspaperHasNewBadge={hasUnreadNewspaperIssue}
           onOpenNewspaperModal={handleOpenNewspaperModal}
+          monitorCameraMode={adminMonitorCameraMode}
+          manualSlowCruiseActive={manualSlowCruiseActive}
+          onSlalomRoundComplete={handleSlalomRoundComplete}
+          onOpenLeaderboardModal={handleOpenLeaderboardModal}
+          isPlayingArcade={Boolean(activeArcadeGameId)}
+          onOpenArcadeMachine={(id) => {
+            soundFX.unlockAudioContext();
+            setActiveArcadeGameId(id);
+          }}
+          ballspielResetSeq={ballspielResetSeq}
+          onBallspielRoundFinished={handleBallspielRoundFinished}
         />
 
-        {/* ZEITUNGSSTÄNDER VORNE IM EINGANGSBEREICH ("DER PALLADIUM-KURIER" MIT BLINKENDEM "NEU!"-BADGE, AUTO-HIDE & SCHLIESSEN-BUTTON) */}
-        {isCurtainOpen &&
-          !isBlockedByMaintenance &&
-          adminSettings.newspaperEnabled !== false &&
-          dismissedNewspaperIssueId !== currentNewspaperIssueId &&
-          hasUnreadNewspaperIssue &&
-          (!newspaperBannerAutoHidden || telemetry.nearCashier) && (
-            <div className="z-30 absolute bottom-10 right-4 flex items-center rounded-xl bg-gradient-to-r from-[#26180c]/95 via-[#18122b]/95 to-[#26180c]/95 border-2 border-amber-400 shadow-[0_0_22px_rgba(251,191,36,0.5)] overflow-hidden">
-              <button
-                type="button"
-                onClick={handleOpenNewspaperModal}
-                title={`Der Palladium-Kurier (Ausgabe #${currentNewspaperIssueId}) • Gelesene Ausgaben: ${readNewspaperIssuesList.length}/5 für „Vielleser auf Rollen“-Urkunde`}
-                className="flex items-center gap-2 pl-3 pr-2 py-1.5 hover:bg-amber-500/15 cursor-pointer transition group"
-              >
-                <span className="text-lg group-hover:scale-110 transition">
-                  📰
-                </span>
-                <div className="text-left font-mono leading-tight">
-                  <div className="text-[11px] font-black text-amber-200 tracking-wide">
-                    Der Palladium-Kurier
-                  </div>
-                  <div className="text-[9.5px] text-cyan-300">
-                    Ausgabe #{currentNewspaperIssueId} • Eingang/Empfang
-                  </div>
-                </div>
-                {hasUnreadNewspaperIssue && (
-                  <span className="px-1.5 py-0.5 rounded-md bg-rose-600 text-white font-mono text-[9.5px] font-black border border-white animate-bounce shadow-[0_0_10px_rgba(244,63,94,0.9)]">
-                    NEU!
-                  </span>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDismissedNewspaperIssueId(currentNewspaperIssueId);
-                  setNewspaperBannerAutoHidden(true);
-                }}
-                title="Hinweis-Banner schließen"
-                aria-label="Hinweis-Banner schließen"
-                className="self-stretch px-2.5 flex items-center justify-center border-l border-amber-400/40 bg-black/30 hover:bg-rose-600 text-amber-200 hover:text-white font-mono text-sm font-black cursor-pointer transition"
-              >
-                ×
-              </button>
-            </div>
-          )}
-
-        {/* 7. RETRO-BANNER AUF DER BAHN FÜR SONNTAGS-CLIQUE-MODUS (2+1-REGEL) */}
+        {/* 7. RETRO-BANNER AUF DER BAHN FÜR SONNTAGS-CLIQUE-MODUS (2+1-REGEL) - KEIN KLICK-TRIGGER! */}
         {isCurtainOpen && !isBlockedByMaintenance && isSundayCliqueActive && (
           <div className="pointer-events-none absolute top-2.5 left-1/2 -translate-x-1/2 z-20 px-4 py-1.5 rounded-xl bg-gradient-to-r from-amber-950/90 via-orange-900/90 to-rose-950/90 border-2 border-amber-300 shadow-[0_0_24px_rgba(251,191,36,0.55)] flex flex-wrap items-center justify-center gap-2 text-center">
             <span className="font-display font-black text-xs sm:text-sm tracking-wider text-amber-200">
@@ -6129,7 +7345,6 @@ export function App() {
                     allowFullScreen
                   />
                 ) : (
-                  /* Transparent pass-through so the Canvas 80s Equalizer / PALLADIUM LIVE / 7-Segment Countdown Clock shines through cleanly! */
                   <div className="w-full flex-1 bg-transparent pointer-events-none" />
                 )}
               </div>
@@ -6138,7 +7353,7 @@ export function App() {
 
         {/* CHALLENGE UNLOCKED 80s RETRO BANNER */}
         {unlockedToast && (
-          <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 z-40 px-6 py-3 rounded-lg bg-gradient-to-r from-fuchsia-950/95 via-indigo-950/95 to-cyan-950/95 border-2 border-amber-300 shadow-[0_0_30px_rgba(251,191,36,0.6)] text-center">
+          <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-40 px-6 py-3 rounded-lg bg-gradient-to-r from-fuchsia-950/95 via-indigo-950/95 to-cyan-950/95 border-2 border-amber-300 shadow-[0_0_30px_rgba(251,191,36,0.6)] text-center">
             <div className="font-mono text-xs uppercase tracking-widest text-amber-300 font-bold">
               ★ Aufgabe erfüllt – Pro-Shop Upgrade freigeschaltet! ★
             </div>
@@ -6151,7 +7366,7 @@ export function App() {
 
         {/* ZENTRIERTE DJ-SOUNDBOARD LEISTE UNTEN AM BILDSCHIRMRAND (NUR BEI AKTIVEM KLICK AUFS DJ-PULT) */}
         {isCurtainOpen && showDjSoundboardHud && (
-          <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-30 flex flex-wrap items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950/95 border-2 border-fuchsia-400 shadow-[0_0_22px_rgba(232,121,249,0.5)] text-xs font-mono">
+          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 flex flex-wrap items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950/95 border-2 border-fuchsia-400 shadow-[0_0_22px_rgba(232,121,249,0.5)] text-xs font-mono">
             <span className="text-fuchsia-300 font-bold mr-1">
               🎛️ DJ-SOUNDBOARD:
             </span>
@@ -6184,14 +7399,106 @@ export function App() {
           </div>
         )}
 
+        {/* ================================================================= */}
+        {/* 2d. KONTEXT-HINWEIS NUR DIREKT AN STATIONEN ODER ZEITUNGSSTÄNDER  */}
+        {/* ================================================================= */}
         {isCurtainOpen &&
           !activeStationDialog &&
+          !showNewspaperModal &&
           (telemetry.nearCashier ||
             telemetry.nearSkateRental ||
             telemetry.nearProShop ||
             telemetry.nearBistroCounter ||
-            telemetry.nearDjTower) &&
+            telemetry.nearDjTower ||
+            Boolean(telemetry.nearCustomCrewId) ||
+            telemetry.nearLeaderboardBoard ||
+            (telemetry.nearNewspaperStand &&
+              adminSettings.newspaperEnabled !== false)) &&
           (() => {
+            if (
+              telemetry.nearLeaderboardBoard &&
+              !telemetry.nearCashier &&
+              !telemetry.nearSkateRental &&
+              !telemetry.nearProShop &&
+              !telemetry.nearBistroCounter &&
+              !telemetry.nearDjTower &&
+              !telemetry.nearCustomCrewId
+            ) {
+              return (
+                <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.5)] text-xs font-mono">
+                  <span className="text-base">🏆</span>
+                  <span className="text-cyan-200 font-bold">
+                    Hallen-Ehrentafel (Top 10 Bestenliste)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleOpenLeaderboardModal}
+                    className="px-3 py-1 rounded-full bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-[11px] cursor-pointer"
+                  >
+                    [E] Interagieren
+                  </button>
+                </div>
+              );
+            }
+
+            if (
+              telemetry.nearNewspaperStand &&
+              adminSettings.newspaperEnabled !== false &&
+              !telemetry.nearCashier &&
+              !telemetry.nearSkateRental &&
+              !telemetry.nearProShop &&
+              !telemetry.nearBistroCounter &&
+              !telemetry.nearDjTower &&
+              !telemetry.nearCustomCrewId
+            ) {
+              return (
+                <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-amber-400 shadow-[0_0_24px_rgba(251,191,36,0.5)] text-xs font-mono">
+                  <span className="text-base">📰</span>
+                  <span className="text-amber-200 font-bold">
+                    Palladium-Kurier (Ausgabe #{currentNewspaperIssueId})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleOpenNewspaperModal}
+                    className="px-3 py-1 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[11px] cursor-pointer"
+                  >
+                    [E] Interagieren
+                  </button>
+                </div>
+              );
+            }
+
+            if (telemetry.nearCustomCrewId) {
+              const cm = (adminSettings.customCrewMembers || []).find(
+                (m) => m.id === telemetry.nearCustomCrewId
+              );
+              if (cm) {
+                return (
+                  <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.5)] text-xs font-mono">
+                    <img
+                      src={getStation16BitPortraitDataUrl(
+                        cm.id,
+                        cm.portraitDataUrl
+                      )}
+                      alt={cm.crewName}
+                      style={{ imageRendering: 'pixelated' }}
+                      className="w-7 h-7 rounded border border-emerald-300 shrink-0"
+                    />
+                    <span className="text-emerald-200 font-bold">
+                      {cm.crewName}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveStationDialog(cm.id)}
+                      className="px-3 py-1 rounded-full bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-[11px] cursor-pointer"
+                    >
+                      [E] Interagieren
+                    </button>
+                  </div>
+                );
+              }
+            }
+
             const activeNearStation: StationDialogId = telemetry.nearCashier
               ? 'kasse'
               : telemetry.nearSkateRental
@@ -6206,7 +7513,7 @@ export function App() {
               adminSettings.crewNames?.[stMeta.crewKey] ||
               stMeta.defaultCrewName;
             return (
-              <div className="absolute bottom-14 left-6 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(0,240,255,0.45)] text-xs font-mono">
+              <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(0,240,255,0.45)] text-xs font-mono">
                 <img
                   src={getStation16BitPortraitDataUrl(
                     activeNearStation,
@@ -6214,200 +7521,81 @@ export function App() {
                   )}
                   alt={crewName}
                   style={{ imageRendering: 'pixelated' }}
-                  className="w-8 h-8 rounded border border-amber-300 shrink-0"
+                  className="w-7 h-7 rounded border border-amber-300 shrink-0"
                 />
-                <div>
-                  <div className="text-amber-300 font-black text-[11px]">
-                    {stMeta.title} • {crewName}
-                  </div>
-                  <div className="text-slate-200 text-[10.5px]">
-                    Drücke{' '}
-                    <kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-cyan-400/50">
-                      [E]
-                    </kbd>{' '}
-                    für den 80er-Pixel-Dialog
-                  </div>
-                </div>
+                <span className="text-amber-300 font-black text-[11px] truncate max-w-[180px] sm:max-w-xs">
+                  {stMeta.title} • {crewName}
+                </span>
                 <button
                   type="button"
                   onClick={() => setActiveStationDialog(activeNearStation)}
-                  className="ml-1 px-2.5 py-1 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-[11px] cursor-pointer"
+                  className="px-3 py-1 rounded-full bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-[11px] cursor-pointer"
                 >
-                  👾 Dialog öffnen [E]
+                  [E] Interagieren
                 </button>
               </div>
             );
           })()}
 
-        {isCurtainOpen &&
-          !telemetry.hasSkatesEquipped &&
-          characterMode !== 'wheelchair' && (
-            <div className="absolute bottom-14 right-6 z-30 flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-amber-950/95 border-2 border-amber-400 shadow-[0_0_25px_rgba(251,191,36,0.45)] text-xs">
-              <span className="text-amber-300 font-bold">
-                👟 Noch auf Straßenschuhen:
-              </span>
-              <span className="text-amber-100">
-                Gehe unten zum <strong>Rollschuh-Verleih</strong> und löse mit{' '}
-                <kbd className="px-1.5 py-0.5 bg-slate-900 rounded border border-amber-400/50">
-                  [E]
-                </kbd>{' '}
-                deinen <strong>Freigetränk-Chip</strong> gegen Leih-Rollschuhe ein!
-              </span>
-              {telemetry.nearSkateRental && drinkChipAvailable && (
-                <button
-                  type="button"
-                  onClick={handleRedeemDrinkChipAtRental}
-                  className="ml-1 px-2.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-bold cursor-pointer"
-                >
-                  🛼 Jetzt Chip einlösen [E]
-                </button>
-              )}
-            </div>
-          )}
-
-        {/* COLLAPSIBLE BOTTOM CONTROL LEGEND, 80s TRICK-MOVES BAR & RETRO CREDIT */}
-        {isBottomBarCollapsed ? (
-          <button
-            type="button"
-            onClick={() => setIsBottomBarCollapsed(false)}
-            title="Steuerungs- & Info-Leiste wieder ausklappen [I]"
-            className="z-20 absolute bottom-2 right-3 px-2.5 py-1 rounded-md bg-[#080B12]/90 hover:bg-slate-900 border border-cyan-500/50 hover:border-cyan-400 text-[11px] font-mono font-bold text-cyan-300 shadow-lg cursor-pointer transition"
-          >
-            [I] Steuerung ▴
-          </button>
-        ) : (
-          <div className="z-20 absolute bottom-0 inset-x-0 px-3 py-1 bg-[#080B12]/90 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-300">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span>
-                <strong className="text-cyan-300">
-                  [WASD / Pfeile / Stick]
-                </strong>{' '}
-                Fahren
-              </span>
-              <span>•</span>
-              <span>
-                <strong className="text-fuchsia-300">
-                  [Space / Q / Pad-B]
-                </strong>{' '}
-                360°-Spin
-              </span>
-              <span>•</span>
-              <span>
-                <strong className="text-amber-300">
-                  [J / Shift / Pad-A]
-                </strong>{' '}
-                Sprung
-              </span>
-              <span>•</span>
-              <span>
-                <strong className="text-emerald-300">[E / F]</strong> Interaktion
-              </span>
-              <span>•</span>
-              {/* 80s Trick-Moves Quick Bar ([1]-[4]) */}
-              <div className="inline-flex items-center gap-1 bg-slate-950/90 px-2 py-0.5 rounded border border-fuchsia-500/40">
-                <span className="text-fuchsia-300 font-bold text-[10px]">
-                  Moves:
-                </span>
-                {(
-                  [
-                    {
-                      id: 'spin360' as TrickMoveId,
-                      key: '1',
-                      label: '🌀 Spin',
-                      unlocked: isMoveSpin360Unlocked,
-                    },
-                    {
-                      id: 'backward' as TrickMoveId,
-                      key: '2',
-                      label: '🔙 Backward',
-                      unlocked: isMoveBackwardUnlocked,
-                    },
-                    {
-                      id: 'flamingo' as TrickMoveId,
-                      key: '3',
-                      label: '🦩 Flamingo',
-                      unlocked: isMoveFlamingoUnlocked,
-                    },
-                    {
-                      id: 'starjump' as TrickMoveId,
-                      key: '4',
-                      label: '⚡ Star-Jump',
-                      unlocked: isMoveStarjumpUnlocked,
-                    },
-                  ] as const
-                ).map((mv) => (
-                  <button
-                    key={mv.id}
-                    type="button"
-                    disabled={!mv.unlocked}
-                    onClick={() => handleTriggerTrickFromHud(mv.id)}
-                    title={
-                      mv.unlocked
-                        ? `Taste [${mv.key}] oder Klick für ${mv.label}`
-                        : `Im Pro-Shop über Palladium-Aufgaben freischaltbar`
-                    }
-                    className={`px-1.5 py-0.5 rounded text-[10px] border transition ${
-                      mv.unlocked
-                        ? 'bg-fuchsia-950/90 hover:bg-fuchsia-800 border-fuchsia-400/70 text-fuchsia-100 cursor-pointer'
-                        : 'bg-slate-900/60 border-slate-800 text-slate-600 cursor-not-allowed'
-                    }`}
-                  >
-                    [{mv.key}] {mv.unlocked ? mv.label : `🔒 ${mv.label}`}
-                  </button>
-                ))}
-              </div>
-              <span>•</span>
-              <button
-                type="button"
-                onClick={handleToggleUnderglow}
-                className="hover:text-cyan-300 cursor-pointer"
-              >
-                <strong className="text-pink-400">[L]</strong> Neon:{' '}
-                {upgrades.underglowEnabled ? 'AN' : 'AUS'}
-              </button>
-              <span>•</span>
-              <button
-                type="button"
-                onClick={handleToggleCamera}
-                className="hover:text-cyan-300 cursor-pointer"
-              >
-                <strong className="text-cyan-300">[C]</strong> Kamera:{' '}
-                {cameraMode.toUpperCase()}
-              </button>
-              <span>•</span>
-              <button
-                type="button"
-                onClick={handleToggleCharacterMode}
-                className="hover:text-cyan-300 cursor-pointer"
-              >
-                <strong className="text-amber-300">[V]</strong>{' '}
-                {characterMode === 'skater' ? 'Rollschuh' : 'Rollstuhl'}
-              </button>
-              <span>•</span>
-              <button
-                type="button"
-                onClick={handleToggleKengolHat}
-                className="hover:text-cyan-300 cursor-pointer"
-              >
-                <strong className="text-fuchsia-300">[H]</strong> Kengol:{' '}
-                {kengolHatEnabled ? 'AN' : 'AUS'}
-              </button>
+        {/* ================================================================= */}
+        {/* 3c. TOUCH-STEUERUNG AUF HANDY & TABLET (pointer: coarse)          */}
+        {/* ================================================================= */}
+        {isCurtainOpen && !isBlockedByMaintenance && isTouchDevice && (
+          <>
+            {/* Unten links: Halbtransparenter 360°-Daumen-Joystick */}
+            <div
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                handleTouchStickPointer(e);
+              }}
+              onPointerMove={(e) => {
+                if (e.buttons > 0) handleTouchStickPointer(e);
+              }}
+              onPointerUp={resetTouchStickPointer}
+              onPointerCancel={resetTouchStickPointer}
+              className="fixed bottom-5 left-5 z-30 w-28 h-28 rounded-full bg-slate-950/55 border-2 border-cyan-400/60 shadow-[0_0_20px_rgba(34,211,238,0.3)] flex items-center justify-center touch-none backdrop-blur-xs"
+            >
+              <div className="w-10 h-10 rounded-full border border-cyan-400/30" />
+              <div
+                style={{
+                  transform: `translate(${touchStickKnob.x}px, ${touchStickKnob.y}px)`,
+                }}
+                className="w-11 h-11 rounded-full bg-gradient-to-br from-fuchsia-500/85 to-cyan-400/85 border-2 border-white shadow-md"
+              />
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-slate-400 hidden 2xl:inline">
-                {APP_VERSION_LABEL} • 100% lokal ohne Cookies
-              </span>
+            {/* Unten rechts: Kompakte Retro-Buttons: 🐢 Slow-Skate, JUMP und [E] */}
+            <div className="fixed bottom-6 right-5 z-30 flex items-center gap-2 touch-none">
               <button
                 type="button"
-                onClick={() => setIsBottomBarCollapsed(true)}
-                title="Fußleiste einklappen [I]"
-                className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 text-[10px] cursor-pointer"
+                onClick={() => setManualSlowCruiseActive((v) => !v)}
+                className={`w-14 h-14 rounded-full font-mono font-black text-[9.5px] leading-tight border-2 flex flex-col items-center justify-center cursor-pointer transition ${
+                  manualSlowCruiseActive
+                    ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_16px_rgba(34,211,238,0.65)]'
+                    : 'bg-slate-900/80 text-cyan-200 border-cyan-400/60'
+                }`}
               >
-                ▼ Einklappen [I]
+                <span>🐢</span>
+                <span>SLOW</span>
+              </button>
+              <button
+                type="button"
+                onPointerDown={() => {
+                  remoteControllerInputRef.current.jump = true;
+                }}
+                className="w-15 h-15 rounded-full bg-amber-400/85 active:bg-amber-300 text-slate-950 font-mono font-black text-xs border-2 border-white shadow-[0_0_18px_rgba(251,191,36,0.5)] flex items-center justify-center cursor-pointer"
+              >
+                JUMP
+              </button>
+              <button
+                type="button"
+                onPointerDown={triggerNearStationOrNewspaperInteraction}
+                className="w-15 h-15 rounded-full bg-emerald-500/85 active:bg-emerald-400 text-slate-950 font-mono font-black text-xs border-2 border-white shadow-[0_0_18px_rgba(16,185,129,0.5)] flex items-center justify-center cursor-pointer"
+              >
+                [E]
               </button>
             </div>
-          </div>
+          </>
         )}
 
         {/* ===================================================================== */}
@@ -6430,6 +7618,11 @@ export function App() {
                   Die Geschichte hinter dem Parkett — Authentischer 80er-Jahre
                   Prototyp
                 </p>
+                <div className="mt-2 inline-block px-3.5 py-1 rounded-full bg-emerald-950/85 border border-emerald-400/60 font-mono text-[11px] font-bold text-emerald-200">
+                  👾 100 % kostenloses Fan-Projekt – hier wird ausschließlich
+                  mit gesammelten Spiel-Pixeln bezahlt, echtes Geld gibt es hier
+                  nicht!
+                </div>
               </div>
 
               {/* Historical Chronicle Cards with Authentic 80s Stickers at the Top */}
@@ -9456,15 +10649,7 @@ export function App() {
 
                 {/* Hanging Neon Door Sign Mounted Across the Glass Door Center */}
                 <div className="absolute inset-0 z-20 flex items-center justify-center p-6">
-                  <div
-                    onDoubleClick={() => {
-                      setPinInput('');
-                      setPinError(null);
-                      setShowAdminPinModal(true);
-                    }}
-                    title="Doppelklick oder Geheimtaste für Hallenleitung"
-                    className="max-w-lg w-full rounded-2xl bg-[#100c1c]/95 border-2 border-amber-400 shadow-[0_0_50px_rgba(251,191,36,0.45)] p-6 text-center backdrop-blur-md"
-                  >
+                  <div className="max-w-lg w-full rounded-2xl bg-[#100c1c]/95 border-2 border-amber-400 shadow-[0_0_50px_rgba(251,191,36,0.45)] p-6 text-center backdrop-blur-md">
                     <div className="inline-block px-3 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 font-mono text-[11px] text-amber-300 font-bold mb-2">
                       🧹🛼 PALLADIUM ROLLER ARENA HANAU • TÜRSCHILD
                     </div>
@@ -9484,25 +10669,11 @@ export function App() {
                 </div>
               </div>
             </div>
-
-            {/* Subtle, inconspicuous Admin backdoor trigger in the bottom-right corner */}
-            <button
-              type="button"
-              onClick={() => {
-                setPinInput('');
-                setPinError(null);
-                setShowAdminPinModal(true);
-              }}
-              title="Hallenleitung (Ctrl+Shift+A)"
-              className="fixed bottom-2.5 right-3 z-50 px-2 py-1 rounded bg-slate-950/40 hover:bg-slate-900/90 border border-slate-700/30 hover:border-amber-400/50 text-slate-500 hover:text-amber-200 font-mono text-[10px] opacity-35 hover:opacity-100 transition cursor-pointer"
-            >
-              🔑 Admin-Hintereingang
-            </button>
           </div>
         )}
 
         {/* ===================================================================== */}
-        {/* 7. ADMIN PIN LOGIN MODAL (CTRL+SHIFT+A OR 3X LOGO CLICK)              */}
+        {/* 7. ADMIN PIN LOGIN MODAL (?regie=1 OR CTRL+SHIFT+L / CMD+SHIFT+L)     */}
         {/* ===================================================================== */}
         {showAdminPinModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
@@ -9512,13 +10683,13 @@ export function App() {
               className="w-full max-w-sm rounded-2xl bg-[#140F23] border-2 border-rose-500/80 shadow-2xl p-6 text-white"
             >
               <div className="font-mono text-xs text-rose-400 uppercase">
-                Versteckter Zugang • Hallenleiter-Regie
+                Geschützter Zugang • Hallenleiter-Regie
               </div>
               <h2 className="font-display font-extrabold text-xl mt-0.5">
-                🔐 ADMIN-TERMINAL LOGIN
+                🔐 HALLENLEITER-LOGIN
               </h2>
               <p className="text-xs text-slate-300 mt-1">
-                Bitte persönliche Hallenleiter-PIN eingeben:
+                Bitte persönliche Hallenleiter-PIN oder Master-Key eingeben:
               </p>
               <input
                 type="password"
@@ -9673,6 +10844,7 @@ export function App() {
                             }`,
                           },
                           { id: 'look_build' as const, short: '🎨 Tab 4: Look & Baumenü' },
+                          { id: 'ranks_points' as const, short: '👑 Tab 5: Ränge & Punkte' },
                         ] as const
                       ).map((t) => (
                         <button
@@ -9698,7 +10870,7 @@ export function App() {
                     </button>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                  <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
                     {(
                       [
                         {
@@ -9724,6 +10896,11 @@ export function App() {
                           id: 'look_build' as const,
                           label: '🎨 Tab 4: Hallen-Look & Baumenü',
                           sub: 'Bahn-Styles, 16-Bit/CRT & Kachel-Baumenü',
+                        },
+                        {
+                          id: 'ranks_points' as const,
+                          label: '👑 Tab 5: Ränge & Punkte',
+                          sub: 'XP-Schwellen, Führerschein-Farbe & Ehren-Punkte',
                         },
                       ] as const
                     ).map((tab) => {
@@ -9761,9 +10938,126 @@ export function App() {
                 )}
               </div>
 
+              {/* 4. EINZIGER FIXIERTER LIVE-MONITOR IN DER REGIE (STICKY TOP: 0) + KAMERA-UMSCHALTER [ 🎥 Lokal | 🌐 Multiplayer-Halle ] */}
+              <div className="sticky top-0 z-30 flex flex-col items-center justify-center py-1 bg-[#120D20]/95 backdrop-blur-xs rounded-xl">
+                <div
+                  className={`w-full ${
+                    isAdminCenterCameraEnlarged
+                      ? 'max-w-[660px]'
+                      : 'max-w-[460px]'
+                  } rounded-xl bg-slate-950/95 border-2 border-cyan-400/80 shadow-[0_0_28px_rgba(34,211,238,0.3)] p-2 space-y-1.5 transition-all`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 font-mono text-[10px]">
+                    <span className="text-cyan-300 font-black flex items-center gap-1.5 truncate">
+                      <span className="inline-block w-2 h-2 rounded-full bg-rose-500 animate-ping shrink-0" />
+                      🎥 LIVE-BAHNKAMERA
+                    </span>
+
+                    {/* Kamera-Umschalter: [ 🎥 Lokal | 🌐 Multiplayer-Halle ] */}
+                    <div className="flex items-center rounded-lg bg-slate-900 p-0.5 border border-cyan-500/40">
+                      <button
+                        type="button"
+                        onClick={() => setAdminMonitorCameraMode('local')}
+                        className={`px-2 py-0.5 rounded font-bold text-[9.5px] cursor-pointer transition ${
+                          adminMonitorCameraMode === 'local'
+                            ? 'bg-cyan-400 text-slate-950'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        🎥 Lokal
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdminMonitorCameraMode('multiplayer');
+                          if (mpRole === 'solo') {
+                            openHostRoomRef.current('PALLADIUM-86', {
+                              silentAutoHost: true,
+                              chosenName:
+                                (playerName || 'Hallenleiter').trim(),
+                              chosenColor: playerShirtColor || '#00f0ff',
+                            });
+                          }
+                        }}
+                        className={`px-2 py-0.5 rounded font-bold text-[9.5px] cursor-pointer transition ${
+                          adminMonitorCameraMode === 'multiplayer'
+                            ? 'bg-emerald-400 text-slate-950'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        🌐 Multiplayer-Halle
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      {showAdminCenterCamera && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setIsAdminCenterCameraEnlarged((prev) => !prev)
+                          }
+                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-cyan-400/50 text-cyan-200 text-[9.5px] font-bold cursor-pointer"
+                          title="Live-Bahnkamera vergrößern oder auf Standardgröße setzen"
+                        >
+                          {isAdminCenterCameraEnlarged
+                            ? '🗕 Kompakt'
+                            : '🔍 Vergrößern'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShowAdminCenterCamera((prev) => !prev)
+                        }
+                        className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-amber-200 text-[9.5px] font-bold cursor-pointer"
+                      >
+                        {showAdminCenterCamera
+                          ? '▲ Ausblenden'
+                          : '▼ Kamera zeigen'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {showAdminCenterCamera && (
+                    <div
+                      className={`relative w-full ${
+                        isAdminCenterCameraEnlarged ? 'h-[310px]' : 'h-[200px]'
+                      } rounded-lg overflow-hidden border border-slate-700 bg-black mx-auto`}
+                    >
+                      <canvas
+                        id="admin-center-live-camera-canvas"
+                        width={440}
+                        height={220}
+                        className="w-full h-full object-cover"
+                      />
+                      <div className="pointer-events-none absolute bottom-1 left-1.5 right-1.5 flex items-center justify-between text-[9.5px] font-mono text-emerald-300 bg-black/75 px-2 py-0.5 rounded">
+                        <span>
+                          KAMERA:{' '}
+                          {adminMonitorCameraMode === 'multiplayer'
+                            ? `🌐 MULTIPLAYER (${1 + remotePlayers.length} AKTIV)`
+                            : '🎥 LOKAL'}{' '}
+                          • RICHTUNG:{' '}
+                          {(adminSettings.skateDirection || 'ccw') === 'cw'
+                            ? '↻ CW (45% SLOW)'
+                            : '↺ CCW'}
+                        </span>
+                        <span>
+                          STYLE:{' '}
+                          {(
+                            selectedStyleTile ||
+                            adminSettings.liveArenaStyle ||
+                            'classic-neon'
+                          ).toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* TAB 1: 🛼 BAHN, SHOWS & FAHRTRICHTUNG */}
               {adminTab === 'track' && (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
+                <div className="grid grid-cols-1 gap-3 items-stretch">
                   <div className="p-3.5 rounded-xl bg-slate-900/95 border border-cyan-500/40 space-y-3">
                     <div className="flex items-center justify-between">
                       <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
@@ -9999,39 +11293,6 @@ export function App() {
                             ? 'AN'
                             : 'AUS'}
                         </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Live-Hallen-Monitor rechts in Tab 1 */}
-                  <div className="p-3.5 rounded-xl bg-slate-900/95 border border-rose-500/50 space-y-2 flex flex-col justify-between">
-                    <div className="flex items-center justify-between text-xs font-mono">
-                      <span className="text-rose-400 font-bold flex items-center gap-1.5">
-                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping" />
-                        📹 LIVE HALLEN-MONITOR (RÜCKFAHRKAMERA)
-                      </span>
-                      <span className="text-amber-300 font-bold">
-                        STYLE: {selectedStyleTile.toUpperCase()}
-                      </span>
-                    </div>
-                    <div className="relative w-full aspect-video rounded-xl overflow-hidden border-2 border-slate-700 bg-black">
-                      <canvas
-                        id="admin-live-monitor-canvas"
-                        width={384}
-                        height={216}
-                        className="w-full h-full object-cover"
-                      />
-                      <div className="pointer-events-none absolute bottom-1.5 left-2 right-2 flex items-center justify-between text-[10px] font-mono text-emerald-300 bg-black/70 px-2 py-1 rounded">
-                        <span>
-                          RICHTUNG:{' '}
-                          {(adminSettings.skateDirection || 'ccw') === 'cw'
-                            ? '↻ IM UHRZEIGERSINN'
-                            : '↺ GEGEN UHRZEIGERSINN'}
-                        </span>
-                        <span>
-                          TEMPO: {telemetry.speed.toFixed(1)} km/h • RUNDEN:{' '}
-                          {telemetry.laps}
-                        </span>
                       </div>
                     </div>
                   </div>
@@ -12710,6 +13971,175 @@ export function App() {
                       </div>
                     </div>
 
+                    {/* 4. ROLLEN-HANDHELDS (DJ, LICHT/STROM, PRESSE) & QR-CODE SECOND-SCREEN FÜR HANDY/TABLET */}
+                    <div className="p-2.5 rounded-lg bg-slate-950/90 border border-cyan-400/60 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="font-mono text-[11px] font-bold uppercase text-cyan-300">
+                            📱 4. Team-Rollen-Handhelds &amp; QR-Code-Generator (?rolle=dj | ?rolle=licht | ?rolle=presse)
+                          </span>
+                          <p className="text-[10px] font-mono text-slate-400">
+                            Direkt scanbare QR-Codes für Smartphone &amp; Tablet (DJ: DJ-PALLADIUM, Licht: LICHT-PALLADIUM, Presse: PRESSE-PALLADIUM):
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const next = await resetHallLeaderboardSeason();
+                              setLeaderboardEntries(next);
+                              setSlalomRecord(0);
+                              setLeaderboardSeasonToast(
+                                '🏆 Hallen-Bestenliste zurückgesetzt (Neue Saison gestartet)!'
+                              );
+                              window.setTimeout(
+                                () => setLeaderboardSeasonToast(null),
+                                3500
+                              );
+                            }}
+                            className="px-2.5 py-1 rounded bg-rose-950 hover:bg-rose-900 border border-rose-400 text-rose-200 font-mono text-[10px] font-bold cursor-pointer"
+                          >
+                            🏆 Bestenliste zurücksetzen (Neue Saison)
+                          </button>
+                          {leaderboardSeasonToast && (
+                            <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-400 text-emerald-200 font-mono text-[10px] font-bold">
+                              {leaderboardSeasonToast}
+                            </span>
+                          )}
+                          {roleKeyCopiedToast && (
+                            <span className="px-2.5 py-0.5 rounded bg-emerald-950 border border-emerald-400 text-emerald-200 font-mono text-[10px] font-bold">
+                              {roleKeyCopiedToast}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono text-[10px]">
+                        {(
+                          [
+                            {
+                              role: 'dj' as RoleHandheldType,
+                              title: '🎧 Rolle 1: DJ-Handheld (?rolle=dj)',
+                              desc: 'Musik-Mix, 3x3 Soundboard-Samples & Airhorn, LED-Lauftext, Durchsage',
+                              borderClass: 'border-fuchsia-400/60',
+                              badgeClass: 'text-fuchsia-300',
+                            },
+                            {
+                              role: 'licht' as RoleHandheldType,
+                              title: '💡 Rolle 2: LICHT / TECHNIK (?rolle=licht)',
+                              desc: 'Hallenstrom, Disco-Licht, UV-Schwarzlicht, Slow-Skate, Putzlicht, Nebel, Richtung, Modi',
+                              borderClass: 'border-amber-400/60',
+                              badgeClass: 'text-amber-300',
+                            },
+                            {
+                              role: 'presse' as RoleHandheldType,
+                              title: '📰 Rolle 3: PRESSE / KURIER (?rolle=presse)',
+                              desc: 'Palladium Kurier bearbeiten (Schlagzeile, Meldung, Tipps), Vorschau, Live-Release & Facebook-PNG',
+                              borderClass: 'border-emerald-400/60',
+                              badgeClass: 'text-emerald-300',
+                            },
+                          ] as const
+                        ).map((item) => {
+                          const rk =
+                            adminSettings.roleKeys || DEFAULT_ROLE_KEYS;
+                          const keyVal =
+                            rk[item.role] ?? DEFAULT_ROLE_KEYS[item.role];
+                          const shareUrl = getRoleHandheldShareUrl(item.role);
+                          const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=140x140&margin=6&data=${encodeURIComponent(
+                            shareUrl
+                          )}`;
+                          return (
+                            <div
+                              key={item.role}
+                              className={`p-2.5 rounded-xl bg-slate-900/95 border ${item.borderClass} flex flex-col justify-between gap-2`}
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <img
+                                  src={qrSrc}
+                                  alt={`QR ${item.role}`}
+                                  className="w-20 h-20 rounded-lg bg-white p-1 shrink-0"
+                                />
+                                <div className="min-w-0 flex-1 space-y-1">
+                                  <div
+                                    className={`font-black text-[10.5px] ${item.badgeClass}`}
+                                  >
+                                    {item.title}
+                                  </div>
+                                  <p className="text-[9px] text-slate-300 leading-snug">
+                                    {item.desc}
+                                  </p>
+                                  <div>
+                                    <label className="block text-[8.5px] text-slate-400">
+                                      Rollen-Key (änderbar):
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={keyVal}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        setAdminSettings((s) => ({
+                                          ...s,
+                                          roleKeys: {
+                                            ...(s.roleKeys ||
+                                              DEFAULT_ROLE_KEYS),
+                                            [item.role]: val,
+                                          },
+                                        }));
+                                      }}
+                                      className="w-full px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-200 font-bold text-[10px]"
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-slate-800">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (
+                                      typeof navigator !== 'undefined' &&
+                                      navigator.clipboard
+                                    ) {
+                                      navigator.clipboard.writeText(shareUrl);
+                                      setRoleKeyCopiedToast(
+                                        `✅ ${item.role.toUpperCase()}-Handheld-Link kopiert!`
+                                      );
+                                      window.setTimeout(
+                                        () => setRoleKeyCopiedToast(null),
+                                        2500
+                                      );
+                                    }
+                                  }}
+                                  className="flex-1 py-1 px-2 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-[9.5px] cursor-pointer"
+                                >
+                                  📋 Link kopieren
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setQrModalRole(item.role)}
+                                  className="py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-cyan-200 font-bold text-[9.5px] cursor-pointer"
+                                >
+                                  📱 QR groß
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveHandheldTab(item.role);
+                                    setShowGameBoyHandheld(true);
+                                    setIsGameBoyExpanded(true);
+                                    setShowAdminTerminal(false);
+                                  }}
+                                  className="py-1 px-2 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-[9.5px] cursor-pointer"
+                                >
+                                  🎮 Testen
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
                     {/* 6. GAME-BOY-REGIE-HANDHELD CHECKBOXEN („Im Regie-Handheld anzeigen“) */}
                     <div className="p-2.5 rounded-lg bg-slate-950/90 border border-emerald-400/50 space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -12790,31 +14220,301 @@ export function App() {
                       </div>
                     </div>
 
-                    {/* 12. ADMIN-CREW-GALERIE (5 STATIONEN • AUTOMATISCHER 16-BIT-PIXEL-FILTER & KULT-SPRÜCHE) */}
+                    {/* 12. ADMIN-CREW-GALERIE (5 STATIONEN + BELIEBIG VIELE EIGENE CREW-MITGLIEDER • AUTOMATISCHER 16-BIT-PIXEL-FILTER & KULT-SPRÜCHE) */}
                     <div className="p-2.5 rounded-lg bg-slate-950/90 border border-cyan-400/50 space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <span className="font-mono text-[11px] font-bold uppercase text-cyan-300">
-                            👾 12. Admin-Crew-Galerie (5 Stationen • Automatischer 16-Bit-Pixel-Filter &amp; Kult-Sprüche)
+                            👾 12. Admin-Crew-Galerie (5 Standard-Stationen +{' '}
+                            {(adminSettings.customCrewMembers || []).length}{' '}
+                            eigene Crew-Mitglieder • 16-Bit-Pixel-Filter)
                           </span>
                           <p className="text-[10px] font-mono text-slate-400">
-                            Lade eigene Fotos/Portraits hoch (werden automatisch in echte 48×48 16-Bit-Arcade-Pixelgrafik umgewandelt) oder passe Name &amp; Kult-Spruch an:
+                            Lade eigene Fotos/Portraits hoch (werden automatisch in echte 48×48 16-Bit-Arcade-Pixelgrafik umgewandelt), passe Name &amp; Kult-Spruch an oder füge beliebig viele eigene Personal-Stationen auf der Bahn hinzu:
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setAdminSettings((s) => ({
-                              ...s,
-                              crewPortraits: {},
-                              crewQuotes: {},
-                            }))
-                          }
-                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 font-mono text-[10px] cursor-pointer"
-                        >
-                          ↩️ Alle Portraits &amp; Sprüche auf Standard
-                        </button>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextIndex =
+                                6 +
+                                (adminSettings.customCrewMembers?.length || 0);
+                              setNewCrewStationTitle(
+                                `${nextIndex}. SECURITY & EINLASS-CHECK`
+                              );
+                              setNewCrewName('Security-Sammy');
+                              setNewCrewQuote(
+                                'Nur mit sauberen Rollen und guter 80er-Laune aufs Parkett!'
+                              );
+                              setNewCrewSpawnSpot('eingang');
+                              setNewCrewCustomX(
+                                CUSTOM_CREW_SPAWN_PRESETS.eingang.x
+                              );
+                              setNewCrewCustomY(
+                                CUSTOM_CREW_SPAWN_PRESETS.eingang.y
+                              );
+                              setNewCrewPortraitUrl('');
+                              setShowAddCustomCrewForm((v) => !v);
+                            }}
+                            className="px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-mono font-black text-[10px] border border-white shadow-[0_0_12px_rgba(16,185,129,0.45)] cursor-pointer transition"
+                          >
+                            + Crew-Mitglied hinzufügen
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAdminSettings((s) => ({
+                                ...s,
+                                crewPortraits: {},
+                                crewQuotes: {},
+                              }))
+                            }
+                            className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 font-mono text-[10px] cursor-pointer"
+                          >
+                            ↩️ Alle Portraits &amp; Sprüche auf Standard
+                          </button>
+                        </div>
                       </div>
+
+                      {/* KOMPAKTES FORMULAR ZUM ANLEGEN EINES NEUEN CREW-MITGLIEDS */}
+                      {showAddCustomCrewForm && (
+                        <div className="p-3 rounded-xl bg-slate-900/95 border-2 border-emerald-400/80 space-y-2.5 font-mono text-[10px]">
+                          <div className="flex items-center justify-between border-b border-emerald-500/30 pb-1.5">
+                            <span className="font-black text-emerald-300 uppercase text-[11px]">
+                              ➕ Neues Crew-Mitglied / Personal-Station anlegen &amp; auf der Bahn platzieren
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setShowAddCustomCrewForm(false)}
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] cursor-pointer"
+                            >
+                              ✕ Schließen
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                            <div>
+                              <label className="block text-[9px] text-amber-300 font-bold mb-0.5">
+                                1. Stations-/Rollen-Titel:
+                              </label>
+                              <input
+                                type="text"
+                                value={newCrewStationTitle}
+                                onChange={(e) =>
+                                  setNewCrewStationTitle(e.target.value)
+                                }
+                                placeholder="z.B. 6. SECURITY & EINLASS-CHECK"
+                                className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-amber-100 text-[10px]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[9px] text-cyan-300 font-bold mb-0.5">
+                                2. Crew-Name:
+                              </label>
+                              <input
+                                type="text"
+                                value={newCrewName}
+                                onChange={(e) => setNewCrewName(e.target.value)}
+                                placeholder="z.B. Security-Sammy / Sani-Sven"
+                                className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-cyan-100 text-[10px]"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[9px] text-emerald-300 font-bold mb-0.5">
+                                3. Position / Spawn-Ort auf der Bahn:
+                              </label>
+                              <select
+                                value={newCrewSpawnSpot}
+                                onChange={(e) => {
+                                  const spot = e.target
+                                    .value as CustomCrewSpawnSpotId;
+                                  setNewCrewSpawnSpot(spot);
+                                  const preset =
+                                    CUSTOM_CREW_SPAWN_PRESETS[spot];
+                                  if (preset) {
+                                    setNewCrewCustomX(preset.x);
+                                    setNewCrewCustomY(preset.y);
+                                  }
+                                }}
+                                className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-emerald-200 text-[10px]"
+                              >
+                                {(
+                                  Object.keys(
+                                    CUSTOM_CREW_SPAWN_PRESETS
+                                  ) as CustomCrewSpawnSpotId[]
+                                ).map((spotKey) => (
+                                  <option key={spotKey} value={spotKey}>
+                                    {CUSTOM_CREW_SPAWN_PRESETS[spotKey].label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-[9px] text-fuchsia-300 font-bold mb-0.5">
+                                4. Optionales Foto -&gt; 16-Bit Portrait:
+                              </label>
+                              <div className="flex items-center gap-1.5">
+                                <img
+                                  src={getStation16BitPortraitDataUrl(
+                                    newCrewName || 'custom',
+                                    newCrewPortraitUrl
+                                  )}
+                                  alt="Preview"
+                                  style={{ imageRendering: 'pixelated' }}
+                                  className="w-8 h-8 rounded border border-amber-300 bg-slate-950 shrink-0"
+                                />
+                                <label className="flex-1 text-center px-2 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/60 text-cyan-200 font-bold text-[9.5px] cursor-pointer">
+                                  {uploadingCrewPortraitId === 'new_crew_upload'
+                                    ? '⏳ 16-Bit...'
+                                    : '📸 Foto -> 16-Bit'}
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={async (e) => {
+                                      const file = e.target.files?.[0];
+                                      e.target.value = '';
+                                      if (!file) return;
+                                      setUploadingCrewPortraitId(
+                                        'new_crew_upload'
+                                      );
+                                      try {
+                                        const pixelUrl =
+                                          await convertImageFileTo16BitPixelDataUrl(
+                                            file
+                                          );
+                                        setNewCrewPortraitUrl(pixelUrl);
+                                      } catch {
+                                        // ignore
+                                      } finally {
+                                        setUploadingCrewPortraitId(null);
+                                      }
+                                    }}
+                                  />
+                                </label>
+                              </div>
+                            </div>
+                          </div>
+
+                          {newCrewSpawnSpot === 'custom_xy' && (
+                            <div className="grid grid-cols-2 gap-2 max-w-xs">
+                              <div>
+                                <label className="block text-[8.5px] text-slate-400">
+                                  Karten-Position X (120–1880):
+                                </label>
+                                <input
+                                  type="number"
+                                  min={120}
+                                  max={1880}
+                                  value={newCrewCustomX}
+                                  onChange={(e) =>
+                                    setNewCrewCustomX(
+                                      Number(e.target.value) || 1000
+                                    )
+                                  }
+                                  className="w-full px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-white"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[8.5px] text-slate-400">
+                                  Karten-Position Y (100–920):
+                                </label>
+                                <input
+                                  type="number"
+                                  min={100}
+                                  max={920}
+                                  value={newCrewCustomY}
+                                  onChange={(e) =>
+                                    setNewCrewCustomY(
+                                      Number(e.target.value) || 500
+                                    )
+                                  }
+                                  className="w-full px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-white"
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-2">
+                            <div className="flex-1">
+                              <label className="block text-[9px] text-slate-300 font-bold mb-0.5">
+                                5. 80er-Kult-Spruch (Freitext):
+                              </label>
+                              <input
+                                type="text"
+                                value={newCrewQuote}
+                                onChange={(e) =>
+                                  setNewCrewQuote(e.target.value)
+                                }
+                                placeholder="Dein 80er-Kult-Spruch für den Dialog..."
+                                className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-cyan-100 text-[10px]"
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const cleanTitle =
+                                  newCrewStationTitle.trim() ||
+                                  '6. CREW-STATION';
+                                const cleanName =
+                                  newCrewName.trim() || 'Palladium-Crew';
+                                const cleanQuote =
+                                  newCrewQuote.trim() ||
+                                  'Willkommen im Palladium Hanau ’86!';
+                                const preset =
+                                  CUSTOM_CREW_SPAWN_PRESETS[newCrewSpawnSpot] ||
+                                  CUSTOM_CREW_SPAWN_PRESETS.eingang;
+                                const existingAtSpot = (
+                                  adminSettings.customCrewMembers || []
+                                ).filter(
+                                  (m) => m.spawnSpot === newCrewSpawnSpot
+                                ).length;
+                                const finalX =
+                                  newCrewSpawnSpot === 'custom_xy'
+                                    ? Math.max(
+                                        100,
+                                        Math.min(1900, newCrewCustomX)
+                                      )
+                                    : preset.x + existingAtSpot * 58;
+                                const finalY =
+                                  newCrewSpawnSpot === 'custom_xy'
+                                    ? Math.max(
+                                        90,
+                                        Math.min(930, newCrewCustomY)
+                                      )
+                                    : preset.y;
+                                const newMember: CustomCrewStationMember = {
+                                  id: `custom_crew_${Date.now()}`,
+                                  stationTitle: cleanTitle,
+                                  crewName: cleanName,
+                                  quote: cleanQuote,
+                                  portraitDataUrl:
+                                    newCrewPortraitUrl || undefined,
+                                  spawnSpot: newCrewSpawnSpot,
+                                  x: finalX,
+                                  y: finalY,
+                                };
+                                setAdminSettings((s) => ({
+                                  ...s,
+                                  customCrewMembers: [
+                                    ...(s.customCrewMembers || []),
+                                    newMember,
+                                  ],
+                                }));
+                                setShowAddCustomCrewForm(false);
+                                soundFX.playChallengeUnlocked();
+                              }}
+                              className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-emerald-400 to-cyan-400 hover:brightness-110 text-slate-950 font-black text-[10.5px] cursor-pointer shrink-0"
+                            >
+                              ✓ Crew-Mitglied speichern &amp; auf Bahn platzieren
+                            </button>
+                          </div>
+                        </div>
+                      )}
 
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-2 font-mono text-[10px]">
                         {(
@@ -12980,6 +14680,189 @@ export function App() {
                             </div>
                           );
                         })}
+
+                        {/* DYNAMISCHE EIGENE CREW-MITGLIEDER IM SELBEN GRID (MIT FOTO -> 16-BIT, DIALOG & 🗑️ ENTFERNEN) */}
+                        {(adminSettings.customCrewMembers || []).map(
+                          (member) => {
+                            const portraitSrc = getStation16BitPortraitDataUrl(
+                              member.id,
+                              member.portraitDataUrl
+                            );
+                            const updateMember = (
+                              patch: Partial<CustomCrewStationMember>
+                            ) => {
+                              setAdminSettings((s) => ({
+                                ...s,
+                                customCrewMembers: (
+                                  s.customCrewMembers || []
+                                ).map((m) =>
+                                  m.id === member.id ? { ...m, ...patch } : m
+                                ),
+                              }));
+                            };
+                            return (
+                              <div
+                                key={member.id}
+                                className="p-2 rounded-lg bg-slate-900/95 border border-emerald-500/60 flex flex-col justify-between gap-1.5"
+                              >
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center gap-2">
+                                    <img
+                                      src={portraitSrc}
+                                      alt={member.crewName}
+                                      style={{ imageRendering: 'pixelated' }}
+                                      className="w-12 h-12 rounded-lg border-2 border-emerald-300 shadow shrink-0 bg-slate-950"
+                                    />
+                                    <div className="min-w-0 flex-1">
+                                      <input
+                                        type="text"
+                                        value={member.stationTitle}
+                                        onChange={(e) =>
+                                          updateMember({
+                                            stationTitle: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-1 py-0.5 rounded bg-slate-950 border border-slate-700 font-bold text-amber-300 text-[10px]"
+                                        title="Stations-/Rollen-Titel bearbeiten"
+                                      />
+                                      <div className="text-[8.5px] text-emerald-300 truncate mt-0.5">
+                                        📍{' '}
+                                        {CUSTOM_CREW_SPAWN_PRESETS[
+                                          member.spawnSpot
+                                        ]?.label || 'Eigener Spot'}{' '}
+                                        ({Math.round(member.x)}/
+                                        {Math.round(member.y)})
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div>
+                                    <label className="block text-[8.5px] text-slate-400">
+                                      Crew-Name:
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={member.crewName}
+                                      onChange={(e) =>
+                                        updateMember({
+                                          crewName: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-100 text-[10px]"
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <label className="block text-[8.5px] text-slate-400">
+                                      Spawn-Ort auf der Bahn:
+                                    </label>
+                                    <select
+                                      value={member.spawnSpot}
+                                      onChange={(e) => {
+                                        const nextSpot = e.target
+                                          .value as CustomCrewSpawnSpotId;
+                                        const preset =
+                                          CUSTOM_CREW_SPAWN_PRESETS[nextSpot];
+                                        updateMember({
+                                          spawnSpot: nextSpot,
+                                          ...(preset && nextSpot !== 'custom_xy'
+                                            ? { x: preset.x, y: preset.y }
+                                            : {}),
+                                        });
+                                      }}
+                                      className="w-full px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-emerald-200 text-[9.5px]"
+                                    >
+                                      {(
+                                        Object.keys(
+                                          CUSTOM_CREW_SPAWN_PRESETS
+                                        ) as CustomCrewSpawnSpotId[]
+                                      ).map((spotKey) => (
+                                        <option key={spotKey} value={spotKey}>
+                                          {
+                                            CUSTOM_CREW_SPAWN_PRESETS[spotKey]
+                                              .label
+                                          }
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  <div>
+                                    <label className="block text-[8.5px] text-slate-400">
+                                      80er-Kult-Spruch:
+                                    </label>
+                                    <textarea
+                                      rows={2}
+                                      value={member.quote}
+                                      onChange={(e) =>
+                                        updateMember({ quote: e.target.value })
+                                      }
+                                      className="w-full px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-cyan-100 text-[9.5px] leading-snug"
+                                    />
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-slate-800">
+                                  <label className="flex-1 text-center px-1.5 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/35 border border-cyan-400/60 text-cyan-200 font-bold text-[9px] cursor-pointer">
+                                    {uploadingCrewPortraitId === member.id
+                                      ? '⏳ 16-Bit...'
+                                      : '📸 Foto -> 16-Bit'}
+                                    <input
+                                      type="file"
+                                      accept="image/*"
+                                      className="hidden"
+                                      onChange={async (e) => {
+                                        const file = e.target.files?.[0];
+                                        e.target.value = '';
+                                        if (!file) return;
+                                        setUploadingCrewPortraitId(member.id);
+                                        try {
+                                          const pixelUrl =
+                                            await convertImageFileTo16BitPixelDataUrl(
+                                              file
+                                            );
+                                          updateMember({
+                                            portraitDataUrl: pixelUrl,
+                                          });
+                                        } catch {
+                                          // ignore
+                                        } finally {
+                                          setUploadingCrewPortraitId(null);
+                                        }
+                                      }}
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setShowAdminTerminal(false);
+                                      setActiveStationDialog(member.id);
+                                    }}
+                                    className="px-1.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[9px] cursor-pointer"
+                                    title="80er-Pixel-Dialog dieses Crew-Mitglieds öffnen"
+                                  >
+                                    👁️ Dialog
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setAdminSettings((s) => ({
+                                        ...s,
+                                        customCrewMembers: (
+                                          s.customCrewMembers || []
+                                        ).filter((m) => m.id !== member.id),
+                                      }))
+                                    }
+                                    className="px-1.5 py-1 rounded bg-rose-950 hover:bg-rose-800 border border-rose-500/60 text-rose-200 font-bold text-[9px] cursor-pointer"
+                                    title="Dieses eigene Crew-Mitglied wieder entfernen"
+                                  >
+                                    🗑️ Entfernen
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          }
+                        )}
                       </div>
                     </div>
 
@@ -13023,7 +14906,7 @@ export function App() {
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 font-mono text-[10px]">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono text-[10px]">
                         <div className="space-y-1">
                           <label className="block text-amber-200 font-bold">
                             Hauptschlagzeile („PALLADIUM KURIER – HANAU ’86“):
@@ -13048,7 +14931,7 @@ export function App() {
 
                         <div className="space-y-1">
                           <label className="block text-cyan-200 font-bold">
-                            Aktuelle Update-Meldungen &amp; Tipps (2-Spalten-Text):
+                            Redaktions-Meldung &amp; Update-News (Spalte 1):
                           </label>
                           <textarea
                             rows={3}
@@ -13063,8 +14946,30 @@ export function App() {
                                 newspaperBody: e.target.value,
                               }))
                             }
-                            placeholder="Update-News und Tipps für die Hallenzeitung..."
+                            placeholder="Update-News für die Hallenzeitung..."
                             className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-cyan-400/50 text-slate-100 text-[11px] resize-y"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-emerald-200 font-bold">
+                            Palladium-Tipps &amp; Hallen-Guide (Spalte 2 • 1 pro Zeile):
+                          </label>
+                          <textarea
+                            rows={3}
+                            maxLength={600}
+                            value={
+                              adminSettings.newspaperTips ??
+                              DEFAULT_NEWSPAPER_TIPS
+                            }
+                            onChange={(e) =>
+                              setAdminSettings((s) => ({
+                                ...s,
+                                newspaperTips: e.target.value,
+                              }))
+                            }
+                            placeholder="1 Tipp pro Zeile..."
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-emerald-400/50 text-emerald-100 text-[11px] resize-y"
                           />
                         </div>
                       </div>
@@ -13083,7 +14988,15 @@ export function App() {
                           )}
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleDownloadFacebookNewspaper}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-mono text-[10.5px] font-black border border-white shadow-[0_0_14px_rgba(16,185,129,0.5)] cursor-pointer transition"
+                          >
+                            📸 Als Bild für Facebook speichern (PNG)
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => {
@@ -13368,6 +15281,278 @@ export function App() {
                               <div className="text-[8.5px] text-fuchsia-300">
                                 X:{hx} • Y:{hy}
                               </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ============================================================= */}
+                  {/* 👑 TAB 5: RÄNGE, XP-SCHWELLEN & PAPIERFÜHRERSCHEIN-VERWALTUNG */}
+                  {/* ============================================================= */}
+                  <div
+                    className={
+                      adminTab === 'ranks_points'
+                        ? 'pt-2.5 border-t border-slate-800/90 space-y-3 font-mono text-xs'
+                        : 'hidden'
+                    }
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="font-bold text-sm uppercase text-amber-300">
+                          👑 RÄNGE, HALLEN-PUNKTE (XP) &amp; GRAUER 80ER-PAPIERFÜHRERSCHEIN
+                        </h3>
+                        <p className="text-[10.5px] text-slate-400">
+                          Passe die 6 Rang-Stufen bis „👑 König der Halle“ an oder vergib Ehren-Punkte, Pixel &amp; Prüfungs-Stempel:
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowAdminTerminal(false);
+                          setShowExplorerCertificateModal(true);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs border border-white cursor-pointer"
+                      >
+                        🪪 Papierführerschein jetzt ansehen
+                      </button>
+                    </div>
+
+                    {regieAwardToast && (
+                      <div className="px-3 py-1.5 rounded-lg bg-emerald-950/90 border border-emerald-400 text-emerald-200 text-xs font-bold">
+                        {regieAwardToast}
+                      </div>
+                    )}
+
+                    {/* Aktueller Rang & Papieroptik Übersicht */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                      <div className="p-3 rounded-xl bg-slate-950/90 border border-amber-400/50 space-y-1">
+                        <div className="text-[10px] text-slate-400 uppercase font-bold">
+                          Aktueller Hallen-Rang ({playerName || 'Skater'})
+                        </div>
+                        <div className="text-base font-black text-amber-300">
+                          {hallRankInfo.icon} Rang {hallRankInfo.level}: {hallRankInfo.title}
+                        </div>
+                        <div className="text-[11px] text-cyan-200">
+                          Hallen-Punkte: <strong>{totalEarnedPoints} XP</strong> • Pixel:{' '}
+                          <strong>{playerPixels}</strong>
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-400/50 space-y-1">
+                        <div className="text-[10px] text-slate-400 uppercase font-bold">
+                          Dynamische Papierfarbe (Führerschein)
+                        </div>
+                        <div className="text-sm font-black text-cyan-300">
+                          🪪 {hallRankInfo.paperLabel}
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          Grau (Stufe 1-2) → Altrosa (3-4) → Pergament-Gold (5) → Gold-Schwarz (6)
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-slate-950/90 border border-emerald-400/50 space-y-1.5">
+                        <div className="text-[10px] text-emerald-300 uppercase font-bold">
+                          ⚡ Ehren-Punkte &amp; Pixel vergeben
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUpgrades((u) => ({
+                                ...u,
+                                bonusPoints: (u.bonusPoints || 0) + 250,
+                              }));
+                              soundFX.playChallengeUnlocked();
+                              setRegieAwardToast('✅ +250 Ehren-XP verliehen!');
+                              window.setTimeout(() => setRegieAwardToast(null), 3000);
+                            }}
+                            className="px-2.5 py-1 rounded bg-amber-400/20 hover:bg-amber-400/35 border border-amber-300 text-amber-200 text-[10.5px] font-bold cursor-pointer"
+                          >
+                            +250 XP
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUpgrades((u) => ({
+                                ...u,
+                                bonusPoints: (u.bonusPoints || 0) + 1000,
+                              }));
+                              soundFX.playChallengeUnlocked();
+                              setRegieAwardToast('✅ +1.000 Ehren-XP verliehen!');
+                              window.setTimeout(() => setRegieAwardToast(null), 3000);
+                            }}
+                            className="px-2.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[10.5px] font-black cursor-pointer"
+                          >
+                            +1.000 XP
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const kingThreshold =
+                                (adminSettings.rankThresholds ||
+                                  DEFAULT_RANK_THRESHOLDS)[5] || 5000;
+                              const needed = Math.max(
+                                500,
+                                kingThreshold - totalEarnedPoints + 100
+                              );
+                              setUpgrades((u) => ({
+                                ...u,
+                                bonusPoints: (u.bonusPoints || 0) + needed,
+                              }));
+                              soundFX.playChallengeUnlocked();
+                              setRegieAwardToast(
+                                '👑 Höchstrang „König der Halle“ (Gold-Schwarz) freigeschaltet!'
+                              );
+                              window.setTimeout(() => setRegieAwardToast(null), 3500);
+                            }}
+                            className="px-2.5 py-1 rounded bg-gradient-to-r from-amber-300 via-yellow-200 to-cyan-300 text-slate-950 text-[10.5px] font-black cursor-pointer"
+                          >
+                            👑 Sofort „König der Halle“
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPlayerPixels((prev) => {
+                                const next = prev + 100;
+                                savePlayerPixels(next);
+                                return next;
+                              });
+                              soundFX.playChallengeUnlocked();
+                              setRegieAwardToast('👾 +100 Spiel-Pixel gutgeschrieben!');
+                              window.setTimeout(() => setRegieAwardToast(null), 3000);
+                            }}
+                            className="px-2.5 py-1 rounded bg-fuchsia-500/25 hover:bg-fuchsia-500/40 border border-fuchsia-300 text-fuchsia-200 text-[10.5px] font-bold cursor-pointer"
+                          >
+                            +100 Pixel
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 6 XP-Schwellenwerte anpassen */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-700 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-amber-200 text-xs">
+                          🎚️ XP-Punkteschwellen der 6 Hallen-Ränge anpassen:
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((prev) => ({
+                              ...prev,
+                              rankThresholds: [...DEFAULT_RANK_THRESHOLDS],
+                            }))
+                          }
+                          className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[10px] font-bold cursor-pointer"
+                        >
+                          ↩️ Standard-Schwellen (0 / 650 / 1200 / 2000 / 3200 / 5000)
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                        {[
+                          { idx: 0, label: '1. Bahn-Neuling (Grau)' },
+                          { idx: 1, label: '2. Kurven-Flitzer (Grau)' },
+                          { idx: 2, label: '3. Disco-Skater (Altrosa)' },
+                          { idx: 3, label: '4. Stammgast ’86 (Altrosa)' },
+                          { idx: 4, label: '5. Hallen-Legende (Pergament)' },
+                          { idx: 5, label: '6. 👑 König der Halle (Gold-Schwarz)' },
+                        ].map((rItem) => {
+                          const currentArr =
+                            adminSettings.rankThresholds &&
+                            adminSettings.rankThresholds.length === 6
+                              ? adminSettings.rankThresholds
+                              : DEFAULT_RANK_THRESHOLDS;
+                          return (
+                            <div
+                              key={rItem.idx}
+                              className="p-2 rounded-lg bg-slate-900 border border-slate-700 space-y-1"
+                            >
+                              <label className="block text-[9.5px] text-cyan-200 font-bold truncate">
+                                {rItem.label}
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                step={50}
+                                disabled={rItem.idx === 0}
+                                value={currentArr[rItem.idx] ?? 0}
+                                onChange={(e) => {
+                                  const val = Math.max(
+                                    0,
+                                    parseInt(e.target.value, 10) || 0
+                                  );
+                                  setAdminSettings((prev) => {
+                                    const nextArr = [
+                                      ...(prev.rankThresholds &&
+                                      prev.rankThresholds.length === 6
+                                        ? prev.rankThresholds
+                                        : DEFAULT_RANK_THRESHOLDS),
+                                    ];
+                                    nextArr[rItem.idx] = val;
+                                    return {
+                                      ...prev,
+                                      rankThresholds: nextArr,
+                                    };
+                                  });
+                                }}
+                                className="w-full px-2 py-1 rounded bg-slate-950 border border-amber-400/50 text-amber-200 text-xs font-bold"
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* 4 Offizielle Führerschein-Stempel manuell vergeben/umschalten */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-700 space-y-2">
+                      <div className="font-bold text-cyan-200 text-xs">
+                        🏛️ Offizielle Prüfungs-Stempel im Papierführerschein (1-Klick-Freigabe):
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {(
+                          [
+                            {
+                              key: 'slalomExam' as const,
+                              label: '🚧 Slalom-Prüfung',
+                            },
+                            {
+                              key: 'ballspielChamp' as const,
+                              label: '🏐 Ballspiel-Champion',
+                            },
+                            {
+                              key: 'kurierReader' as const,
+                              label: '📰 Kurier-Vielleser',
+                            },
+                            {
+                              key: 'fiveStationsVisited' as const,
+                              label: '🕹️ 5 Pixel-Stationen',
+                            },
+                          ] as const
+                        ).map((st) => {
+                          const active = Boolean(licenseStamps[st.key]);
+                          return (
+                            <button
+                              key={st.key}
+                              type="button"
+                              onClick={() => {
+                                setLicenseStamps((prev) => {
+                                  const next: LicenseStampsState = {
+                                    ...prev,
+                                    [st.key]: !prev[st.key],
+                                  };
+                                  saveLicenseStamps(next);
+                                  return next;
+                                });
+                              }}
+                              className={`p-2 rounded-lg border text-left font-bold text-xs cursor-pointer transition ${
+                                active
+                                  ? 'bg-emerald-500 text-slate-950 border-white shadow'
+                                  : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-300'
+                              }`}
+                            >
+                              {st.label}: {active ? '✓ GESTEMPELT' : 'OFFEN'}
                             </button>
                           );
                         })}
@@ -13823,7 +16008,7 @@ export function App() {
         )}
 
         {/* ===================================================================== */}
-        {/* 11A. PASSWORTGESCHÜTZTER DJ-KANZEL LOGIN MODAL (`VITE_DJ_PASSWORD`)   */}
+        {/* 11A. GESCHÜTZTER DJ-KANZEL LOGIN MODAL (KEINE OFFENEN PASSWORT-TIPPS) */}
         {/* ===================================================================== */}
         {showDjLoginModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm">
@@ -13851,7 +16036,7 @@ export function App() {
 
               <div className="space-y-2">
                 <label className="block text-xs text-cyan-200">
-                  DJ-Passwort (`VITE_DJ_PASSWORD` / Standard: `MAGIC86`):
+                  Persönlicher DJ-Zugangs-Key:
                 </label>
                 <input
                   type="password"
@@ -13861,7 +16046,7 @@ export function App() {
                     setDjPasswordInput(e.target.value);
                     if (djPasswordError) setDjPasswordError(null);
                   }}
-                  placeholder="DJ-Passwort eingeben..."
+                  placeholder="DJ-Key eingeben..."
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-fuchsia-400/70 text-sm text-amber-200 focus:outline-none focus:border-cyan-300"
                 />
                 {djPasswordError && (
@@ -13887,6 +16072,176 @@ export function App() {
                 </button>
               </div>
             </form>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 11A-2. TEAM-HANDHELD ROLLEN-LOGIN MODAL (DJ / LICHT / PRESSE)          */}
+        {/* ===================================================================== */}
+        {showRoleKeyLoginModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm">
+            <form
+              onSubmit={handleVerifyRoleHandheldKey}
+              className="w-full max-w-md rounded-2xl bg-[#140B24] border-2 border-cyan-400 shadow-[0_0_50px_rgba(34,211,238,0.45)] p-5 text-white space-y-4 font-mono"
+            >
+              <div className="flex items-center justify-between border-b border-cyan-500/40 pb-2.5">
+                <div>
+                  <span className="text-[10px] text-cyan-300 uppercase">
+                    Dot Matrix Second-Screen • Team-Zugang
+                  </span>
+                  <h2 className="font-display font-black text-lg text-white">
+                    🎮 TEAM-HANDHELD FREISCHALTEN
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowRoleKeyLoginModal(false)}
+                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-amber-200">
+                  Rollen-Key eingeben (DJ, LICHT oder PRESSE):
+                </label>
+                <input
+                  type="password"
+                  autoFocus
+                  value={roleKeyLoginInput}
+                  onChange={(e) => {
+                    setRoleKeyLoginInput(e.target.value);
+                    if (roleKeyLoginError) setRoleKeyLoginError(null);
+                  }}
+                  placeholder="Team-Key eingeben..."
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-cyan-400/70 text-sm text-amber-200 focus:outline-none focus:border-amber-300"
+                />
+                {roleKeyLoginError && (
+                  <div className="p-2 rounded bg-rose-950 border border-rose-400 text-rose-200 text-xs font-bold">
+                    ⚠️ {roleKeyLoginError}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowRoleKeyLoginModal(false)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-400 via-amber-300 to-emerald-400 text-slate-950 font-black text-xs cursor-pointer"
+                >
+                  🔓 Handheld starten
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 11A-3. QR-CODE MODAL FÜR SECOND-SCREEN HANDHELDS (?handheld=...)      */}
+        {/* ===================================================================== */}
+        {qrModalRole && (
+          <div
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs"
+            onClick={() => setQrModalRole(null)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-sm rounded-2xl bg-[#140F23] border-2 border-cyan-400 shadow-[0_0_45px_rgba(34,211,238,0.5)] p-5 text-white font-mono space-y-3 text-center"
+            >
+              <div className="flex items-center justify-between border-b border-cyan-500/30 pb-2">
+                <span className="text-xs font-black text-cyan-300 uppercase">
+                  📱 Second-Screen QR ({qrModalRole.toUpperCase()})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setQrModalRole(null)}
+                  className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-xs cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="flex justify-center gap-1">
+                {(['dj', 'licht', 'presse'] as RoleHandheldType[]).map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setQrModalRole(r)}
+                    className={`px-2.5 py-1 rounded text-[10px] font-black uppercase cursor-pointer ${
+                      qrModalRole === r
+                        ? 'bg-cyan-400 text-slate-950'
+                        : 'bg-slate-900 text-slate-300 border border-slate-700'
+                    }`}
+                  >
+                    {r === 'dj'
+                      ? '🎧 DJ'
+                      : r === 'licht'
+                      ? '💡 LICHT'
+                      : '📰 PRESSE'}
+                  </button>
+                ))}
+              </div>
+
+              <div className="bg-white p-3 rounded-xl inline-block mx-auto shadow-lg">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&margin=6&data=${encodeURIComponent(
+                    getRoleHandheldShareUrl(qrModalRole)
+                  )}`}
+                  alt="Second-Screen Handheld QR"
+                  className="w-44 h-44"
+                />
+              </div>
+
+              <p className="text-[10.5px] text-slate-300 leading-relaxed">
+                Scanne den QR-Code mit dem Smartphone oder Tablet, um das{' '}
+                <strong className="text-amber-300">
+                  {qrModalRole.toUpperCase()}-Handheld
+                </strong>{' '}
+                im Vollbild ohne 2D-Bahn zu öffnen.
+              </p>
+
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  readOnly
+                  value={getRoleHandheldShareUrl(qrModalRole)}
+                  className="flex-1 px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-[10px] text-cyan-200"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      typeof navigator !== 'undefined' &&
+                      navigator.clipboard
+                    ) {
+                      navigator.clipboard.writeText(
+                        getRoleHandheldShareUrl(qrModalRole)
+                      );
+                      setRoleKeyCopiedToast('✅ Handheld-Link kopiert!');
+                      window.setTimeout(
+                        () => setRoleKeyCopiedToast(null),
+                        2500
+                      );
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 text-[10px] font-black cursor-pointer"
+                >
+                  📋 Link kopieren
+                </button>
+              </div>
+              {roleKeyCopiedToast && (
+                <div className="text-[10px] text-emerald-300 font-bold">
+                  {roleKeyCopiedToast}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -14486,20 +16841,47 @@ export function App() {
         )}
 
         {/* ===================================================================== */}
-        {/* 12. 👾 80ER-PIXEL-ARCADE-DIALOGE AN DEN 5 STATIONEN                   */}
+        {/* 12. 👾 80ER-PIXEL-ARCADE-DIALOGE AN DEN 5 STATIONEN + CUSTOM CREW      */}
         {/* ===================================================================== */}
         {activeStationDialog &&
           (() => {
-            const stMeta = STATION_DIALOG_DEFAULTS[activeStationDialog];
-            const crewName =
-              adminSettings.crewNames?.[stMeta.crewKey] ||
-              stMeta.defaultCrewName;
-            const crewQuote =
-              adminSettings.crewQuotes?.[activeStationDialog] ||
-              stMeta.defaultQuote;
+            const isStandardStation =
+              activeStationDialog in STATION_DIALOG_DEFAULTS;
+            const customMember = !isStandardStation
+              ? (adminSettings.customCrewMembers || []).find(
+                  (m) => m.id === activeStationDialog
+                )
+              : undefined;
+            const stMeta = isStandardStation
+              ? STATION_DIALOG_DEFAULTS[activeStationDialog as StationDialogId]
+              : {
+                  title: customMember?.stationTitle || '6. PALLADIUM CREW-STATION',
+                  roleBadge:
+                    CUSTOM_CREW_SPAWN_PRESETS[
+                      customMember?.spawnSpot || 'eingang'
+                    ]?.label || 'Palladium Crew ’86',
+                  defaultCrewName: customMember?.crewName || 'Palladium-Crew',
+                  defaultQuote:
+                    customMember?.quote ||
+                    'Willkommen im Palladium Hanau ’86!',
+                  crewKey: 'cashier' as const,
+                };
+            const crewName = isStandardStation
+              ? adminSettings.crewNames?.[stMeta.crewKey] ||
+                stMeta.defaultCrewName
+              : customMember?.crewName || stMeta.defaultCrewName;
+            const crewQuote = isStandardStation
+              ? adminSettings.crewQuotes?.[
+                  activeStationDialog as StationDialogId
+                ] || stMeta.defaultQuote
+              : customMember?.quote || stMeta.defaultQuote;
             const portraitUrl = getStation16BitPortraitDataUrl(
               activeStationDialog,
-              adminSettings.crewPortraits?.[activeStationDialog]
+              isStandardStation
+                ? adminSettings.crewPortraits?.[
+                    activeStationDialog as StationDialogId
+                  ]
+                : customMember?.portraitDataUrl
             );
             const currentRadioTrack =
               radioPlaylist[currentTrackIdx] || DEFAULT_80S_RADIO_PLAYLIST[0];
@@ -14507,7 +16889,7 @@ export function App() {
             return (
               <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/80 p-3 sm:p-4 backdrop-blur-xs font-mono">
                 <div className="w-full max-w-2xl rounded-2xl bg-[#0B0818] border-4 border-amber-300 shadow-[0_0_55px_rgba(251,191,36,0.45)] overflow-hidden">
-                  {/* Top 5-Stations Arcade Switcher Header */}
+                  {/* Top 5-Stations + Custom Crew Arcade Switcher Header */}
                   <div className="px-3 py-2 bg-gradient-to-r from-fuchsia-950 via-[#170e2e] to-cyan-950 border-b-2 border-amber-300/70 flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {(
@@ -14517,7 +16899,13 @@ export function App() {
                           { id: 'proshop', short: '3. Pro-Shop' },
                           { id: 'snackbar', short: '4. Snack-Bar' },
                           { id: 'dj', short: '5. DJ-Kanzel' },
-                        ] as { id: StationDialogId; short: string }[]
+                          ...(adminSettings.customCrewMembers || []).map(
+                            (cm, idx) => ({
+                              id: cm.id,
+                              short: `${6 + idx}. ${cm.crewName}`,
+                            })
+                          ),
+                        ] as { id: string; short: string }[]
                       ).map((tab) => (
                         <button
                           key={tab.id}
@@ -14586,15 +16974,27 @@ export function App() {
                       </div>
                     )}
 
+                    {/* 5. DEUTLICHER "100 % KOSTENLOS"-HINWEIS FÜR PIXEL-SPIELWÄHRUNG */}
+                    <div className="px-3 py-1.5 rounded-lg bg-emerald-950/75 border border-emerald-400/50 text-emerald-200 text-[10.5px] font-mono text-center">
+                      👾 <strong>100 % kostenloses Fan-Projekt</strong> – hier
+                      wird ausschließlich mit gesammelten Spiel-Pixeln bezahlt,
+                      echtes Geld gibt es hier nicht! (Dein Kontostand:{' '}
+                      <strong className="text-amber-300">
+                        {playerPixels} Pixel
+                      </strong>
+                      )
+                    </div>
+
                     {/* STATION 1: KASSE & EINLASS (Tickets, Sonntags-Clique, 10er-Stempelkarte) */}
                     {activeStationDialog === 'kasse' && (
                       <div className="space-y-3 p-3 rounded-xl bg-slate-950/90 border border-amber-400/50">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="text-xs font-black uppercase text-amber-300">
-                            🎟️ 1. KASSEN-AKTIONEN: TICKETS &amp; 10ER-STEMPELKARTE
+                            🎟️ 1. KASSEN-AKTIONEN: EINTRITT-STEMPEL &amp; PIXEL-TICKETS
                           </span>
                           <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-400/60 text-emerald-200 text-[10.5px] font-bold">
-                            Stempelkarte: {stampCard.stamps} / 10 Stempel
+                            Stempelkarte: {stampCard.stamps} / 10 Stempel • 👾{' '}
+                            {playerPixels} Pixel
                           </span>
                         </div>
 
@@ -14912,13 +17312,13 @@ export function App() {
                               handleChallengeProgress('bistro_drink', 1);
                               soundFX.playDrinkRefresh();
                               setStationDialogToast(
-                                '🍧 Waldmeister-Kirsch Slush Puppy getrunken! Sofortiger Cool-Speed-Boost auf der Bahn!'
+                                '🍧 Waldmeister-Kirsch Slush-Eis gezapft (0 Pixel • Gratis Fan-Special)! Sofortiger Cool-Speed-Boost!'
                               );
                             }}
                             className="p-2.5 rounded-xl bg-gradient-to-br from-cyan-950 to-emerald-950 hover:from-cyan-900 hover:to-emerald-900 border-2 border-cyan-400 text-left cursor-pointer transition"
                           >
                             <div className="text-xs font-black text-cyan-200">
-                              🍧 Slush Puppy
+                              🍧 Slush-Eis (0 Pixel)
                             </div>
                             <div className="text-[10px] text-emerald-200 mt-0.5">
                               Waldmeister-Kirsch • +Speed-Boost!
@@ -14933,13 +17333,13 @@ export function App() {
                               handleChallengeProgress('bistro_drink', 1);
                               soundFX.playDrinkRefresh();
                               setStationDialogToast(
-                                '🥤 Eiskalte Bloba Cola gezapft! Voller Sprung- & Turbo-Kick aktiv!'
+                                '🥤 Eiskalte Bloba Cola gezapft (0 Pixel)! Voller Sprung- & Turbo-Kick aktiv!'
                               );
                             }}
                             className="p-2.5 rounded-xl bg-gradient-to-br from-fuchsia-950 to-amber-950 hover:from-fuchsia-900 hover:to-amber-900 border-2 border-fuchsia-400 text-left cursor-pointer transition"
                           >
                             <div className="text-xs font-black text-fuchsia-200">
-                              🥤 Bloba Cola
+                              🥤 Bloba Cola (0 Pixel)
                             </div>
                             <div className="text-[10px] text-amber-200 mt-0.5">
                               80er Kult-Cola • +Sprung- &amp; Turbo-Kick!
@@ -14954,15 +17354,20 @@ export function App() {
                                 ...u,
                                 bonusPoints: (u.bonusPoints || 0) + 25,
                               }));
+                              setPlayerPixels((p) => {
+                                const next = p + 5;
+                                savePlayerPixels(next);
+                                return next;
+                              });
                               soundFX.playDrinkRefresh();
                               setStationDialogToast(
-                                '🌭 80er Hot-Dog & warme Brezel verputzt! Voller Kombi-Boost + 25 Bonus-Punkte!'
+                                '🌭 80er Hot-Dog & warme Brezel verputzt! Voller Kombi-Boost + 25 Pkt + 5 Bonus-Pixel!'
                               );
                             }}
                             className="p-2.5 rounded-xl bg-gradient-to-br from-amber-950 to-rose-950 hover:from-amber-900 hover:to-rose-900 border-2 border-amber-400 text-left cursor-pointer transition"
                           >
                             <div className="text-xs font-black text-amber-200">
-                              🌭 80er Snack-Menü
+                              🌭 80er Snack-Menü (+5 Pixel)
                             </div>
                             <div className="text-[10px] text-rose-200 mt-0.5">
                               Hot-Dog &amp; Brezel • Boost + 25 Pkt!
@@ -15055,6 +17460,51 @@ export function App() {
                         </div>
                       </div>
                     )}
+
+                    {/* EIGENE CREW-STATION (WENN EIN CUSTOM CREW-MITGLIED GEÖFFNET IST) */}
+                    {customMember && (
+                      <div className="space-y-3 p-3 rounded-xl bg-slate-950/90 border border-emerald-400/50">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-black uppercase text-emerald-300">
+                            👾 {customMember.stationTitle} • PALLADIUM CREW ’86
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-emerald-950 border border-emerald-400/60 text-emerald-200 text-[10px] font-bold">
+                            📍{' '}
+                            {CUSTOM_CREW_SPAWN_PRESETS[customMember.spawnSpot]
+                              ?.label || 'Hallen-Station'}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              soundFX.playChallengeUnlocked();
+                              setStationDialogToast(
+                                `🙌 High-Five mit ${customMember.crewName}! „${customMember.quote}“`
+                              );
+                            }}
+                            className="p-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs border border-white cursor-pointer transition"
+                          >
+                            🙌 High-Five &amp; 80er-Gruß abholen
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTeleportTrigger({
+                                x: customMember.x,
+                                y: Math.min(910, customMember.y + 42),
+                                label: customMember.crewName,
+                                seq: Date.now(),
+                              });
+                              setActiveStationDialog(null);
+                            }}
+                            className="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-200 font-bold text-xs border border-cyan-400/50 cursor-pointer transition"
+                          >
+                            🛼 Direkt zu {customMember.crewName} rollen
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -15062,196 +17512,45 @@ export function App() {
           })()}
 
         {/* ===================================================================== */}
-        {/* 12B. 🏅 PROFIL-ZERTIFIKAT / ENTDECKER-URKUNDE ("ENTDECKER AUF 8 ROLLEN") */}
+        {/* 12B. 🪪 GRAUER 80ER-PAPIERFÜHRERSCHEIN ("PALLADIUM HANAU ’86")         */}
         {/* ===================================================================== */}
         {showExplorerCertificateModal && (
-          <div
-            className="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 p-3 sm:p-5 backdrop-blur-sm"
-            onClick={() => setShowExplorerCertificateModal(false)}
-          >
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className="relative w-full max-w-xl rounded-2xl bg-gradient-to-br from-[#23153c] via-[#110c22] to-[#291710] border-4 border-amber-300 shadow-[0_0_70px_rgba(251,191,36,0.6)] p-4 sm:p-6 text-[#FFF8E7] overflow-hidden"
-            >
-              {/* Decorative 80s Corner Ornaments */}
-              <div className="pointer-events-none absolute top-2 left-2 w-6 h-6 border-t-2 border-l-2 border-cyan-300/70" />
-              <div className="pointer-events-none absolute top-2 right-2 w-6 h-6 border-t-2 border-r-2 border-cyan-300/70" />
-              <div className="pointer-events-none absolute bottom-2 left-2 w-6 h-6 border-b-2 border-l-2 border-cyan-300/70" />
-              <div className="pointer-events-none absolute bottom-2 right-2 w-6 h-6 border-b-2 border-r-2 border-cyan-300/70" />
+          <PaperDriverLicenseModal
+            playerName={(playerName || 'Palladium-Skater').trim()}
+            playerShirtColor={playerShirtColor || '#ff2a85'}
+            characterMode={characterMode}
+            kengolHatEnabled={kengolHatEnabled}
+            vipDiscoSkatesEquipped={Boolean(
+              lockerSettings.vipDiscoSkatesEquipped
+            )}
+            hallPointsXp={totalEarnedPoints}
+            collectedPixels={playerPixels}
+            createdAtText={explorerCreatedAt}
+            licenseNumber={`HU-86-${cloudPlayerId
+              .replace(/[^a-zA-Z0-9]/g, '')
+              .slice(-6)
+              .toUpperCase()}`}
+            stamps={licenseStamps}
+            customThresholds={adminSettings.rankThresholds}
+            isConstantReaderUnlocked={Boolean(
+              certificatesState.unlocked.vielleser_5?.unlocked
+            )}
+            onClose={() => setShowExplorerCertificateModal(false)}
+          />
+        )}
 
-              {/* Top Banner */}
-              <div className="text-center border-b-2 border-amber-400/50 pb-3">
-                <div className="inline-block px-3 py-0.5 rounded-full bg-amber-400/20 border border-amber-300 font-mono text-[10px] font-black uppercase tracking-widest text-amber-200 mb-1.5">
-                  ★ ROLLER DISCO PALLADIUM HANAU &apos;86 • PROFIL-ZERTIFIKAT ★
-                </div>
-                <h2 className="font-display font-black text-2xl sm:text-3xl tracking-wider uppercase text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-yellow-300 to-cyan-300 drop-shadow-[0_0_16px_rgba(251,191,36,0.5)]">
-                  „Entdecker auf acht Rollen“
-                </h2>
-                <p className="font-mono text-xs text-fuchsia-200 mt-0.5">
-                  Offizielle 80er-Jahre Ehren-Urkunde • {APP_VERSION_LABEL}
-                </p>
-              </div>
-
-              {/* Center Medallion with Player's Own Avatar */}
-              <div className="my-4 flex flex-col items-center">
-                <div className="relative w-28 h-28 rounded-full bg-gradient-to-b from-fuchsia-950 via-[#0c1022] to-cyan-950 border-4 border-amber-300 shadow-[0_0_32px_rgba(34,211,238,0.55)] flex items-center justify-center">
-                  <svg viewBox="0 0 80 80" className="w-24 h-24">
-                    {/* Neon Disco Sunburst */}
-                    <circle
-                      cx="40"
-                      cy="40"
-                      r="34"
-                      fill="none"
-                      stroke={playerShirtColor || '#ff2a85'}
-                      strokeWidth="2"
-                      strokeDasharray="5 3"
-                    />
-                    {/* Kengol Bucket Hat or 80s Sweatband */}
-                    {kengolHatEnabled ? (
-                      <path
-                        d="M22 25 Q40 11 58 25 L61 28 L19 28 Z"
-                        fill="#e11d48"
-                        stroke="#fde047"
-                        strokeWidth="1.5"
-                      />
-                    ) : (
-                      <rect
-                        x="26"
-                        y="20"
-                        width="28"
-                        height="4.5"
-                        rx="2"
-                        fill="#22d3ee"
-                      />
-                    )}
-                    {/* Head & 80s Shades */}
-                    <circle cx="40" cy="31" r="10" fill="#fde68a" />
-                    <rect
-                      x="32"
-                      y="28"
-                      width="16"
-                      height="4"
-                      rx="1"
-                      fill="#0f172a"
-                      stroke="#22d3ee"
-                      strokeWidth="1"
-                    />
-                    {/* 80s Jacket / Shirt in Player's Color */}
-                    <path
-                      d="M22 56 C22 41 58 41 58 56 Z"
-                      fill={playerShirtColor || '#ff2a85'}
-                      stroke="#ffffff"
-                      strokeWidth="1.8"
-                    />
-                    {/* 8 Glowing Rollerskate Wheels / Wheelchair Neon Rim */}
-                    {characterMode === 'wheelchair' ? (
-                      <>
-                        <circle
-                          cx="28"
-                          cy="62"
-                          r="7"
-                          fill="none"
-                          stroke="#22d3ee"
-                          strokeWidth="2.5"
-                        />
-                        <circle
-                          cx="52"
-                          cy="62"
-                          r="7"
-                          fill="none"
-                          stroke="#22d3ee"
-                          strokeWidth="2.5"
-                        />
-                      </>
-                    ) : (
-                      <>
-                        <circle cx="25" cy="64" r="3.5" fill="#22d3ee" />
-                        <circle cx="31" cy="64" r="3.5" fill="#fde047" />
-                        <circle cx="37" cy="64" r="3.5" fill="#ec4899" />
-                        <circle cx="43" cy="64" r="3.5" fill="#ec4899" />
-                        <circle cx="49" cy="64" r="3.5" fill="#fde047" />
-                        <circle cx="55" cy="64" r="3.5" fill="#22d3ee" />
-                      </>
-                    )}
-                  </svg>
-                  <span className="absolute -bottom-2.5 px-2.5 py-0.5 rounded-full bg-amber-300 text-slate-950 font-mono text-[10px] font-black border border-white shadow">
-                    {characterMode === 'wheelchair'
-                      ? '♿ NEON-WHEELS'
-                      : '🛼 8-ROLLEN-PROFI'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Parchment Certificate Body */}
-              <div className="p-4 rounded-xl bg-gradient-to-br from-amber-50 via-[#fff9eb] to-amber-100 text-slate-900 border-2 border-amber-600 shadow-inner space-y-2.5">
-                <p className="text-center text-xs sm:text-sm leading-relaxed font-serif text-slate-800">
-                  Hiermit wird feierlich beurkundet, dass
-                </p>
-                <div className="text-center font-display font-black text-xl sm:text-2xl text-rose-700 tracking-wide underline decoration-amber-500 decoration-2 underline-offset-4">
-                  {(playerName || 'Palladium-Skater').trim()}
-                </div>
-                <p className="text-center text-xs sm:text-sm leading-relaxed font-serif text-slate-800">
-                  als offizieller{' '}
-                  <strong className="text-slate-950">
-                    „Entdecker auf acht Rollen“
-                  </strong>{' '}
-                  das legendäre Holzparkett im{' '}
-                  <strong>Palladium Roller Arena Hanau &apos;86</strong> unter
-                  Neonlicht, Spiegelkugeln und 80er-Beats erfolgreich erkundet hat.
-                </p>
-
-                {/* Metadata Grid: Erstellungsdatum & Arena-Siegel */}
-                <div className="mt-3 pt-3 border-t-2 border-amber-400/80 flex flex-col sm:flex-row items-center justify-between gap-3 font-mono text-xs">
-                  <div className="space-y-0.5 text-center sm:text-left">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
-                      📅 ERSTELLUNGSDATUM
-                    </div>
-                    <div className="text-sm font-black text-slate-900">
-                      {explorerCreatedAt}
-                    </div>
-                    <div className="text-[10px] text-slate-600">
-                      Runden: {telemetry.laps} • Punkte: {totalEarnedPoints} Pkt
-                    </div>
-                  </div>
-
-                  {/* Authentic Embossed 80s Arena Seal */}
-                  <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-gradient-to-r from-rose-800 via-red-700 to-amber-700 text-amber-100 border-2 border-amber-300 shadow-[0_0_18px_rgba(190,18,60,0.45)] rotate-[-2deg]">
-                    <span className="text-xl">🏛️</span>
-                    <div className="text-left leading-tight">
-                      <div className="text-[9px] font-black uppercase tracking-widest text-amber-200">
-                        OFFIZIELLES ARENA-SIEGEL
-                      </div>
-                      <div className="text-[11px] font-black text-white">
-                        PALLADIUM HANAU 1986
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Footer Actions */}
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowExplorerCertificateModal(false);
-                    setLockerTab('certificates');
-                    setShowLockerModal(true);
-                  }}
-                  className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono text-xs font-black border border-white cursor-pointer transition"
-                >
-                  🏆 Zur Spind-Pokalwand
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowExplorerCertificateModal(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-cyan-400/60 text-cyan-200 font-mono text-xs font-bold cursor-pointer transition"
-                >
-                  ✕ Schließen [ESC]
-                </button>
-              </div>
-            </div>
-          </div>
+        {/* ===================================================================== */}
+        {/* 12B-2. 🕹️ SPIELBARE 80ER-RETRO-AUTOMATEN BEI DER DJ-KANZEL            */}
+        {/* ===================================================================== */}
+        {activeArcadeGameId && (
+          <RetroArcadeCabinetsModal
+            activeGameId={activeArcadeGameId}
+            onSelectGame={(id) => setActiveArcadeGameId(id)}
+            onClose={() => setActiveArcadeGameId(null)}
+            onAwardArcadeReward={(bonusXp, bonusPixels, gameTitle) =>
+              handleAwardArcadeReward(bonusPixels, bonusXp, gameTitle)
+            }
+          />
         )}
 
         {/* ===================================================================== */}
@@ -15264,7 +17563,7 @@ export function App() {
           >
             <div
               onClick={(e) => e.stopPropagation()}
-              className="relative w-full max-w-3xl rounded-xl bg-[#f5ecd7] text-[#1c1610] border-4 border-[#3a2817] shadow-[0_0_75px_rgba(0,0,0,0.9)] p-4 sm:p-6 font-serif"
+              className="relative w-full max-w-3xl max-h-[90dvh] overflow-y-auto rounded-xl bg-[#f5ecd7] text-[#1c1610] border-4 border-[#3a2817] shadow-[0_0_75px_rgba(0,0,0,0.9)] p-4 sm:p-6 font-serif"
               style={{
                 backgroundImage:
                   'radial-gradient(circle at center, rgba(255,250,235,0.4) 0%, rgba(214,193,154,0.45) 100%)',
@@ -15330,15 +17629,13 @@ export function App() {
                     🛼 PALLADIUM-TIPPS &amp; HALLEN-GUIDE ’86
                   </div>
                   <ul className="space-y-1.5 text-xs list-disc list-inside text-[#2c2013]">
-                    <li>
-                      <strong>5 Pixel-Stationen [E]:</strong> Besuche Kasse, Verleih, Pro-Shop, Snack-Bar &amp; DJ-Kanzel im 16-Bit-Arcade-Look.
-                    </li>
-                    <li>
-                      <strong>Sonntags-Clique (2+1):</strong> Löse dein Duo- oder Trio-Ticket für +25% Cliquen-Punkte bei warmer Nachmittagsbeleuchtung.
-                    </li>
-                    <li>
-                      <strong>Entdecker-Urkunde:</strong> Klicke oben im HUD auf deinen mittleren Avatar-Kreis für dein persönliches Arena-Zertifikat.
-                    </li>
+                    {(adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS)
+                      .split(/\r?\n/)
+                      .map((l) => l.trim())
+                      .filter(Boolean)
+                      .map((tipLine, idx) => (
+                        <li key={idx}>{tipLine}</li>
+                      ))}
                   </ul>
 
                   {/* Vielleser auf Rollen Stamp Box */}
@@ -15363,18 +17660,236 @@ export function App() {
                 </div>
               </div>
 
-              {/* Newspaper Footer */}
-              <div className="mt-4 pt-2.5 border-t-2 border-[#2b1d10] flex flex-wrap items-center justify-between gap-2 font-mono text-[10.5px] text-[#4a3520]">
+              {/* 100% kostenloses Fan-Projekt Hinweis auf der Zeitung */}
+              <div className="mt-3 px-3 py-1.5 rounded bg-[#e8dcc2] border border-[#8a6d4b] font-mono text-[10.5px] font-bold text-rose-900 text-center">
+                ★ 100 % kostenloses Fan-Projekt – hier wird ausschließlich mit
+                gesammelten Spiel-Pixeln bezahlt, echtes Geld gibt es hier
+                nicht! ★
+              </div>
+
+              {/* Newspaper Footer with 1-Click Facebook-PNG Download */}
+              <div className="mt-3 pt-2.5 border-t-2 border-[#2b1d10] flex flex-wrap items-center justify-between gap-2 font-mono text-[10.5px] text-[#4a3520]">
                 <span>
-                  DRUCK &amp; VERLAG: PALLADIUM ROLLER DISCO HANAU • AUSGABE #{currentNewspaperIssueId} Gelesen ✓
+                  DRUCK &amp; VERLAG: PALLADIUM ROLLER DISCO HANAU • AUSGABE #{currentNewspaperIssueId}
                 </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDownloadFacebookNewspaper}
+                    className="px-3.5 py-1.5 rounded bg-[#184e2c] hover:bg-[#216b3d] text-[#f5ecd7] font-bold text-xs cursor-pointer shadow"
+                  >
+                    📸 Als Bild für Facebook speichern (PNG)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowNewspaperModal(false)}
+                    className="px-4 py-1.5 rounded bg-[#2b1d10] hover:bg-[#422d19] text-amber-200 font-bold text-xs cursor-pointer"
+                  >
+                    Zeitung zuklappen [×]
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* 10. 🏆 80ER-ARCADE-BESTENLISTE ("HALLEN-EHRENTAFEL" • TOP 10 MODAL)   */}
+        {/* ===================================================================== */}
+        {showLeaderboardModal && (
+          <div
+            className="fixed inset-0 z-[95] flex items-center justify-center bg-black/80 p-3 sm:p-5 backdrop-blur-sm"
+            onClick={() => setShowLeaderboardModal(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-2xl max-h-[90dvh] overflow-y-auto rounded-2xl bg-[#0D0A1A] border-4 border-cyan-400 shadow-[0_0_60px_rgba(34,211,238,0.45)] p-4 sm:p-6 text-white font-mono space-y-4"
+            >
+              <div className="flex items-center justify-between border-b-2 border-cyan-500/40 pb-3">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">
+                    ★ PALLADIUM HANAU 1986 • 80ER-ARCADE-BESTENLISTE ★
+                  </div>
+                  <h2 className="font-display font-black text-xl sm:text-2xl text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-cyan-300 to-fuchsia-300">
+                    🏆 HALLEN-EHRENTAFEL (TOP 10)
+                  </h2>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setShowNewspaperModal(false)}
-                  className="px-4 py-1.5 rounded bg-[#2b1d10] hover:bg-[#422d19] text-amber-200 font-bold text-xs cursor-pointer"
+                  onClick={() => setShowLeaderboardModal(false)}
+                  className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black cursor-pointer"
                 >
-                  Zeitung zuklappen [×]
+                  ✕ Schließen
                 </button>
+              </div>
+
+              {/* 4 Kategorien Umschalter */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {(
+                  [
+                    {
+                      id: 'slalom' as const,
+                      label: '🚧 1. Slalom-Champions',
+                      sub: 'Fehlerfreie Runden',
+                    },
+                    {
+                      id: 'points' as const,
+                      label: '⭐ 2. Hallen-Punkte',
+                      sub: 'Gesamt-XP & Rang',
+                    },
+                    {
+                      id: 'pixels' as const,
+                      label: '👾 3. Pixel-Sammler',
+                      sub: 'Gesammelte Pixel',
+                    },
+                    {
+                      id: 'ballspiel' as const,
+                      label: '🏐 4. Ballspiel-Bestzeit',
+                      sub: 'Last Skater Standing',
+                    },
+                  ] as const
+                ).map((cat) => {
+                  const active = leaderboardTab === cat.id;
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => setLeaderboardTab(cat.id)}
+                      className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                        active
+                          ? 'bg-gradient-to-r from-amber-400 to-cyan-400 text-slate-950 border-white font-black shadow-[0_0_16px_rgba(34,211,238,0.5)]'
+                          : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
+                      }`}
+                    >
+                      <div className="text-xs font-black">{cat.label}</div>
+                      <div
+                        className={`text-[9.5px] mt-0.5 ${
+                          active ? 'text-slate-900 font-bold' : 'text-slate-400'
+                        }`}
+                      >
+                        {cat.sub}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Top 10 Liste */}
+              <div className="space-y-1.5">
+                {(() => {
+                  const sorted = [...leaderboardEntries].sort((a, b) => {
+                    if (leaderboardTab === 'slalom') {
+                      return (
+                        (b.slalomRounds || 0) - (a.slalomRounds || 0) ||
+                        (b.hallPoints || 0) - (a.hallPoints || 0)
+                      );
+                    }
+                    if (leaderboardTab === 'points') {
+                      return (
+                        (b.hallPoints || 0) - (a.hallPoints || 0) ||
+                        (b.slalomRounds || 0) - (a.slalomRounds || 0)
+                      );
+                    }
+                    if (leaderboardTab === 'ballspiel') {
+                      const aT =
+                        a.ballspielBestTimeSec && a.ballspielBestTimeSec > 0
+                          ? a.ballspielBestTimeSec
+                          : 9999;
+                      const bT =
+                        b.ballspielBestTimeSec && b.ballspielBestTimeSec > 0
+                          ? b.ballspielBestTimeSec
+                          : 9999;
+                      return aT - bT || (b.hallPoints || 0) - (a.hallPoints || 0);
+                    }
+                    return (
+                      (b.pixelsCollected || 0) - (a.pixelsCollected || 0) ||
+                      (b.hallPoints || 0) - (a.hallPoints || 0)
+                    );
+                  });
+                  const top10 = sorted.slice(0, 10);
+                  if (top10.length === 0) {
+                    return (
+                      <div className="p-6 rounded-xl bg-slate-900/90 border border-slate-700 text-center text-xs text-slate-400">
+                        Neue Saison aktiv – rolle jetzt auf die Bahn und sichere dir Platz #1!
+                      </div>
+                    );
+                  }
+                  return top10.map((entry, idx) => {
+                    const rank = idx + 1;
+                    const isMe =
+                      entry.id === cloudPlayerId ||
+                      entry.name.toLowerCase() ===
+                        (playerName || '').trim().toLowerCase();
+                    const entryRankInfo = computeHallRankInfo(
+                      entry.hallPoints || 0,
+                      adminSettings.rankThresholds
+                    );
+                    const metricLabel =
+                      leaderboardTab === 'slalom'
+                        ? `${entry.slalomRounds || 0} Runden`
+                        : leaderboardTab === 'points'
+                        ? `${entry.hallPoints || 0} XP`
+                        : leaderboardTab === 'ballspiel'
+                        ? entry.ballspielBestTimeSec &&
+                          entry.ballspielBestTimeSec > 0
+                          ? `${entry.ballspielBestTimeSec.toFixed(1)} Sek.`
+                          : '—'
+                        : `${entry.pixelsCollected || 0} Pixel`;
+                    return (
+                      <div
+                        key={entry.id || idx}
+                        className={`flex items-center justify-between px-3 py-2 rounded-xl border text-xs ${
+                          isMe
+                            ? 'bg-cyan-950/85 border-cyan-400 text-white'
+                            : rank <= 3
+                            ? 'bg-slate-900/95 border-amber-400/50 text-amber-100'
+                            : 'bg-slate-900/70 border-slate-800 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span
+                            className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs shrink-0 ${
+                              rank === 1
+                                ? 'bg-amber-400 text-slate-950'
+                                : rank === 2
+                                ? 'bg-slate-300 text-slate-950'
+                                : rank === 3
+                                ? 'bg-amber-700 text-white'
+                                : 'bg-slate-800 text-slate-300'
+                            }`}
+                          >
+                            #{rank}
+                          </span>
+                          <span
+                            className="w-3.5 h-3.5 rounded-full border border-white/60 shrink-0"
+                            style={{
+                              backgroundColor: entry.shirtColor || '#00f0ff',
+                            }}
+                          />
+                          <span className="font-bold truncate">
+                            {entry.name}
+                            {isMe ? ' (Du)' : ''}
+                          </span>
+                          <span
+                            className="hidden sm:inline-block px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-amber-200 shrink-0"
+                            title={entryRankInfo.title}
+                          >
+                            {entryRankInfo.icon} {entryRankInfo.title}
+                          </span>
+                        </div>
+                        <span className="px-2.5 py-1 rounded-lg bg-slate-950 border border-amber-400/50 text-amber-300 font-black shrink-0">
+                          {metricLabel}
+                        </span>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+
+              <div className="px-3 py-2 rounded-xl bg-emerald-950/70 border border-emerald-400/40 text-[10.5px] text-emerald-200 text-center">
+                👾 <strong>100 % kostenloses Fan-Projekt</strong> – hier wird
+                ausschließlich mit gesammelten Spiel-Pixeln bezahlt, echtes Geld
+                gibt es hier nicht!
               </div>
             </div>
           </div>

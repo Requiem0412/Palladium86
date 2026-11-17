@@ -23,6 +23,7 @@ import {
   RadioTrackItem,
   StationDialogId,
 } from '../config/arenaConfig';
+import { isSupabaseConfigured, supabase } from '../lib/supabaseCloud';
 
 const KEYS = {
   HAS_ENTERED: 'palladium_has_entered_v1',
@@ -232,6 +233,7 @@ export interface AdminPersistentSettings {
   crewNames: CrewNamesConfig;
   crewPortraits?: Partial<Record<StationDialogId, string>>;
   crewQuotes?: Partial<Record<StationDialogId, string>>;
+  customCrewMembers?: CustomCrewStationMember[];
   djJingleSlots: DjJingleSlot[];
   songRequests?: {
     id: string;
@@ -244,7 +246,124 @@ export interface AdminPersistentSettings {
   newspaperIssueId?: number;
   newspaperHeadline?: string;
   newspaperBody?: string;
+  newspaperTips?: string;
   newspaperUpdatedAt?: string;
+  hallPowerEnabled?: boolean;
+  roleKeys?: RoleKeysConfig;
+  rankThresholds?: number[];
+}
+
+export type RoleHandheldType = 'dj' | 'licht' | 'presse';
+
+export interface RoleKeysConfig {
+  dj: string;
+  licht: string;
+  presse: string;
+}
+
+export const DEFAULT_ROLE_KEYS: RoleKeysConfig = {
+  dj: 'DJ-PALLADIUM',
+  licht: 'LICHT-PALLADIUM',
+  presse: 'PRESSE-PALLADIUM',
+};
+
+export const DEFAULT_NEWSPAPER_TIPS =
+  '• 5 Pixel-Stationen [E]: Besuche Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel im 16-Bit-Arcade-Look.\n• Sonntags-Clique (2+1): Löse dein Duo- oder Trio-Ticket für +25% Cliquen-Punkte bei warmer Nachmittagsbeleuchtung.\n• Entdecker-Urkunde: Klicke oben links auf deinen Avatar-Kreis für dein persönliches Arena-Zertifikat.';
+
+const ROLE_HANDHELD_SESSION_KEY = 'p86_unlocked_role_handheld_v1';
+
+export function loadUnlockedRoleHandheldSession(): RoleHandheldType | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const val = window.sessionStorage.getItem(ROLE_HANDHELD_SESSION_KEY);
+    if (val === 'dj' || val === 'licht' || val === 'presse') {
+      return val;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export function saveUnlockedRoleHandheldSession(
+  role: RoleHandheldType | null
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (role) {
+      window.sessionStorage.setItem(ROLE_HANDHELD_SESSION_KEY, role);
+    } else {
+      window.sessionStorage.removeItem(ROLE_HANDHELD_SESSION_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export type CustomCrewSpawnSpotId =
+  | 'eingang'
+  | 'bahnrand_nord'
+  | 'bahnrand_sued'
+  | 'buehne'
+  | 'chill_lounge'
+  | 'custom_xy';
+
+export interface CustomCrewStationMember {
+  id: string;
+  stationTitle: string;
+  crewName: string;
+  quote: string;
+  portraitDataUrl?: string;
+  spawnSpot: CustomCrewSpawnSpotId;
+  x: number;
+  y: number;
+  shirtColor?: string;
+  accentColor?: string;
+}
+
+export const CUSTOM_CREW_SPAWN_PRESETS: Record<
+  CustomCrewSpawnSpotId,
+  { label: string; x: number; y: number }
+> = {
+  eingang: { label: '🚪 Eingang / Empfang', x: 1620, y: 895 },
+  bahnrand_nord: { label: '⬆️ Bahnrand Nord', x: 960, y: 120 },
+  bahnrand_sued: { label: '⬇️ Bahnrand Süd', x: 980, y: 865 },
+  buehne: { label: '🎸 Bühne / Mittel-Insel', x: 1000, y: 485 },
+  chill_lounge: { label: '🛋️ Chill-Lounge / Bistro', x: 465, y: 880 },
+  custom_xy: { label: '📍 Frei auf der Karte (X/Y)', x: 1410, y: 510 },
+};
+
+export interface HandheldPosState {
+  left: number | null;
+  top: number | null;
+  isPinned: boolean;
+}
+
+const HANDHELD_POS_STORAGE_KEY = 'p86_handheld_pos';
+
+export function loadHandheldPosState(): HandheldPosState {
+  try {
+    const raw = localStorage.getItem(HANDHELD_POS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        left: typeof parsed.left === 'number' ? parsed.left : null,
+        top: typeof parsed.top === 'number' ? parsed.top : null,
+        isPinned: Boolean(parsed.isPinned),
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return { left: null, top: null, isPinned: false };
+}
+
+export function saveHandheldPosState(state: HandheldPosState): void {
+  try {
+    localStorage.setItem(HANDHELD_POS_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // ignore
+  }
 }
 
 function getTodayDateString(): string {
@@ -649,6 +768,7 @@ export function loadAdminSettings(): AdminPersistentSettings {
     crewNames: { ...DEFAULT_CREW_NAMES },
     crewPortraits: {},
     crewQuotes: {},
+    customCrewMembers: [],
     djJingleSlots: DEFAULT_DJ_JINGLE_SLOTS.map((s) => ({ ...s })),
     newspaperEnabled: true,
     newspaperIssueId: 1,
@@ -656,7 +776,10 @@ export function loadAdminSettings(): AdminPersistentSettings {
       'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
     newspaperBody:
       'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.\n\nTipp der Redaktion: Klicke oben im HUD auf deinen mittleren Avatar-Kreis für deine persönliche „Entdecker auf acht Rollen“-Urkunde – und lies regelmäßig den Palladium-Kurier, um dir nach 5 Ausgaben die Gold-Urkunde „Vielleser auf Rollen“ zu sichern!',
+    newspaperTips: DEFAULT_NEWSPAPER_TIPS,
     newspaperUpdatedAt: '15.11.2026',
+    hallPowerEnabled: true,
+    roleKeys: { ...DEFAULT_ROLE_KEYS },
   };
   try {
     const raw = localStorage.getItem(KEYS.ADMIN_SETTINGS);
@@ -693,6 +816,32 @@ export function loadAdminSettings(): AdminPersistentSettings {
         Array.isArray(parsed.cinemaWeekdays) && parsed.cinemaWeekdays.length > 0
           ? parsed.cinemaWeekdays
           : ['Mi', 'Sa'];
+      const rawDjKey =
+        typeof parsed.roleKeys?.dj === 'string'
+          ? parsed.roleKeys.dj.trim()
+          : '';
+      const rawLichtKey =
+        typeof parsed.roleKeys?.licht === 'string'
+          ? parsed.roleKeys.licht.trim()
+          : '';
+      const rawPresseKey =
+        typeof parsed.roleKeys?.presse === 'string'
+          ? parsed.roleKeys.presse.trim()
+          : '';
+      const mergedRoleKeys: RoleKeysConfig = {
+        dj:
+          rawDjKey && rawDjKey !== 'DJ-BEAT-86'
+            ? rawDjKey
+            : DEFAULT_ROLE_KEYS.dj,
+        licht:
+          rawLichtKey && rawLichtKey !== 'LICHT-NEON-86'
+            ? rawLichtKey
+            : DEFAULT_ROLE_KEYS.licht,
+        presse:
+          rawPresseKey && rawPresseKey !== 'PRESSE-KURIER-86'
+            ? rawPresseKey
+            : DEFAULT_ROLE_KEYS.presse,
+      };
       return {
         ...defaults,
         ...parsed,
@@ -706,7 +855,11 @@ export function loadAdminSettings(): AdminPersistentSettings {
           parsed.crewQuotes && typeof parsed.crewQuotes === 'object'
             ? parsed.crewQuotes
             : {},
+        customCrewMembers: Array.isArray(parsed.customCrewMembers)
+          ? parsed.customCrewMembers
+          : [],
         djJingleSlots: mergedJingleSlots,
+        roleKeys: mergedRoleKeys,
       };
     }
   } catch {
@@ -715,14 +868,14 @@ export function loadAdminSettings(): AdminPersistentSettings {
   return defaults;
 }
 
-const cachedProceduralPortraits: Partial<Record<StationDialogId, string>> = {};
+const cachedProceduralPortraits: Record<string, string> = {};
 
 /**
  * Generates an authentic 16-Bit Arcade Pixel Portrait (48x48 upscaled to 192x192)
- * for each of the 5 Palladium '86 stations when no custom photo is uploaded.
+ * for each of the 5 Palladium '86 stations (or any custom crew member ID) when no custom photo is uploaded.
  */
 export function getStation16BitPortraitDataUrl(
-  stationId: StationDialogId,
+  stationId: StationDialogId | string,
   customPortraitUrl?: string
 ): string {
   if (customPortraitUrl && customPortraitUrl.trim().length > 0) {
@@ -817,7 +970,22 @@ export function getStation16BitPortraitDataUrl(
     },
   };
 
-  const pal = palettes[stationId] || palettes.kasse;
+  const fallbackKeys: StationDialogId[] = [
+    'kasse',
+    'verleih',
+    'proshop',
+    'snackbar',
+    'dj',
+  ];
+  let idHash = 0;
+  for (let i = 0; i < stationId.length; i++) {
+    idHash = (idHash * 31 + stationId.charCodeAt(i)) | 0;
+  }
+  const resolvedKey =
+    stationId in palettes
+      ? (stationId as StationDialogId)
+      : fallbackKeys[Math.abs(idHash) % fallbackKeys.length];
+  const pal = palettes[resolvedKey] || palettes.kasse;
 
   // 16-Bit Arcade Background with Horizon Grid Stripes
   px(0, 0, grid, 12, pal.bgTop);
@@ -914,6 +1082,7 @@ export function convertImageFileTo16BitPixelDataUrl(file: File): Promise<string>
           return;
         }
         sCtx.imageSmoothingEnabled = false;
+        sCtx.clearRect(0, 0, pixelRes, pixelRes);
 
         // Center-crop square
         const side = Math.min(img.width, img.height);
@@ -930,6 +1099,13 @@ export function convertImageFileTo16BitPixelDataUrl(file: File): Promise<string>
         for (let y = 0; y < pixelRes; y++) {
           for (let x = 0; x < pixelRes; x++) {
             const idx = (y * pixelRes + x) * 4;
+            if (d[idx + 3] < 128) {
+              d[idx] = 0;
+              d[idx + 1] = 0;
+              d[idx + 2] = 0;
+              d[idx + 3] = 0;
+              continue;
+            }
             const dither = bayer2x2[y % 2][x % 2];
             // Boost contrast slightly + quantize to 16-bit arcade steps (step 32)
             const quantize = (v: number) => {
@@ -940,6 +1116,7 @@ export function convertImageFileTo16BitPixelDataUrl(file: File): Promise<string>
             d[idx] = quantize(d[idx]);
             d[idx + 1] = quantize(d[idx + 1]);
             d[idx + 2] = quantize(d[idx + 2]);
+            d[idx + 3] = 255;
           }
         }
         sCtx.putImageData(imgData, 0, 0);
@@ -953,6 +1130,7 @@ export function convertImageFileTo16BitPixelDataUrl(file: File): Promise<string>
           return;
         }
         oCtx.imageSmoothingEnabled = false;
+        oCtx.clearRect(0, 0, 192, 192);
         oCtx.drawImage(small, 0, 0, 192, 192);
 
         // Add crisp 16-bit scanlines
@@ -1902,5 +2080,910 @@ export function saveCertificatesState(state: PalladiumCertificatesState): void {
     // ignore
   }
 }
+
+/**
+ * 5. 1-KLICK FACEBOOK-EDITION DER ZEITUNG (1200 x 1200 px Offscreen-Canvas PNG)
+ * Reine Social-Media-Ausgabe ohne Buttons, ohne "×", ohne "Gelesen ✓" und ohne Urkunden-Box.
+ */
+export function exportNewspaperFacebookEditionPng(opts: {
+  issueId: number;
+  updatedAt: string;
+  headline: string;
+  body: string;
+  tips?: string;
+  versionLabel: string;
+}): void {
+  if (typeof document === 'undefined') return;
+  const W = 1200;
+  const H = 1200;
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  // 1. Vintage Parchment Background (1200x1200)
+  ctx.fillStyle = '#f5ecd7';
+  ctx.fillRect(0, 0, W, H);
+
+  const grad = ctx.createRadialGradient(
+    W / 2,
+    H / 2,
+    120,
+    W / 2,
+    H / 2,
+    W * 0.72
+  );
+  grad.addColorStop(0, 'rgba(255, 251, 240, 0.45)');
+  grad.addColorStop(1, 'rgba(205, 180, 138, 0.55)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle vintage paper grain rules
+  ctx.strokeStyle = 'rgba(90, 65, 38, 0.06)';
+  ctx.lineWidth = 1;
+  for (let y = 18; y < H; y += 6) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+
+  // Outer thick vintage frame + inner hairline frame
+  ctx.strokeStyle = '#3a2817';
+  ctx.lineWidth = 10;
+  ctx.strokeRect(24, 24, W - 48, H - 48);
+  ctx.strokeStyle = '#6b4c2b';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(36, 36, W - 72, H - 72);
+
+  // 2. Top Masthead Bar
+  ctx.fillStyle = '#4a3520';
+  ctx.font = 'bold 17px "JetBrains Mono", monospace';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText(`HANAU-GRIMM CENTER • AUSGABE #${opts.issueId}`, 60, 56);
+
+  ctx.fillStyle = '#9f1239';
+  ctx.textAlign = 'center';
+  ctx.fillText('★ OFFIZIELLES HALLENBLATT ★', W / 2, 56);
+
+  ctx.fillStyle = '#4a3520';
+  ctx.textAlign = 'right';
+  ctx.fillText(`STAND: ${opts.updatedAt || '15.11.2026'}`, W - 60, 56);
+
+  ctx.strokeStyle = '#8a6d4b';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(60, 86);
+  ctx.lineTo(W - 60, 86);
+  ctx.stroke();
+
+  // Main Masthead Title
+  ctx.fillStyle = '#1a1109';
+  ctx.font = '900 58px "Outfit", Georgia, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('PALLADIUM KURIER – HANAU ’86', W / 2, 100);
+
+  ctx.fillStyle = '#6b4c2b';
+  ctx.font = 'bold 16px "JetBrains Mono", monospace';
+  ctx.fillText(
+    `DIE UNABHÄNGIGE ROLLSCHUH-, MUSIK- & UPDATE-ZEITUNG AUF ACHT ROLLEN • ${opts.versionLabel}`,
+    W / 2,
+    168
+  );
+
+  // Double divider below Masthead
+  ctx.strokeStyle = '#2b1d10';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(60, 198);
+  ctx.lineTo(W - 60, 198);
+  ctx.stroke();
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(60, 205);
+  ctx.lineTo(W - 60, 205);
+  ctx.stroke();
+
+  // Helper for word-wrapping lines
+  const wrapTextLines = (
+    text: string,
+    maxWidth: number,
+    fontSpec: string
+  ): string[] => {
+    ctx.font = fontSpec;
+    const paragraphs = (text || '').split(/\r?\n/);
+    const lines: string[] = [];
+    for (const para of paragraphs) {
+      const trimmed = para.trim();
+      if (!trimmed) {
+        lines.push('');
+        continue;
+      }
+      const words = trimmed.split(/\s+/);
+      let cur = '';
+      for (const word of words) {
+        const test = cur ? `${cur} ${word}` : word;
+        if (ctx.measureText(test).width > maxWidth && cur) {
+          lines.push(cur);
+          cur = word;
+        } else {
+          cur = test;
+        }
+      }
+      if (cur) lines.push(cur);
+    }
+    return lines;
+  };
+
+  // 3. Bold Main Headline Banner Box
+  const headlineText = (
+    opts.headline ||
+    'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!'
+  ).toUpperCase();
+  const headlineLines = wrapTextLines(
+    headlineText,
+    W - 180,
+    '900 32px "Outfit", Georgia, serif'
+  ).slice(0, 3);
+  const bannerTop = 222;
+  const bannerHeight = 64 + headlineLines.length * 38;
+
+  ctx.fillStyle = '#e8dcc2';
+  ctx.fillRect(60, bannerTop, W - 120, bannerHeight);
+  ctx.strokeStyle = '#2b1d10';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(60, bannerTop);
+  ctx.lineTo(W - 60, bannerTop);
+  ctx.moveTo(60, bannerTop + bannerHeight);
+  ctx.lineTo(W - 60, bannerTop + bannerHeight);
+  ctx.stroke();
+
+  // Red Tag inside Headline Banner
+  const badgeW = 340;
+  const badgeH = 26;
+  ctx.fillStyle = '#be123c';
+  ctx.fillRect((W - badgeW) / 2, bannerTop + 14, badgeW, badgeH);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px "JetBrains Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('+++ AKTUELLE HAUPTSCHLAGZEILE +++', W / 2, bannerTop + 20);
+
+  ctx.fillStyle = '#140d06';
+  ctx.font = '900 32px "Outfit", Georgia, serif';
+  headlineLines.forEach((line, idx) => {
+    ctx.fillText(line, W / 2, bannerTop + 50 + idx * 38);
+  });
+
+  // 4. Two-Column Body Area
+  const colTop = bannerTop + bannerHeight + 28;
+  const footerTop = H - 104;
+  const colLeftX = 60;
+  const colWidth = 510;
+  const colRightX = 630;
+
+  // Center vertical column rule
+  ctx.strokeStyle = '#9c8260';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(W / 2, colTop);
+  ctx.lineTo(W / 2, footerTop - 22);
+  ctx.stroke();
+
+  // LEFT COLUMN: REDAKTIONS-MELDUNG & UPDATE-NEWS
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#881337';
+  ctx.font = 'bold 18px "JetBrains Mono", monospace';
+  ctx.fillText('📰 REDAKTIONS-MELDUNG & UPDATE-NEWS', colLeftX, colTop);
+
+  ctx.strokeStyle = '#b89f7d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(colLeftX, colTop + 28);
+  ctx.lineTo(colLeftX + colWidth, colTop + 28);
+  ctx.stroke();
+
+  const bodyLines = wrapTextLines(
+    opts.body ||
+      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
+    colWidth,
+    '21px Georgia, serif'
+  );
+
+  ctx.fillStyle = '#241a10';
+  ctx.font = '21px Georgia, serif';
+  let curLeftY = colTop + 44;
+  for (const line of bodyLines) {
+    if (curLeftY > footerTop - 48) break;
+    if (!line) {
+      curLeftY += 16;
+      continue;
+    }
+    ctx.fillText(line, colLeftX, curLeftY);
+    curLeftY += 31;
+  }
+
+  // RIGHT COLUMN: PALLADIUM-TIPPS & HALLEN-GUIDE ’86 (NO CERTIFICATE BOX!)
+  ctx.fillStyle = '#1e3a8a';
+  ctx.font = 'bold 18px "JetBrains Mono", monospace';
+  ctx.fillText('🛼 PALLADIUM-TIPPS & HALLEN-GUIDE ’86', colRightX, colTop);
+
+  ctx.strokeStyle = '#b89f7d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(colRightX, colTop + 28);
+  ctx.lineTo(colRightX + colWidth, colTop + 28);
+  ctx.stroke();
+
+  const tipsSource = (opts.tips && opts.tips.trim()) || DEFAULT_NEWSPAPER_TIPS;
+  const tipsLines = wrapTextLines(tipsSource, colWidth, '20px Georgia, serif');
+
+  ctx.fillStyle = '#2c2013';
+  ctx.font = '20px Georgia, serif';
+  let curRightY = colTop + 44;
+  for (const line of tipsLines) {
+    if (curRightY > footerTop - 210) break;
+    if (!line) {
+      curRightY += 14;
+      continue;
+    }
+    ctx.fillText(line, colRightX, curRightY);
+    curRightY += 30;
+  }
+
+  // Authentic 1986 Palladium Roller Disco Callout Box in lower right column (pure editorial graphic, no buttons/certificates)
+  const promoTop = Math.max(curRightY + 18, footerTop - 190);
+  const promoH = footerTop - 26 - promoTop;
+  if (promoH >= 110) {
+    ctx.fillStyle = '#e4d5b7';
+    ctx.fillRect(colRightX, promoTop, colWidth, promoH);
+    ctx.strokeStyle = '#3a2817';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(colRightX, promoTop, colWidth, promoH);
+
+    ctx.fillStyle = '#2b1d10';
+    ctx.font = '900 22px "Outfit", Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(
+      '★ ROLLER DISCO PALLADIUM HANAU ’86 ★',
+      colRightX + colWidth / 2,
+      promoTop + 20
+    );
+
+    ctx.fillStyle = '#881337';
+    ctx.font = 'bold 15px "JetBrains Mono", monospace';
+    ctx.fillText(
+      'HOLZPARKETT • 80ER-SOUND • NEON-LIGHTSHOW • MULTIPLAYER',
+      colRightX + colWidth / 2,
+      promoTop + 54
+    );
+
+    ctx.fillStyle = '#241a10';
+    ctx.font = 'bold 16px "JetBrains Mono", monospace';
+    ctx.fillText(
+      'JETZT KOSTENLOS IM BROWSER MITROLLEN:',
+      colRightX + colWidth / 2,
+      promoTop + 86
+    );
+    ctx.fillStyle = '#1e3a8a';
+    ctx.font = 'bold 18px "JetBrains Mono", monospace';
+    ctx.fillText(
+      'palladium-arena-s94k2.vercel.app',
+      colRightX + colWidth / 2,
+      promoTop + 114
+    );
+  }
+
+  // 5. Print Footer (Strictly NO buttons, NO Gelesen ✓, NO ×, with 100% kostenloses Fan-Projekt notice)
+  ctx.strokeStyle = '#2b1d10';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(60, footerTop);
+  ctx.lineTo(W - 60, footerTop);
+  ctx.stroke();
+
+  ctx.fillStyle = '#2b1d10';
+  ctx.font = 'bold 15px "JetBrains Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(
+    'DRUCK & VERLAG: PALLADIUM ROLLER DISCO HANAU • JETZT MITROLLEN: palladium-arena-s94k2.vercel.app',
+    W / 2,
+    footerTop + 14
+  );
+
+  ctx.fillStyle = '#881337';
+  ctx.font = 'bold 13.5px "JetBrains Mono", monospace';
+  ctx.fillText(
+    '★ 100 % kostenloses Fan-Projekt – hier wird ausschließlich mit gesammelten Spiel-Pixeln bezahlt, echtes Geld gibt es hier nicht! ★',
+    W / 2,
+    footerTop + 38
+  );
+
+  // Trigger PNG Download
+  const dataUrl = canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = `palladium-kurier-ausgabe-${opts.issueId}.png`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  // Copy matching Facebook Post text with link to clipboard
+  if (typeof navigator !== 'undefined' && navigator.clipboard) {
+    const postText = `📰 PALLADIUM KURIER – HANAU ’86 (Ausgabe #${opts.issueId})\n🔥 ${
+      opts.headline ||
+      'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!'
+    }\n\n${
+      opts.body || ''
+    }\n\n👾 100 % kostenloses Fan-Projekt – hier wird ausschließlich mit gesammelten Spiel-Pixeln bezahlt, echtes Geld gibt es hier nicht!\n🛼 Jetzt direkt im Browser mitrollen: https://palladium-arena-s94k2.vercel.app`;
+    navigator.clipboard.writeText(postText).catch(() => {
+      // ignore clipboard permissions error
+    });
+  }
+}
+
+// ============================================================================
+// 6. PIXEL-WÄHRUNG, SLALOM-REKORD & 80ER-ARCADE-BESTENLISTE ("HALLEN-EHRENTAFEL")
+// ============================================================================
+
+const PIXEL_CURRENCY_STORAGE_KEY = 'palladium_player_pixels_v1';
+const SLALOM_RECORD_STORAGE_KEY = 'palladium_slalom_record_v1';
+const HALL_LEADERBOARD_STORAGE_KEY = 'palladium_hall_leaderboard_v1';
+
+export function loadPlayerPixels(): number {
+  if (typeof window === 'undefined') return 30;
+  try {
+    const raw = window.localStorage.getItem(PIXEL_CURRENCY_STORAGE_KEY);
+    if (raw !== null) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        return Math.floor(parsed);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return 30;
+}
+
+export function savePlayerPixels(pixels: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      PIXEL_CURRENCY_STORAGE_KEY,
+      String(Math.max(0, Math.floor(pixels)))
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export function loadSlalomRecord(): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = window.localStorage.getItem(SLALOM_RECORD_STORAGE_KEY);
+    if (raw !== null) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        return Math.floor(parsed);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
+export function saveSlalomRecord(rounds: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      SLALOM_RECORD_STORAGE_KEY,
+      String(Math.max(0, Math.floor(rounds)))
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export interface HallLeaderboardEntry {
+  id: string;
+  name: string;
+  shirtColor: string;
+  slalomRounds: number;
+  hallPoints: number;
+  pixelsCollected: number;
+  ballspielBestTimeSec?: number | null;
+  updatedAt: string;
+}
+
+export const DEFAULT_RANK_THRESHOLDS: number[] = [
+  0, 250, 600, 1200, 2200, 3500,
+];
+
+export type LicensePaperTheme =
+  | 'gray'
+  | 'rose'
+  | 'gold-parchment'
+  | 'royal-black-gold';
+
+export interface HallRankInfo {
+  level: number; // 1..6
+  title: string;
+  shortBadge: string;
+  icon: string;
+  minXp: number;
+  nextXp: number | null;
+  progressPercent: number;
+  paperTheme: LicensePaperTheme;
+  paperLabel: string;
+}
+
+export function computeHallRankInfo(
+  xp: number,
+  customThresholds?: number[]
+): HallRankInfo {
+  const raw =
+    Array.isArray(customThresholds) && customThresholds.length >= 6
+      ? customThresholds
+      : DEFAULT_RANK_THRESHOLDS;
+  const thresholds = [
+    0,
+    Math.max(50, Number(raw[1]) || 250),
+    Math.max(150, Number(raw[2]) || 600),
+    Math.max(300, Number(raw[3]) || 1200),
+    Math.max(600, Number(raw[4]) || 2200),
+    Math.max(1000, Number(raw[5]) || 3500),
+  ];
+
+  const defs: {
+    level: number;
+    title: string;
+    shortBadge: string;
+    icon: string;
+    paperTheme: LicensePaperTheme;
+    paperLabel: string;
+  }[] = [
+    {
+      level: 1,
+      title: 'Bahn-Neuling',
+      shortBadge: 'Rang 1 • Bahn-Neuling',
+      icon: '🛼',
+      paperTheme: 'gray',
+      paperLabel: 'Klassisches 80er-Behördengrau (Stufe I)',
+    },
+    {
+      level: 2,
+      title: 'Kurven-Flitzer',
+      shortBadge: 'Rang 2 • Kurven-Flitzer',
+      icon: '⚡',
+      paperTheme: 'gray',
+      paperLabel: 'Klassisches 80er-Behördengrau (Stufe II)',
+    },
+    {
+      level: 3,
+      title: 'Disco-Skater',
+      shortBadge: 'Rang 3 • Disco-Skater',
+      icon: '🪩',
+      paperTheme: 'rose',
+      paperLabel: '80er Rosé / Altrosa Sonderpapier (Stufe III)',
+    },
+    {
+      level: 4,
+      title: 'Stammgast ’86',
+      shortBadge: 'Rang 4 • Stammgast ’86',
+      icon: '⭐',
+      paperTheme: 'rose',
+      paperLabel: '80er Rosé / Altrosa Stammgast-Schein (Stufe IV)',
+    },
+    {
+      level: 5,
+      title: 'Hallen-Legende',
+      shortBadge: 'Rang 5 • Hallen-Legende',
+      icon: '🏆',
+      paperTheme: 'gold-parchment',
+      paperLabel: 'Goldgelb / Ehren-Pergament (Stufe V)',
+    },
+    {
+      level: 6,
+      title: '👑 König der Halle',
+      shortBadge: 'Rang 6 • 👑 König der Halle',
+      icon: '👑',
+      paperTheme: 'royal-black-gold',
+      paperLabel: 'Edles Gold-Schwarz Königspapier (Höchstrang VI)',
+    },
+  ];
+
+  const safeXp = Math.max(0, Math.floor(xp || 0));
+  let idx = 0;
+  for (let i = thresholds.length - 1; i >= 0; i--) {
+    if (safeXp >= thresholds[i]) {
+      idx = i;
+      break;
+    }
+  }
+
+  const cur = defs[idx];
+  const minXp = thresholds[idx];
+  const nextXp = idx < thresholds.length - 1 ? thresholds[idx + 1] : null;
+  const progressPercent =
+    nextXp !== null && nextXp > minXp
+      ? Math.min(100, Math.max(0, Math.round(((safeXp - minXp) / (nextXp - minXp)) * 100)))
+      : 100;
+
+  return {
+    ...cur,
+    minXp,
+    nextXp,
+    progressPercent,
+  };
+}
+
+export interface LicenseStampsState {
+  slalomExam: boolean;
+  ballspielChamp: boolean;
+  kurierReader: boolean;
+  fiveStationsVisited: boolean;
+  visitedStations: string[];
+}
+
+const LICENSE_STAMPS_STORAGE_KEY = 'palladium_license_stamps_v1';
+const BALLSPIEL_BEST_TIME_STORAGE_KEY = 'palladium_ballspiel_best_time_v1';
+
+export function loadLicenseStamps(): LicenseStampsState {
+  const defaults: LicenseStampsState = {
+    slalomExam: false,
+    ballspielChamp: false,
+    kurierReader: false,
+    fiveStationsVisited: false,
+    visitedStations: [],
+  };
+  if (typeof window === 'undefined') return defaults;
+  try {
+    const raw = window.localStorage.getItem(LICENSE_STAMPS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        slalomExam: Boolean(parsed.slalomExam),
+        ballspielChamp: Boolean(parsed.ballspielChamp),
+        kurierReader: Boolean(parsed.kurierReader),
+        fiveStationsVisited: Boolean(parsed.fiveStationsVisited),
+        visitedStations: Array.isArray(parsed.visitedStations)
+          ? parsed.visitedStations
+          : [],
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return defaults;
+}
+
+export function saveLicenseStamps(state: LicenseStampsState): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      LICENSE_STAMPS_STORAGE_KEY,
+      JSON.stringify(state)
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export function loadBallspielBestTimeSec(): number | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(BALLSPIEL_BEST_TIME_STORAGE_KEY);
+    if (raw !== null) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.round(parsed * 10) / 10;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export function saveBallspielBestTimeSec(sec: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      BALLSPIEL_BEST_TIME_STORAGE_KEY,
+      String(Math.round(sec * 10) / 10)
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export const DEFAULT_SEED_LEADERBOARD: HallLeaderboardEntry[] = [
+  {
+    id: 'seed-marco-86',
+    name: 'Marco ’86 (HU)',
+    shirtColor: '#00f0ff',
+    slalomRounds: 9,
+    hallPoints: 3650,
+    pixelsCollected: 148,
+    ballspielBestTimeSec: 28.4,
+    updatedAt: '1986-11-15',
+  },
+  {
+    id: 'seed-sabine-disco',
+    name: 'Sabine_Neon',
+    shirtColor: '#ff007f',
+    slalomRounds: 8,
+    hallPoints: 2480,
+    pixelsCollected: 132,
+    ballspielBestTimeSec: 31.2,
+    updatedAt: '1986-11-15',
+  },
+  {
+    id: 'seed-tobi-quad',
+    name: 'Tobi_Quad86',
+    shirtColor: '#39ff14',
+    slalomRounds: 7,
+    hallPoints: 1940,
+    pixelsCollected: 118,
+    ballspielBestTimeSec: 34.6,
+    updatedAt: '1986-11-15',
+  },
+  {
+    id: 'seed-jenny-star',
+    name: 'Jenny_Starlight',
+    shirtColor: '#fde047',
+    slalomRounds: 6,
+    hallPoints: 1760,
+    pixelsCollected: 104,
+    ballspielBestTimeSec: 38.9,
+    updatedAt: '1986-11-15',
+  },
+  {
+    id: 'seed-sven-speed',
+    name: 'Sven_Speedster',
+    shirtColor: '#a855f7',
+    slalomRounds: 6,
+    hallPoints: 1320,
+    pixelsCollected: 96,
+    ballspielBestTimeSec: 42.5,
+    updatedAt: '1986-11-15',
+  },
+  {
+    id: 'seed-kerstin-86',
+    name: 'Kerstin_Main',
+    shirtColor: '#fb923c',
+    slalomRounds: 5,
+    hallPoints: 990,
+    pixelsCollected: 88,
+    ballspielBestTimeSec: 46.0,
+    updatedAt: '1986-11-15',
+  },
+  {
+    id: 'seed-ralf-bembel',
+    name: 'Ralf_Hanau',
+    shirtColor: '#38bdf8',
+    slalomRounds: 4,
+    hallPoints: 680,
+    pixelsCollected: 74,
+    ballspielBestTimeSec: 51.8,
+    updatedAt: '1986-11-15',
+  },
+  {
+    id: 'seed-nadine-wave',
+    name: 'Nadine_Synth',
+    shirtColor: '#f43f5e',
+    slalomRounds: 4,
+    hallPoints: 420,
+    pixelsCollected: 68,
+    ballspielBestTimeSec: 55.4,
+    updatedAt: '1986-11-15',
+  },
+];
+
+export function loadLocalHallLeaderboard(): HallLeaderboardEntry[] {
+  if (typeof window === 'undefined') return [...DEFAULT_SEED_LEADERBOARD];
+  try {
+    const raw = window.localStorage.getItem(HALL_LEADERBOARD_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return [...DEFAULT_SEED_LEADERBOARD];
+}
+
+export function saveLocalHallLeaderboard(entries: HallLeaderboardEntry[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      HALL_LEADERBOARD_STORAGE_KEY,
+      JSON.stringify(entries.slice(0, 40))
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export async function fetchHallLeaderboard(): Promise<HallLeaderboardEntry[]> {
+  const localList = loadLocalHallLeaderboard();
+  const byId = new Map<string, HallLeaderboardEntry>();
+  for (const item of localList) {
+    if (item && item.id) {
+      byId.set(item.id, item);
+    }
+  }
+
+  if (supabase && isSupabaseConfigured()) {
+    try {
+      const { data, error } = await supabase
+        .from('players')
+        .select('player_id, name, outfit_color, highscore, settings, updated_at')
+        .order('highscore', { ascending: false })
+        .limit(25);
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const pid = String(row.player_id || row.name || '');
+          if (!pid) continue;
+          const s = (row.settings || {}) as Record<string, unknown>;
+          const slalomRounds = Number(s.slalomRecord || 0);
+          const pixelsCollected = Number(s.pixelsCollected || 30);
+          const rawBestTime = Number(s.ballspielBestTimeSec || 0);
+          const hallPoints = Number(row.highscore || 0);
+          const existing = byId.get(pid);
+          const prevBest = existing?.ballspielBestTimeSec || null;
+          const mergedBestTime =
+            rawBestTime > 0 && prevBest !== null
+              ? Math.min(rawBestTime, prevBest)
+              : rawBestTime > 0
+              ? rawBestTime
+              : prevBest;
+          byId.set(pid, {
+            id: pid,
+            name: String(row.name || 'Gast-Skater').slice(0, 24),
+            shirtColor: String(row.outfit_color || '#00f0ff'),
+            slalomRounds: Math.max(slalomRounds, existing?.slalomRounds || 0),
+            hallPoints: Math.max(hallPoints, existing?.hallPoints || 0),
+            pixelsCollected: Math.max(
+              pixelsCollected,
+              existing?.pixelsCollected || 0
+            ),
+            ballspielBestTimeSec: mergedBestTime,
+            updatedAt: String(row.updated_at || new Date().toISOString()),
+          });
+        }
+      }
+    } catch {
+      // fallback to local
+    }
+  }
+
+  const merged = Array.from(byId.values());
+  saveLocalHallLeaderboard(merged);
+  return merged;
+}
+
+export async function upsertHallLeaderboardPlayer(entry: {
+  id: string;
+  name: string;
+  shirtColor: string;
+  slalomRounds: number;
+  hallPoints: number;
+  pixelsCollected: number;
+  ballspielBestTimeSec?: number | null;
+}): Promise<HallLeaderboardEntry[]> {
+  const list = loadLocalHallLeaderboard();
+  const cleanName = (entry.name || 'Gast-Skater').trim().slice(0, 24);
+  const idx = list.findIndex(
+    (e) =>
+      e.id === entry.id ||
+      e.name.toLowerCase() === cleanName.toLowerCase()
+  );
+  const nowStr = new Date().toISOString();
+
+  if (idx >= 0) {
+    const prev = list[idx];
+    const prevBest = prev.ballspielBestTimeSec ?? null;
+    const nextBest = entry.ballspielBestTimeSec ?? null;
+    const bestTime =
+      prevBest !== null && nextBest !== null
+        ? Math.min(prevBest, nextBest)
+        : nextBest !== null
+        ? nextBest
+        : prevBest;
+    list[idx] = {
+      ...prev,
+      id: entry.id,
+      name: cleanName,
+      shirtColor: entry.shirtColor || prev.shirtColor || '#00f0ff',
+      slalomRounds: Math.max(prev.slalomRounds || 0, entry.slalomRounds || 0),
+      hallPoints: Math.max(prev.hallPoints || 0, entry.hallPoints || 0),
+      pixelsCollected: Math.max(
+        prev.pixelsCollected || 0,
+        entry.pixelsCollected || 0
+      ),
+      ballspielBestTimeSec: bestTime,
+      updatedAt: nowStr,
+    };
+  } else {
+    list.push({
+      id: entry.id,
+      name: cleanName,
+      shirtColor: entry.shirtColor || '#00f0ff',
+      slalomRounds: Math.max(0, entry.slalomRounds || 0),
+      hallPoints: Math.max(0, entry.hallPoints || 0),
+      pixelsCollected: Math.max(0, entry.pixelsCollected || 0),
+      ballspielBestTimeSec: entry.ballspielBestTimeSec ?? null,
+      updatedAt: nowStr,
+    });
+  }
+
+  saveLocalHallLeaderboard(list);
+
+  if (supabase && isSupabaseConfigured()) {
+    try {
+      await supabase.from('players').upsert(
+        {
+          player_id: entry.id,
+          name: cleanName,
+          outfit_color: entry.shirtColor || '#00f0ff',
+          highscore: Math.max(0, Math.floor(entry.hallPoints || 0)),
+          settings: {
+            slalomRecord: Math.max(0, Math.floor(entry.slalomRounds || 0)),
+            pixelsCollected: Math.max(0, Math.floor(entry.pixelsCollected || 0)),
+            ballspielBestTimeSec: entry.ballspielBestTimeSec ?? null,
+          },
+          updated_at: nowStr,
+        },
+        { onConflict: 'player_id' }
+      );
+    } catch {
+      // ignore offline
+    }
+  }
+
+  return list;
+}
+
+export async function resetHallLeaderboardSeason(): Promise<
+  HallLeaderboardEntry[]
+> {
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(SLALOM_RECORD_STORAGE_KEY, '0');
+      window.localStorage.removeItem(BALLSPIEL_BEST_TIME_STORAGE_KEY);
+      window.localStorage.setItem(HALL_LEADERBOARD_STORAGE_KEY, JSON.stringify([]));
+    } catch {
+      // ignore
+    }
+  }
+  if (supabase && isSupabaseConfigured()) {
+    try {
+      await supabase
+        .from('players')
+        .update({
+          highscore: 0,
+          settings: {
+            slalomRecord: 0,
+            pixelsCollected: 0,
+            ballspielBestTimeSec: null,
+          },
+        })
+        .neq('player_id', '');
+    } catch {
+      // ignore
+    }
+  }
+  return [];
+}
+
+
 
 
