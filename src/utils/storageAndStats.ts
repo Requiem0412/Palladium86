@@ -1,4 +1,6 @@
 import {
+  APP_BUILD_DATE_ISO,
+  APP_VERSION,
   applyCustomArenaLayout,
   ArenaVisualStyle,
   ChallengeId,
@@ -56,7 +58,7 @@ const KEYS = {
 export const PALLADIUM_SPIND_COLLECTIBLES = [
   {
     id: 'palladium_tshirt',
-    label: 'Original Palladium-Hanau T-Shirt',
+    label: 'Original Palladium 86 T-Shirt',
     icon: '👕',
   },
   {
@@ -253,6 +255,20 @@ export interface AdminPersistentSettings {
   newspaperUpdatedAt?: string;
   newspaperQrUrl?: string;
   newspaperContactEmail?: string;
+  eventAnnouncementText?: string;
+  activeHallModes?: (
+    | 'ballspiel'
+    | 'slalom'
+    | 'stuhlsprung'
+    | 'springerstaffel'
+  )[];
+  aiSkaterCount?: number;
+  outerLaneSpeedPct?: number;
+  middleLaneSpeedPct?: number;
+  innerLaneSpeedPct?: number;
+  arcadeMachinesEnabled?: boolean;
+  nurseEnabled?: boolean;
+  pointsSystemEnabled?: boolean;
   hallPowerEnabled?: boolean;
   roleKeys?: RoleKeysConfig;
   rankThresholds?: number[];
@@ -790,11 +806,21 @@ export function loadAdminSettings(): AdminPersistentSettings {
     newspaperHeadline:
       'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
     newspaperBody:
-      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.\n\nTipp der Redaktion: Klicke oben im HUD auf deinen mittleren Avatar-Kreis für deinen persönlichen Rollschuh-Führerschein – und scanne den QR-Code rechts, um direkt mit deinen Freunden auf acht Rollen durchzustarten!',
+      'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.\n\nTipp der Redaktion: Klicke oben im HUD auf deinen mittleren Avatar-Kreis für deinen persönlichen Rollschuh-Führerschein – und scanne den QR-Code rechts, um direkt mit deinen Freunden auf acht Rollen durchzustarten!',
     newspaperTips: DEFAULT_NEWSPAPER_TIPS,
-    newspaperUpdatedAt: '15.11.2026',
+    newspaperUpdatedAt: '18.11.2026',
     newspaperQrUrl: 'https://palladium86.de',
     newspaperContactEmail: 'info@palladium86.de',
+    eventAnnouncementText:
+      '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!',
+    activeHallModes: [],
+    aiSkaterCount: 22,
+    outerLaneSpeedPct: 100,
+    middleLaneSpeedPct: 100,
+    innerLaneSpeedPct: 100,
+    arcadeMachinesEnabled: true,
+    nurseEnabled: true,
+    pointsSystemEnabled: true,
     hallPowerEnabled: true,
     roleKeys: { ...DEFAULT_ROLE_KEYS },
   };
@@ -890,6 +916,9 @@ export function loadAdminSettings(): AdminPersistentSettings {
           : [],
         djJingleSlots: mergedJingleSlots,
         roleKeys: mergedRoleKeys,
+        activeHallModes: Array.isArray(parsed.activeHallModes)
+          ? parsed.activeHallModes
+          : [],
       };
     }
   } catch {
@@ -1265,7 +1294,7 @@ export function loadGuestDjPresets(): GuestDjPreset[] {
                 ? item.tickerText.trim()
                 : `+++ ON AIR: ${String(item.name)
                     .trim()
-                    .toUpperCase()} +++ KLECKNIX TWIN-DECKS +++ LIVE IM PALLADIUM HANAU +++`,
+                    .toUpperCase()} +++ KLECKNIX TWIN-DECKS +++ LIVE IM PALLADIUM 86 +++`,
             isResident: false,
           }));
         return [RESIDENT_DJ_PRESET, ...custom];
@@ -1915,16 +1944,16 @@ export const PALLADIUM_CERTIFICATES: CertificateDefinition[] = [
   {
     id: 'stammgast_7',
     title: 'Stammgast-Urkunde (7 Tage)',
-    subtitle: '7 Besuchstage im Palladium Hanau',
+    subtitle: '7 Besuchstage im Palladium 86',
     description:
-      'Verliehen für regelmäßige Besuche an 7 Tagen in der Palladium Roller-Disco Hanau.',
+      'Verliehen für regelmäßige Besuche an 7 Tagen in der Palladium 86 Roller-Disco.',
     icon: '🎟️',
     tier: 'silver',
   },
   {
     id: 'treue_14',
     title: 'Treue-Urkunde (14 Tage)',
-    subtitle: '14 Besuchstage im Palladium Hanau',
+    subtitle: '14 Besuchstage im Palladium 86',
     description:
       'Verliehen für unerschütterliche 80er-Rollschuh-Treue an 14 Besuchstagen.',
     icon: '🏅',
@@ -1981,7 +2010,7 @@ export const PALLADIUM_CERTIFICATES: CertificateDefinition[] = [
     title: 'Palladium-Legende (100 Aufgaben)',
     subtitle: 'Gold-Urkunde • 100 Aufgaben gemeistert',
     description:
-      'Ehren-Gold-Urkunde für 100 abgeschlossene Aufgaben – wahrer Meister des Palladium Hanau!',
+      'Ehren-Gold-Urkunde für 100 abgeschlossene Aufgaben – wahrer Meister des Palladium 86!',
     icon: '🏆',
     tier: 'gold',
     hasRedWaxSeal: true,
@@ -1991,7 +2020,7 @@ export const PALLADIUM_CERTIFICATES: CertificateDefinition[] = [
     title: 'DJ-Livestream-Teilnahme',
     subtitle: 'Mehrstufige Event-Urkunde • Bronze (1x), Silber (3x), Gold (5x)',
     description:
-      'Verliehen für deine Live-Teilnahme am DJ-Livestream ab 21:00 Uhr oder bei aktivem Live-Event im Palladium Hanau.',
+      'Verliehen für deine Live-Teilnahme am DJ-Livestream ab 21:00 Uhr oder bei aktivem Live-Event im Palladium 86.',
     icon: '🎧',
     tier: 'gold',
     isMultiTierEvent: true,
@@ -2011,7 +2040,7 @@ export const PALLADIUM_CERTIFICATES: CertificateDefinition[] = [
     title: 'Vielleser auf Rollen',
     subtitle: 'Offizieller Stammleser des Palladium-Kuriers',
     description:
-      'Verliehen für das Lesen von 5 verschiedenen Ausgaben der offiziellen 80er-Hallenzeitung „Der Palladium-Kurier – Hanau ’86“.',
+      'Verliehen für das Lesen von 5 verschiedenen Ausgaben der offiziellen 80er-Hallenzeitung „Der Palladium-Kurier – Ausgabe ’86“.',
     icon: '📰',
     tier: 'gold',
     hasRedWaxSeal: true,
@@ -2377,7 +2406,7 @@ export function exportNewspaperFacebookEditionPng(opts: {
   ctx.fillStyle = '#1a1109';
   ctx.font = '900 58px "Outfit", Georgia, serif';
   ctx.textAlign = 'center';
-  ctx.fillText('PALLADIUM KURIER – HANAU ’86', W / 2, 100);
+  ctx.fillText('PALLADIUM KURIER – PALLADIUM 86', W / 2, 100);
 
   ctx.fillStyle = '#6b4c2b';
   ctx.font = 'bold 16px "JetBrains Mono", monospace';
@@ -2501,7 +2530,7 @@ export function exportNewspaperFacebookEditionPng(opts: {
 
   const bodyLines = wrapTextLines(
     opts.body ||
-      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
+      'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
     colWidth,
     '21px Georgia, serif'
   );
@@ -2649,7 +2678,7 @@ export function exportNewspaperFacebookEditionPng(opts: {
   ctx.font = 'bold 14px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
   ctx.fillText(
-    `DRUCK & VERLAG: PALLADIUM ROLLER DISCO HANAU • www.palladium86.de • ${targetContactEmail}`,
+    `DRUCK & VERLAG: PALLADIUM 86 ONLINE • www.palladium86.de • ${targetContactEmail} • ${opts.versionLabel}`,
     W / 2,
     footerTop + 14
   );
@@ -2666,14 +2695,14 @@ export function exportNewspaperFacebookEditionPng(opts: {
   const dataUrl = canvas.toDataURL('image/png');
   const a = document.createElement('a');
   a.href = dataUrl;
-  a.download = `palladium-kurier-ausgabe-${opts.issueId}.png`;
+  a.download = `palladium86-${APP_VERSION}-${APP_BUILD_DATE_ISO}-kurier-ausgabe-${opts.issueId}.png`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
 
   // Copy matching Facebook Post text with link to clipboard
   if (typeof navigator !== 'undefined' && navigator.clipboard) {
-    const postText = `📰 PALLADIUM KURIER – HANAU ’86 (Ausgabe #${opts.issueId})\n🔥 ${
+    const postText = `📰 PALLADIUM KURIER – PALLADIUM 86 (Ausgabe #${opts.issueId} • ${opts.versionLabel})\n🔥 ${
       opts.headline ||
       'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!'
     }\n\n${
@@ -3025,7 +3054,7 @@ export const DEFAULT_SEED_LEADERBOARD: HallLeaderboardEntry[] = [
   },
   {
     id: 'seed-ralf-bembel',
-    name: 'Ralf_Hanau',
+    name: 'Ralf_86',
     shirtColor: '#38bdf8',
     slalomRounds: 4,
     hallPoints: 680,

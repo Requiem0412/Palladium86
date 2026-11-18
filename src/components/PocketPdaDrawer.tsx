@@ -5,9 +5,16 @@ import {
   PALLADIUM_CERTIFICATES,
   PalladiumCertificatesState,
 } from '../utils/storageAndStats';
+import { APP_VERSION_LABEL } from '../config/arenaConfig';
 import { soundFX } from '../utils/soundEffects';
 
-export type PocketPdaTabId = 'stats' | 'minigames' | 'kurier';
+export type PocketPdaTabId = 'stats' | 'games' | 'minigames' | 'kurier';
+
+export type HallModeToggleId =
+  | 'ballspiel'
+  | 'slalom'
+  | 'stuhlsprung'
+  | 'springerstaffel';
 
 export interface PocketPdaDrawerProps {
   hasPocketPda: boolean;
@@ -33,6 +40,11 @@ export interface PocketPdaDrawerProps {
   onOpenNewspaperModal: () => void;
   onOpenDriverLicense: () => void;
   onSelectCertificate?: (certId: CertificateId) => void;
+  activeHallModes?: HallModeToggleId[];
+  onToggleHallMode?: (modeId: HallModeToggleId) => void;
+  onResetHallModes?: () => void;
+  isMultiplayerActive?: boolean;
+  mpRoomId?: string | null;
 }
 
 const GRID_COLS = 18;
@@ -42,6 +54,47 @@ interface Point {
   x: number;
   y: number;
 }
+
+const PDA_HALL_GAMES: {
+  id: HallModeToggleId;
+  icon: string;
+  label: string;
+  shortDesc: string;
+  activeClass: string;
+}[] = [
+  {
+    id: 'ballspiel',
+    icon: '⚽',
+    label: 'Ballspiel',
+    shortDesc: 'Gemeinsamer Neon-Softball auf der Bahn • Werfen, Fangen & Ausweichen',
+    activeClass:
+      'bg-emerald-500 text-slate-950 border-white shadow-[0_0_16px_rgba(16,185,129,0.75)]',
+  },
+  {
+    id: 'slalom',
+    icon: '🚩',
+    label: 'Slalom-Parcours',
+    shortDesc: 'Leuchtende Pylonen auf den Geraden • Zickzack-Combo & Tempo-Boost',
+    activeClass:
+      'bg-cyan-400 text-slate-950 border-white shadow-[0_0_16px_rgba(34,211,238,0.75)]',
+  },
+  {
+    id: 'stuhlsprung',
+    icon: '🦘',
+    label: 'Hochsprung',
+    shortDesc: 'Stuhlreihen-Hindernisse auf der Bahn • Absprung mit [J] / Sprung',
+    activeClass:
+      'bg-amber-400 text-slate-950 border-white shadow-[0_0_16px_rgba(251,191,36,0.75)]',
+  },
+  {
+    id: 'springerstaffel',
+    icon: '🏃',
+    label: 'Springer-Staffel',
+    shortDesc: '4 Hochsprung-Gestelle & Skateguard-Show (100 cm bis 220 cm)',
+    activeClass:
+      'bg-fuchsia-400 text-slate-950 border-white shadow-[0_0_16px_rgba(232,121,249,0.75)]',
+  },
+];
 
 export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
   hasPocketPda,
@@ -67,9 +120,14 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
   onOpenNewspaperModal,
   onOpenDriverLicense,
   onSelectCertificate,
+  activeHallModes = [],
+  onToggleHallMode,
+  onResetHallModes,
+  isMultiplayerActive = false,
+  mpRoomId,
 }) => {
   const [isOpen, setIsOpen] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<PocketPdaTabId>('stats');
+  const [activeTab, setActiveTab] = useState<PocketPdaTabId>('games');
 
   // Mini-Game ("ROLLER-SNAKE ’86" on LCD screen) state
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -312,7 +370,7 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
     }
   }, [activeTab, drawLcdSnakeScreen, isOpen]);
 
-  // Do not render the PDA in HUD until the player has picked it up at their locker (Spind)
+  // Do not render the PDA in HUD until the player has picked it up at their locker (or is in Multiplayer)
   if (!hasPocketPda) {
     return null;
   }
@@ -337,8 +395,13 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]" />
           <span>📟 PDA</span>
           <span className="hidden sm:inline text-[10px] text-amber-300 font-bold">
-            • POCKET ’86
+            • SPIELE &amp; POCKET ’86
           </span>
+          {activeHallModes.length > 0 && (
+            <span className="px-1.5 py-0.2 rounded bg-emerald-500 text-slate-950 text-[9px] font-black">
+              {activeHallModes.length} AKTIV
+            </span>
+          )}
           {hasUnreadNewspaperIssue && (
             <span className="px-1.5 py-0.2 rounded bg-rose-600 text-white text-[9px] font-black">
               NEU
@@ -368,7 +431,9 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
               📟 PALLADIUM POCKET-PDA ’86
             </span>
             <span className="hidden sm:inline-block px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-400/40 text-[9px] text-cyan-300 font-bold">
-              SPIND-EDITION
+              {isMultiplayerActive
+                ? `LIVE • ${(mpRoomId || 'PALLADIUM-86-ONLINE').toUpperCase()}`
+                : `SPIND-EDITION • ${APP_VERSION_LABEL}`}
             </span>
           </div>
 
@@ -390,12 +455,30 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
           </div>
         </div>
 
-        {/* 3 Main Tabs in the PDA Display */}
-        <div className="grid grid-cols-3 gap-1.5 p-2 bg-[#060911] border-b border-slate-800">
+        {/* 4 Main Tabs in the PDA Display */}
+        <div className="grid grid-cols-4 gap-1.5 p-2 bg-[#060911] border-b border-slate-800">
+          <button
+            type="button"
+            onClick={() => setActiveTab('games')}
+            className={`relative py-1.5 px-1.5 rounded-lg border text-[10px] sm:text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1 ${
+              activeTab === 'games'
+                ? 'bg-emerald-400 text-slate-950 border-white shadow-[0_0_12px_rgba(52,211,153,0.65)]'
+                : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-emerald-200'
+            }`}
+          >
+            <span>🎮</span>
+            <span className="truncate">SPIELE &amp; EVENTS</span>
+            {activeHallModes.length > 0 && (
+              <span className="px-1 rounded bg-slate-950 text-emerald-300 text-[8.5px] font-black">
+                {activeHallModes.length}
+              </span>
+            )}
+          </button>
+
           <button
             type="button"
             onClick={() => setActiveTab('stats')}
-            className={`py-1.5 px-2 rounded-lg border text-[10px] sm:text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1 ${
+            className={`py-1.5 px-1.5 rounded-lg border text-[10px] sm:text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1 ${
               activeTab === 'stats'
                 ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_12px_rgba(34,211,238,0.6)]'
                 : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-cyan-200'
@@ -408,7 +491,7 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
           <button
             type="button"
             onClick={() => setActiveTab('minigames')}
-            className={`py-1.5 px-2 rounded-lg border text-[10px] sm:text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1 ${
+            className={`py-1.5 px-1.5 rounded-lg border text-[10px] sm:text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1 ${
               activeTab === 'minigames'
                 ? 'bg-fuchsia-400 text-slate-950 border-white shadow-[0_0_12px_rgba(232,121,249,0.6)]'
                 : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-fuchsia-200'
@@ -421,14 +504,14 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
           <button
             type="button"
             onClick={() => setActiveTab('kurier')}
-            className={`relative py-1.5 px-2 rounded-lg border text-[10px] sm:text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1 ${
+            className={`relative py-1.5 px-1.5 rounded-lg border text-[10px] sm:text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1 ${
               activeTab === 'kurier'
                 ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.6)]'
                 : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-amber-200'
             }`}
           >
             <span>📰</span>
-            <span className="truncate">HALLEN-KURIER</span>
+            <span className="truncate">KURIER</span>
             {hasUnreadNewspaperIssue && (
               <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
             )}
@@ -437,6 +520,96 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
 
         {/* Inner Retro LC-Display Screen */}
         <div className="p-3 bg-[#071117] max-h-[62dvh] overflow-y-auto space-y-2.5">
+          {/* =============================================================== */}
+          {/* TAB 0: 🎮 SPIELE & EVENTS (MULTIPLAYER & COCKPIT MULTI-TOGGLE)  */}
+          {/* =============================================================== */}
+          {activeTab === 'games' && (
+            <div className="space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-[#0B1B24] border border-emerald-400/50">
+                <div>
+                  <div className="text-[9.5px] text-emerald-300 uppercase font-bold flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>
+                      {isMultiplayerActive
+                        ? `ECHTZEIT-MULTIPLAYER • RAUM: ${(mpRoomId || 'PALLADIUM-86-ONLINE').toUpperCase()}`
+                        : 'HALLEN-SPIELE & EVENTS • DIREKTSTEUERUNG'}
+                    </span>
+                  </div>
+                  <div className="text-xs font-black text-white mt-0.5">
+                    Klicke ein Spiel an, um es live auf der Bahn zu starten oder zu beenden (mehrere kombinierbar):
+                  </div>
+                </div>
+                {activeHallModes.length > 0 && onResetHallModes && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFX.unlockAudioContext();
+                      onResetHallModes();
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-black border border-rose-300 cursor-pointer shadow"
+                  >
+                    🛼 Alle beenden (Freies Fahren)
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {PDA_HALL_GAMES.map((game) => {
+                  const isActive = activeHallModes.includes(game.id);
+                  return (
+                    <button
+                      key={game.id}
+                      type="button"
+                      onClick={() => {
+                        soundFX.unlockAudioContext();
+                        onToggleHallMode?.(game.id);
+                      }}
+                      className={`p-2.5 rounded-xl border-2 text-left transition cursor-pointer flex flex-col justify-between gap-1.5 ${
+                        isActive
+                          ? game.activeClass
+                          : 'bg-slate-950/90 hover:bg-slate-900 border-slate-700 text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 w-full">
+                        <span className="text-xs sm:text-sm font-black flex items-center gap-1.5">
+                          <span>{game.icon}</span>
+                          <span>{game.label}</span>
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[9.5px] font-black uppercase tracking-wider ${
+                            isActive
+                              ? 'bg-slate-950 text-emerald-300 border border-emerald-400'
+                              : 'bg-slate-800 text-slate-400 border border-slate-700'
+                          }`}
+                        >
+                          {isActive ? '● AKTIV' : 'AUS'}
+                        </span>
+                      </div>
+                      <div
+                        className={`text-[10px] leading-snug ${
+                          isActive ? 'text-slate-900 font-bold' : 'text-slate-400'
+                        }`}
+                      >
+                        {game.shortDesc}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="px-2.5 py-1.5 rounded-lg bg-slate-950/90 border border-cyan-500/30 text-[10px] text-cyan-200 flex items-center justify-between gap-2">
+                <span>
+                  🔄 Synchron mit dem Admin-Cockpit &amp; allen Spielern im Raum
+                </span>
+                <span className="font-black text-emerald-300">
+                  {activeHallModes.length === 0
+                    ? '🛼 Freies Fahren'
+                    : `${activeHallModes.length} Spiel(e) aktiv`}
+                </span>
+              </div>
+            </div>
+          )}
+
           {/* =============================================================== */}
           {/* TAB 1: 📊 DATEN & REKORDE                                       */}
           {/* =============================================================== */}
@@ -690,7 +863,7 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
 
                 <p className="text-xs text-[#241a10] leading-relaxed line-clamp-3 whitespace-pre-line">
                   {newspaperBody ||
-                    'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus.'}
+                    'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus.'}
                 </p>
 
                 <div className="text-[10.5px] font-mono text-[#2c2013] bg-[#e8dcc2] p-2 rounded border border-[#8a6d4b]">

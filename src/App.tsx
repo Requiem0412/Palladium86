@@ -57,6 +57,7 @@ import {
   buildTrackNpcsForDifficulty,
   MultiplayerPlayerState,
   RollerArenaEngine,
+  SharedHallObjectsState,
 } from './components/RollerArenaEngine';
 import { soundFX } from './utils/soundEffects';
 import {
@@ -315,6 +316,7 @@ interface AdminSyncPayload {
   newspaperUpdatedAt?: string;
   newspaperQrUrl?: string;
   newspaperContactEmail?: string;
+  eventAnnouncementText?: string;
   hallPowerEnabled?: boolean;
   roleKeys?: RoleKeysConfig;
   lockedZones?: LockedArenaZonesConfig;
@@ -322,6 +324,19 @@ interface AdminSyncPayload {
   waitressEnabled?: boolean;
   oldBarackEnabled?: boolean;
   staffShiftOverride?: 'auto' | 'day' | 'evening';
+  activeHallModes?: (
+    | 'ballspiel'
+    | 'slalom'
+    | 'stuhlsprung'
+    | 'springerstaffel'
+  )[];
+  aiSkaterCount?: number;
+  outerLaneSpeedPct?: number;
+  middleLaneSpeedPct?: number;
+  innerLaneSpeedPct?: number;
+  arcadeMachinesEnabled?: boolean;
+  nurseEnabled?: boolean;
+  pointsSystemEnabled?: boolean;
 }
 
 type MultiplayerPacket =
@@ -399,6 +414,19 @@ type MultiplayerPacket =
       interact?: boolean;
       boost?: boolean;
       trickMove?: TrickMoveId | null;
+    }
+  | {
+      type: 'chat-message';
+      id: string;
+      sender: string;
+      text: string;
+      color?: string;
+      timestamp: number;
+    }
+  | {
+      type: 'hall-objects-sync';
+      senderPeerId: string;
+      objects: SharedHallObjectsState;
     };
 
 export function App() {
@@ -534,7 +562,7 @@ export function App() {
   >(null);
   const [pdaPickupToast, setPdaPickupToast] = useState<string | null>(null);
   const [adminTab, setAdminTab] = useState<
-    'track' | 'light_dj' | 'access' | 'look_build' | 'ranks_points'
+    'track' | 'light_dj' | 'access' | 'look_build' | 'ranks_points' | 'diagnose'
   >('track');
   const [springerStaffelShowSec, setSpringerStaffelShowSec] =
     useState<number>(0);
@@ -1259,6 +1287,44 @@ export function App() {
   // Start name field completely empty (no pre-filled "Speedy 86")
   const [guestJoinNameInput, setGuestJoinNameInput] = useState<string>('');
   const [guestJoinError, setGuestJoinError] = useState<string | null>(null);
+
+  // Gemeinsame Start-/Portal-Seite & Geschlossene Privat-Räume (?room=...)
+  const [showPortalScreen, setShowPortalScreen] = useState<boolean>(
+    () =>
+      !initialUrlRoomId &&
+      !initialControllerRoomId &&
+      !initialHasRegieUrlParam &&
+      !initialHandheldUrlRole
+  );
+  const [privateRoomCodeInput, setPrivateRoomCodeInput] = useState<string>(
+    () => `TEAM-${Math.floor(1000 + Math.random() * 9000)}`
+  );
+  const [portalRoomCopiedToast, setPortalRoomCopiedToast] = useState<
+    string | null
+  >(null);
+  const [privateRoomBadgeCopied, setPrivateRoomBadgeCopied] =
+    useState<boolean>(false);
+  const [roomChatMessages, setRoomChatMessages] = useState<
+    {
+      id: string;
+      sender: string;
+      text: string;
+      color?: string;
+      timestamp: number;
+    }[]
+  >([]);
+  const [roomChatInput, setRoomChatInput] = useState<string>('');
+  const [showRoomChat, setShowRoomChat] = useState<boolean>(false);
+
+  const isPrivateRoom = useMemo(() => {
+    if (!mpRoomId) return false;
+    const upper = mpRoomId.trim().toUpperCase();
+    return (
+      upper.length > 0 &&
+      upper !== 'PALLADIUM-86-ONLINE' &&
+      upper !== 'PALLADIUM-86'
+    );
+  }, [mpRoomId]);
 
   const tabSessionIdRef = useRef<string>(getOrCreateTabSessionId());
   const myJoinedAtRef = useRef<number>(Date.now());
@@ -2553,14 +2619,44 @@ export function App() {
         'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
       newspaperBody:
         adminSettings.newspaperBody ||
-        'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
+        'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
       newspaperTips: adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS,
-      newspaperUpdatedAt: adminSettings.newspaperUpdatedAt || '15.11.2026',
+      newspaperUpdatedAt: adminSettings.newspaperUpdatedAt || '18.11.2026',
       newspaperQrUrl: adminSettings.newspaperQrUrl || 'https://palladium86.de',
       newspaperContactEmail:
         adminSettings.newspaperContactEmail || 'info@palladium86.de',
+      eventAnnouncementText:
+        adminSettings.eventAnnouncementText ??
+        '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!',
       hallPowerEnabled: adminSettings.hallPowerEnabled !== false,
       roleKeys: adminSettings.roleKeys || DEFAULT_ROLE_KEYS,
+      lockedZones: adminSettings.lockedZones || LOCKED_ARENA_ZONES,
+      cleaningLadyEnabled: adminSettings.cleaningLadyEnabled !== false,
+      waitressEnabled: adminSettings.waitressEnabled !== false,
+      oldBarackEnabled: adminSettings.oldBarackEnabled !== false,
+      staffShiftOverride: adminSettings.staffShiftOverride || 'auto',
+      activeHallModes:
+        adminSettings.activeHallModes ??
+        (hallGameMode !== 'free-skate' ? [hallGameMode] : []),
+      aiSkaterCount:
+        typeof adminSettings.aiSkaterCount === 'number'
+          ? adminSettings.aiSkaterCount
+          : 22,
+      outerLaneSpeedPct:
+        typeof adminSettings.outerLaneSpeedPct === 'number'
+          ? adminSettings.outerLaneSpeedPct
+          : 100,
+      middleLaneSpeedPct:
+        typeof adminSettings.middleLaneSpeedPct === 'number'
+          ? adminSettings.middleLaneSpeedPct
+          : 100,
+      innerLaneSpeedPct:
+        typeof adminSettings.innerLaneSpeedPct === 'number'
+          ? adminSettings.innerLaneSpeedPct
+          : 100,
+      arcadeMachinesEnabled: adminSettings.arcadeMachinesEnabled !== false,
+      nurseEnabled: adminSettings.nurseEnabled !== false,
+      pointsSystemEnabled: adminSettings.pointsSystemEnabled !== false,
     };
   }, [
     lightingMode,
@@ -2619,8 +2715,22 @@ export function App() {
     adminSettings.newspaperUpdatedAt,
     adminSettings.newspaperQrUrl,
     adminSettings.newspaperContactEmail,
+    adminSettings.eventAnnouncementText,
     adminSettings.hallPowerEnabled,
     adminSettings.roleKeys,
+    adminSettings.lockedZones,
+    adminSettings.cleaningLadyEnabled,
+    adminSettings.waitressEnabled,
+    adminSettings.oldBarackEnabled,
+    adminSettings.staffShiftOverride,
+    adminSettings.activeHallModes,
+    adminSettings.aiSkaterCount,
+    adminSettings.outerLaneSpeedPct,
+    adminSettings.middleLaneSpeedPct,
+    adminSettings.innerLaneSpeedPct,
+    adminSettings.arcadeMachinesEnabled,
+    adminSettings.nurseEnabled,
+    adminSettings.pointsSystemEnabled,
   ]);
 
   const applyIncomingAdminSync = useCallback(
@@ -2652,7 +2762,11 @@ export function App() {
       if (s.bandGender) {
         setBandGender(s.bandGender);
       }
-      if (s.hallGameMode) {
+      if (Array.isArray(s.activeHallModes)) {
+        setHallGameMode(
+          s.activeHallModes.length > 0 ? s.activeHallModes[0] : 'free-skate'
+        );
+      } else if (s.hallGameMode) {
         setHallGameMode(s.hallGameMode);
       }
       if (typeof s.fogBurstCount === 'number') {
@@ -2765,6 +2879,10 @@ export function App() {
           typeof s.newspaperContactEmail === 'string'
             ? s.newspaperContactEmail
             : prev.newspaperContactEmail,
+        eventAnnouncementText:
+          typeof s.eventAnnouncementText === 'string'
+            ? s.eventAnnouncementText
+            : prev.eventAnnouncementText,
         hallPowerEnabled:
           typeof s.hallPowerEnabled === 'boolean'
             ? s.hallPowerEnabled
@@ -2783,6 +2901,63 @@ export function App() {
                   DEFAULT_ROLE_KEYS.presse,
               }
             : prev.roleKeys,
+        lockedZones:
+          s.lockedZones && typeof s.lockedZones === 'object'
+            ? s.lockedZones
+            : prev.lockedZones,
+        cleaningLadyEnabled:
+          typeof s.cleaningLadyEnabled === 'boolean'
+            ? s.cleaningLadyEnabled
+            : prev.cleaningLadyEnabled,
+        waitressEnabled:
+          typeof s.waitressEnabled === 'boolean'
+            ? s.waitressEnabled
+            : prev.waitressEnabled,
+        oldBarackEnabled:
+          typeof s.oldBarackEnabled === 'boolean'
+            ? s.oldBarackEnabled
+            : prev.oldBarackEnabled,
+        staffShiftOverride:
+          s.staffShiftOverride === 'auto' ||
+          s.staffShiftOverride === 'day' ||
+          s.staffShiftOverride === 'evening'
+            ? s.staffShiftOverride
+            : prev.staffShiftOverride,
+        activeHallModes: Array.isArray(s.activeHallModes)
+          ? s.activeHallModes
+          : s.hallGameMode
+          ? s.hallGameMode === 'free-skate'
+            ? []
+            : [s.hallGameMode]
+          : prev.activeHallModes,
+        aiSkaterCount:
+          typeof s.aiSkaterCount === 'number'
+            ? Math.max(0, Math.min(30, Math.round(s.aiSkaterCount)))
+            : prev.aiSkaterCount,
+        outerLaneSpeedPct:
+          typeof s.outerLaneSpeedPct === 'number'
+            ? Math.max(40, Math.min(200, Math.round(s.outerLaneSpeedPct)))
+            : prev.outerLaneSpeedPct,
+        middleLaneSpeedPct:
+          typeof s.middleLaneSpeedPct === 'number'
+            ? Math.max(40, Math.min(200, Math.round(s.middleLaneSpeedPct)))
+            : prev.middleLaneSpeedPct,
+        innerLaneSpeedPct:
+          typeof s.innerLaneSpeedPct === 'number'
+            ? Math.max(40, Math.min(200, Math.round(s.innerLaneSpeedPct)))
+            : prev.innerLaneSpeedPct,
+        arcadeMachinesEnabled:
+          typeof s.arcadeMachinesEnabled === 'boolean'
+            ? s.arcadeMachinesEnabled
+            : prev.arcadeMachinesEnabled,
+        nurseEnabled:
+          typeof s.nurseEnabled === 'boolean'
+            ? s.nurseEnabled
+            : prev.nurseEnabled,
+        pointsSystemEnabled:
+          typeof s.pointsSystemEnabled === 'boolean'
+            ? s.pointsSystemEnabled
+            : prev.pointsSystemEnabled,
       }));
       if (typeof s.strobeBurstCount === 'number') {
         setStrobeBurstCount(s.strobeBurstCount);
@@ -2854,11 +3029,18 @@ export function App() {
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
   const isApplyingBroadcastRef = useRef<boolean>(false);
 
+  const [sharedHallObjects, setSharedHallObjects] =
+    useState<SharedHallObjectsState | null>(null);
+
   useEffect(() => {
     if (typeof window === 'undefined' || !('BroadcastChannel' in window)) {
       return;
     }
-    const ch = new BroadcastChannel('palladium_hanau_sync_v1');
+    const channelName =
+      isPrivateRoom && mpRoomId
+        ? `palladium_86_room_${mpRoomId.trim().toUpperCase()}`
+        : 'palladium_86_sync_v1';
+    const ch = new BroadcastChannel(channelName);
     broadcastChannelRef.current = ch;
     ch.onmessage = (ev) => {
       const data = ev.data;
@@ -2868,15 +3050,117 @@ export function App() {
         window.setTimeout(() => {
           isApplyingBroadcastRef.current = false;
         }, 40);
+      } else if (data && data.type === 'chat-message' && data.message) {
+        setRoomChatMessages((prev) => {
+          if (prev.some((m) => m.id === data.message.id)) return prev;
+          return [...prev.slice(-49), data.message];
+        });
+      } else if (
+        data &&
+        data.type === 'hall-objects-sync' &&
+        data.objects &&
+        data.senderPeerId !== tabSessionIdRef.current
+      ) {
+        setSharedHallObjects(data.objects as SharedHallObjectsState);
       }
     };
     return () => {
       ch.close();
       broadcastChannelRef.current = null;
     };
-  }, [applyIncomingAdminSync]);
+  }, [applyIncomingAdminSync, isPrivateRoom, mpRoomId]);
 
-  // Broadcast Hallenleiter-Sync in real-time to other tabs (BroadcastChannel) & all connected PeerJS players
+  const handleEmitSharedHallObjects = useCallback(
+    (objects: SharedHallObjectsState) => {
+      const mySenderId = tabSessionIdRef.current;
+      if (broadcastChannelRef.current) {
+        try {
+          broadcastChannelRef.current.postMessage({
+            type: 'hall-objects-sync',
+            senderPeerId: mySenderId,
+            objects,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      const pkt: MultiplayerPacket = {
+        type: 'hall-objects-sync',
+        senderPeerId: mySenderId,
+        objects,
+      };
+      if (mpRole === 'host') {
+        hostConnectionsRef.current.forEach((c) => {
+          if (c.open) {
+            try {
+              c.send(pkt);
+            } catch {
+              // ignore
+            }
+          }
+        });
+      } else if (mpRole === 'guest' && guestConnRef.current?.open) {
+        try {
+          guestConnRef.current.send(pkt);
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [mpRole]
+  );
+
+  const handleSendRoomChatMessage = useCallback(
+    (rawText?: string) => {
+      const txt = (rawText ?? roomChatInput).trim();
+      if (!txt) return;
+      const msgObj = {
+        id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        sender: (playerName || 'Skater').trim(),
+        text: txt.slice(0, 140),
+        color: playerShirtColor || '#00f0ff',
+        timestamp: Date.now(),
+      };
+      setRoomChatMessages((prev) => [...prev.slice(-49), msgObj]);
+      if (rawText === undefined) {
+        setRoomChatInput('');
+      }
+      if (broadcastChannelRef.current) {
+        try {
+          broadcastChannelRef.current.postMessage({
+            type: 'chat-message',
+            message: msgObj,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      const pkt: MultiplayerPacket = {
+        type: 'chat-message',
+        ...msgObj,
+      };
+      if (mpRole === 'host') {
+        hostConnectionsRef.current.forEach((c) => {
+          if (c.open) {
+            try {
+              c.send(pkt);
+            } catch {
+              // ignore
+            }
+          }
+        });
+      } else if (mpRole === 'guest' && guestConnRef.current?.open) {
+        try {
+          guestConnRef.current.send(pkt);
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [mpRole, playerName, playerShirtColor, roomChatInput]
+  );
+
+  // Broadcast Hallenleiter-Sync & Pocket-PDA Game Toggles in real-time to other tabs (BroadcastChannel), all connected PeerJS players & Supabase
   useEffect(() => {
     if (isApplyingRemoteAdminSyncRef.current) return;
     const payload = buildCurrentAdminSyncPayload();
@@ -2904,11 +3188,8 @@ export function App() {
           }
         }
       });
-    } else if (
-      mpRole === 'guest' &&
-      (isAdminUnlocked || unlockedRoleHandheld !== null)
-    ) {
-      // Admin or unlocked Role Handheld has Regie sync priority even when connected as guest
+    } else if (mpRole === 'guest') {
+      // Any connected multiplayer player (Pocket-PDA game toggles, Role Handheld, Admin, or Private Room) syncs directly via PeerJS
       const conn = guestConnRef.current;
       if (conn && conn.open) {
         try {
@@ -2918,24 +3199,29 @@ export function App() {
         }
       }
     }
-    // 3. Live-Regie-Synchronisation via Supabase (public.hall_settings, ID = 1)
+    // 3. Live-Regie-Synchronisation via Supabase (public.hall_settings, ID = 1) — ONLY for public hall (never overwrite from private room!)
     if (
-      isAdminUnlocked ||
-      isDjBoothUnlocked ||
-      unlockedRoleHandheld !== null
+      !isPrivateRoom &&
+      (isAdminUnlocked ||
+        isDjBoothUnlocked ||
+        unlockedRoleHandheld !== null ||
+        mpRole === 'host' ||
+        mpRole === 'guest')
     ) {
       void upsertCloudHallSettings(payload, lastSyncedAnnouncementRef.current);
     }
   }, [
     mpRole,
+    isPrivateRoom,
     isAdminUnlocked,
     isDjBoothUnlocked,
     unlockedRoleHandheld,
     buildCurrentAdminSyncPayload,
   ]);
 
-  // Subscribe to Supabase Realtime on public.hall_settings (ID = 1) for instant live sync across all rinks
+  // Subscribe to Supabase Realtime on public.hall_settings (ID = 1) for instant live sync across all public rinks (isolated in private rooms)
   useEffect(() => {
+    if (isPrivateRoom) return;
     let active = true;
     fetchInitialCloudHallSettings<AdminSyncPayload>().then((row) => {
       if (!active || !row) return;
@@ -2967,7 +3253,7 @@ export function App() {
       active = false;
       unsubscribe();
     };
-  }, [applyIncomingAdminSync, showHallAnnouncement]);
+  }, [applyIncomingAdminSync, isPrivateRoom, showHallAnnouncement]);
 
   const cleanupPeerSession = useCallback(() => {
     hostConnectionsRef.current.forEach((c) => {
@@ -3040,7 +3326,7 @@ export function App() {
       }
     ) => {
       cleanupPeerSession();
-      const targetId = (customRoomId || 'palladium-hanau-89').trim();
+      const targetId = (customRoomId || 'palladium-86-online').trim();
       setMpStatus('connecting');
       if (!opts?.silentAutoHost && !opts?.silentHandover) {
         setMpNotice(`Starte Multiplayer-Raum „${targetId}“...`);
@@ -3154,7 +3440,7 @@ export function App() {
           if (!pkt || typeof pkt !== 'object') return;
 
           if (pkt.type === 'admin-takeover-request') {
-            // An Admin with PIN wants to reclaim the primary Host ID ('palladium-hanau-89')
+            // An Admin with PIN wants to reclaim the primary Host ID ('palladium-86-online')
             applyIncomingAdminSync(pkt.adminSync);
             const takeoverRoomId = targetId;
             const currentGuests = Array.from(
@@ -3255,6 +3541,48 @@ export function App() {
           if (pkt.type === 'admin-sync') {
             // Admin connected as guest pushed a real-time Regie change -> apply & rebroadcast to all
             applyIncomingAdminSync(pkt.payload);
+            hostConnectionsRef.current.forEach((c) => {
+              if (c.open && c.peer !== conn.peer) {
+                try {
+                  c.send(pkt);
+                } catch {
+                  // ignore
+                }
+              }
+            });
+            return;
+          }
+
+          if (pkt.type === 'chat-message') {
+            setRoomChatMessages((prev) => {
+              if (prev.some((m) => m.id === pkt.id)) return prev;
+              return [
+                ...prev.slice(-49),
+                {
+                  id: pkt.id,
+                  sender: pkt.sender,
+                  text: pkt.text,
+                  color: pkt.color,
+                  timestamp: pkt.timestamp,
+                },
+              ];
+            });
+            hostConnectionsRef.current.forEach((c) => {
+              if (c.open && c.peer !== conn.peer) {
+                try {
+                  c.send(pkt);
+                } catch {
+                  // ignore
+                }
+              }
+            });
+            return;
+          }
+
+          if (pkt.type === 'hall-objects-sync' && pkt.objects) {
+            if (pkt.senderPeerId !== tabSessionIdRef.current) {
+              setSharedHallObjects(pkt.objects);
+            }
             hostConnectionsRef.current.forEach((c) => {
               if (c.open && c.peer !== conn.peer) {
                 try {
@@ -3953,6 +4281,24 @@ export function App() {
             setRemotePlayers(others);
           } else if (pkt.type === 'admin-sync') {
             applyIncomingAdminSync(pkt.payload);
+          } else if (pkt.type === 'chat-message') {
+            setRoomChatMessages((prev) => {
+              if (prev.some((m) => m.id === pkt.id)) return prev;
+              return [
+                ...prev.slice(-49),
+                {
+                  id: pkt.id,
+                  sender: pkt.sender,
+                  text: pkt.text,
+                  color: pkt.color,
+                  timestamp: pkt.timestamp,
+                },
+              ];
+            });
+          } else if (pkt.type === 'hall-objects-sync' && pkt.objects) {
+            if (pkt.senderPeerId !== tabSessionIdRef.current) {
+              setSharedHallObjects(pkt.objects);
+            }
           } else if (pkt.type === 'kicked') {
             settled = true;
             window.clearTimeout(handshakeTimeout);
@@ -4223,7 +4569,7 @@ export function App() {
             type: 'host-handover',
             nextHostPeerId: eldest.peerId,
             nextHostTabSessionId: eldest.tabSessionId,
-            roomId: mpRoomIdRef.current || 'palladium-hanau-89',
+            roomId: mpRoomIdRef.current || 'palladium-86-online',
             adminSync: adminSyncPayloadRef.current,
             players: guests,
           };
@@ -4803,7 +5149,10 @@ export function App() {
             const nextU: ProShopUpgradesState = {
               ...uPrev,
               unlockedMoves: { ...uPrev.unlockedMoves },
-              bonusPoints: (uPrev.bonusPoints || 0) + 20,
+              bonusPoints:
+                adminSettings.pointsSystemEnabled !== false
+                  ? (uPrev.bonusPoints || 0) + 20
+                  : uPrev.bonusPoints || 0,
             };
             if (id === 'warmup_spins') {
               nextU.underglowEnabled = true;
@@ -5482,10 +5831,12 @@ export function App() {
         savePlayerPixels(next);
         return next;
       });
-      setUpgrades((u) => ({
-        ...u,
-        bonusPoints: (u.bonusPoints || 0) + bonusXp,
-      }));
+      if (adminSettings.pointsSystemEnabled !== false) {
+        setUpgrades((u) => ({
+          ...u,
+          bonusPoints: (u.bonusPoints || 0) + bonusXp,
+        }));
+      }
       soundFX.playChallengeUnlocked();
       setBallspielSummaryBanner({
         elapsedSec: cleanSec,
@@ -5531,15 +5882,19 @@ export function App() {
         savePlayerPixels(next);
         return next;
       });
-      setUpgrades((u) => ({
-        ...u,
-        bonusPoints: (u.bonusPoints || 0) + earnedXp,
-      }));
+      if (adminSettings.pointsSystemEnabled !== false) {
+        setUpgrades((u) => ({
+          ...u,
+          bonusPoints: (u.bonusPoints || 0) + earnedXp,
+        }));
+      }
       showTaskCompletedBanner(
-        `${gameLabel}: +${earnedPixels} Pixel & +${earnedXp} XP`
+        adminSettings.pointsSystemEnabled !== false
+          ? `${gameLabel}: +${earnedPixels} Pixel & +${earnedXp} XP`
+          : `${gameLabel}: +${earnedPixels} Pixel`
       );
     },
-    [showTaskCompletedBanner]
+    [adminSettings.pointsSystemEnabled, showTaskCompletedBanner]
   );
 
   // Sync player's current Slalom record, Hallen-Punkte, Pixel count & Ballspiel-Bestzeit to the Hallen-Ehrentafel leaderboard
@@ -5580,7 +5935,7 @@ export function App() {
         'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
       body:
         adminSettings.newspaperBody ||
-        'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
+        'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
       tips: adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS,
       versionLabel: APP_VERSION_LABEL,
       qrUrl: adminSettings.newspaperQrUrl || 'https://palladium86.de',
@@ -6232,7 +6587,7 @@ export function App() {
           <div className="flex items-center justify-between border-b-2 border-[#b0b0a6] pb-2">
             <div>
               <div className="text-[10px] font-black tracking-wider text-[#333652]">
-                DOT MATRIX SECOND-SCREEN • PALLADIUM HANAU
+                DOT MATRIX SECOND-SCREEN • PALLADIUM 86
               </div>
               <div className="text-sm font-black text-slate-900">
                 {roleLabel}
@@ -6487,15 +6842,69 @@ export function App() {
             >
               {hallRankInfo.icon} {hallRankInfo.title}
             </span>
-            <span className="px-1.5 py-0.5 rounded-full bg-amber-400/20 border border-amber-300/60 text-amber-200 text-[10.5px] font-black">
-              {totalEarnedPoints} XP
-            </span>
+            {adminSettings.pointsSystemEnabled !== false && (
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-400/20 border border-amber-300/60 text-amber-200 text-[10.5px] font-black">
+                {totalEarnedPoints} XP
+              </span>
+            )}
             <span className="px-1.5 py-0.5 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/60 text-fuchsia-200 text-[10.5px] font-black">
               👾 {playerPixels} Pixel
             </span>
           </button>
 
-          {hallGameMode === 'slalom' && (
+          {/* Kleiner „🏠 Zur Modus-Auswahl“-Button im Spiel-HUD */}
+          <button
+            type="button"
+            onClick={() => setShowPortalScreen(true)}
+            title="Zurück zur gemeinsamen Start- & Modus-Auswahl"
+            className="px-2.5 py-1.5 rounded-full bg-[#0B0E17]/88 hover:bg-slate-900 border border-fuchsia-400/60 text-fuchsia-200 font-mono text-[11px] font-bold shadow-lg backdrop-blur-xs cursor-pointer transition flex items-center gap-1"
+          >
+            <span>🏠</span>
+            <span className="hidden md:inline">Zur Modus-Auswahl</span>
+          </button>
+
+          {/* Geschlossener Privat-Raum Schloss-Badge + Link kopieren Button */}
+          {isPrivateRoom && mpRoomId && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-950/92 border-2 border-amber-400 text-amber-200 font-mono text-[10.5px] font-black shadow-[0_0_16px_rgba(251,191,36,0.4)]">
+              <span>🔒 PRIVAT-RAUM: {mpRoomId.toUpperCase()}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const url = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
+                    mpRoomId.trim().toUpperCase()
+                  )}`;
+                  navigator.clipboard?.writeText(url).catch(() => {});
+                  setPrivateRoomBadgeCopied(true);
+                  window.setTimeout(
+                    () => setPrivateRoomBadgeCopied(false),
+                    2500
+                  );
+                }}
+                className="px-2 py-0.5 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 text-[10px] font-black cursor-pointer transition"
+              >
+                {privateRoomBadgeCopied ? '✓ Kopiert!' : '📋 Link kopieren'}
+              </button>
+            </div>
+          )}
+
+          {/* Arena-Chat Button (isoliert pro Multiplayer-/Privat-Raum) */}
+          {isMultiplayerActive && (
+            <button
+              type="button"
+              onClick={() => setShowRoomChat((v) => !v)}
+              className="px-2.5 py-1.5 rounded-full bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-400/70 text-cyan-200 font-mono text-[11px] font-bold shadow-lg cursor-pointer transition flex items-center gap-1"
+            >
+              <span>💬 Arena-Chat</span>
+              {roomChatMessages.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-cyan-400 text-slate-950 text-[9.5px] font-black">
+                  {roomChatMessages.length}
+                </span>
+              )}
+            </button>
+          )}
+
+          {(hallGameMode === 'slalom' ||
+            (adminSettings.activeHallModes || []).includes('slalom')) && (
             <div className="px-3 py-1 rounded-full bg-slate-950/92 border border-emerald-400/80 text-emerald-200 font-mono text-[10.5px] font-black shadow-lg">
               🚧 Slalom-Runde: {telemetry.slalomRound || 0} • Tempo:{' '}
               {telemetry.slalomSpeedPercent || 100} % • Rekord: {slalomRecord}{' '}
@@ -6503,22 +6912,88 @@ export function App() {
             </div>
           )}
 
-          {hallGameMode === 'ballspiel' && !ballspielSummaryBanner && (
-            <div className="px-3 py-1 rounded-full bg-slate-950/92 border border-amber-400/80 text-amber-200 font-mono text-[10.5px] font-black shadow-lg flex items-center gap-2">
-              <span>
-                ⏱️ {(telemetry.ballspielElapsedSec || 0).toFixed(1)} s
-              </span>
-              <span className="text-cyan-300">
-                🏐 Übrig: {telemetry.ballspielRemaining}/{telemetry.ballspielTotal}
-              </span>
-              {ballspielBestTimeSec > 0 && (
-                <span className="text-emerald-300">
-                  🏆 Bestzeit: {ballspielBestTimeSec.toFixed(1)} s
+          {(hallGameMode === 'ballspiel' ||
+            (adminSettings.activeHallModes || []).includes('ballspiel')) &&
+            !ballspielSummaryBanner && (
+              <div className="px-3 py-1 rounded-full bg-slate-950/92 border border-amber-400/80 text-amber-200 font-mono text-[10.5px] font-black shadow-lg flex items-center gap-2">
+                <span>
+                  ⏱️ {(telemetry.ballspielElapsedSec || 0).toFixed(1)} s
                 </span>
+                <span className="text-cyan-300">
+                  🏐 Übrig: {telemetry.ballspielRemaining}/
+                  {telemetry.ballspielTotal}
+                </span>
+                {ballspielBestTimeSec > 0 && (
+                  <span className="text-emerald-300">
+                    🏆 Bestzeit: {ballspielBestTimeSec.toFixed(1)} s
+                  </span>
+                )}
+              </div>
+            )}
+        </div>
+
+        {/* Raum-isolierter Arena-Chat (Öffentliche 24/7-Halle oder geschlossener Privat-Raum) */}
+        {isMultiplayerActive && showRoomChat && (
+          <div className="fixed top-14 left-2.5 z-40 w-80 max-w-[92vw] rounded-2xl bg-[#0D0A1A]/95 border-2 border-cyan-400/80 shadow-[0_10px_35px_rgba(0,0,0,0.85)] p-3 font-mono text-xs text-white space-y-2 backdrop-blur-md">
+            <div className="flex items-center justify-between border-b border-cyan-500/30 pb-1.5">
+              <span className="font-bold text-cyan-300 truncate">
+                💬 CHAT: {(mpRoomId || 'PALLADIUM-86-ONLINE').toUpperCase()}
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowRoomChat(false)}
+                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+              {roomChatMessages.length === 0 ? (
+                <div className="text-[10.5px] text-slate-400 italic py-2 text-center">
+                  Noch keine Nachrichten in diesem Raum. Schreib den ersten Gruß!
+                </div>
+              ) : (
+                roomChatMessages.map((m) => (
+                  <div
+                    key={m.id}
+                    className="px-2 py-1 rounded-lg bg-slate-900/90 border border-slate-800 text-[11px] break-words"
+                  >
+                    <span
+                      className="font-black mr-1.5"
+                      style={{ color: m.color || '#22d3ee' }}
+                    >
+                      {m.sender}:
+                    </span>
+                    <span className="text-slate-100">{m.text}</span>
+                  </div>
+                ))
               )}
             </div>
-          )}
-        </div>
+            <div className="flex items-center gap-1.5 pt-1">
+              <input
+                type="text"
+                maxLength={140}
+                value={roomChatInput}
+                onChange={(e) => setRoomChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && roomChatInput.trim()) {
+                    e.preventDefault();
+                    handleSendRoomChatMessage();
+                  }
+                }}
+                placeholder="Nachricht in den Raum senden..."
+                className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-cyan-400/50 text-xs text-white focus:outline-none focus:border-amber-300"
+              />
+              <button
+                type="button"
+                onClick={() => handleSendRoomChatMessage()}
+                className="px-2.5 py-1.5 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-xs cursor-pointer"
+              >
+                Senden
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 5. BALLSPIEL-BESTZEITJAGD ("LAST SKATER STANDING") RUNDEN-ENDE BANNER */}
         {ballspielSummaryBanner && (
@@ -6650,7 +7125,7 @@ export function App() {
               <div className="absolute right-0 mt-2 w-72 max-h-[85dvh] overflow-y-auto rounded-2xl bg-[#0E0B1A]/98 border-2 border-fuchsia-400/80 shadow-[0_12px_40px_rgba(0,0,0,0.85)] p-3 font-mono text-xs text-white space-y-2 z-50">
                 <div className="flex items-center justify-between border-b border-fuchsia-500/30 pb-1.5">
                   <span className="font-display font-black text-xs text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-300 via-amber-200 to-cyan-300">
-                    ✦ PALLADIUM HANAU &apos;86
+                    ✦ PALLADIUM 86
                   </span>
                   <span className="text-[10px] text-slate-400">
                     {APP_VERSION_LABEL}
@@ -6682,6 +7157,18 @@ export function App() {
                 </div>
 
                 <div className="grid grid-cols-1 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowVisitorQuickMenu(false);
+                      setShowPortalScreen(true);
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-fuchsia-950/85 hover:bg-fuchsia-900/85 border border-fuchsia-400/80 text-fuchsia-100 font-bold text-left flex items-center justify-between cursor-pointer"
+                  >
+                    <span>🏠 Zur Modus-Auswahl</span>
+                    <span className="text-[10px] text-amber-300">PORTAL</span>
+                  </button>
+
                   {adminSettings.newspaperEnabled !== false && (
                     <button
                       type="button"
@@ -6877,7 +7364,7 @@ export function App() {
               {/* Official Framed Certificate Preview */}
               <div className="my-3 p-3 rounded-xl bg-amber-50/95 text-slate-900 border-2 border-amber-600 shadow-inner text-left font-serif relative overflow-hidden">
                 <div className="text-[10px] font-mono uppercase tracking-widest text-amber-900 font-bold text-center border-b border-amber-300 pb-1">
-                  ★ ROLLER DISCO PALLADIUM HANAU • EHREN-URKUNDE ★
+                  ★ ROLLER DISCO PALLADIUM 86 • EHREN-URKUNDE ★
                 </div>
                 <p className="text-xs text-slate-800 mt-2 leading-relaxed">
                   Hiermit wird offiziell bestätigt, dass{' '}
@@ -6885,7 +7372,7 @@ export function App() {
                     {playerName || 'Palladium-Skater'}
                   </strong>{' '}
                   die Auszeichnung{' '}
-                  <strong>„{newlyUnlockedCert.title}“</strong> ({newlyUnlockedCert.description}) im Palladium Hanau gemeistert hat.
+                  <strong>„{newlyUnlockedCert.title}“</strong> ({newlyUnlockedCert.description}) im Palladium 86 gemeistert hat.
                 </p>
                 <div className="mt-3 pt-1.5 border-t border-amber-300 flex items-center justify-between text-[10px] font-mono text-slate-700">
                   <span>
@@ -6898,8 +7385,8 @@ export function App() {
                   </span>
                   <span className="px-2 py-0.5 rounded-full border-2 border-rose-700 text-rose-800 font-black rotate-[-4deg]">
                     {newlyUnlockedCert.hasRedWaxSeal
-                      ? '🔴 ROTES WACHS-SIEGEL • PALLADIUM'
-                      : '🏛️ STEMPEL: PALLADIUM HANAU'}
+                      ? '🔴 ROTES WACHS-SIEGEL • PALLADIUM 86'
+                      : '🏛️ STEMPEL: PALLADIUM 86'}
                   </span>
                 </div>
               </div>
@@ -7435,12 +7922,13 @@ export function App() {
             adminSettings.neonLightboxLine2 ?? 'DJ MAGIC FORCE'
           }
           neonLightboxLine3={adminSettings.neonLightboxLine3 ?? 'AB 21:00 UHR'}
-          onAwardObstaclePoints={(pts) =>
+          onAwardObstaclePoints={(pts) => {
+            if (adminSettings.pointsSystemEnabled === false) return;
             setUpgrades((u) => ({
               ...u,
               bonusPoints: (u.bonusPoints || 0) + pts,
-            }))
-          }
+            }));
+          }}
           onRequestAdminPinModal={() => {
             if (isAdminUnlocked && !isTesterAccount) {
               setShowAdminTerminal((prev) => !prev);
@@ -7481,6 +7969,37 @@ export function App() {
           oldBarackEnabled={adminSettings.oldBarackEnabled !== false}
           staffShiftOverride={adminSettings.staffShiftOverride || 'auto'}
           shiftHandoverTriggerSeq={shiftHandoverTriggerSeq}
+          activeHallModes={
+            adminSettings.activeHallModes ??
+            (hallGameMode !== 'free-skate' ? [hallGameMode] : [])
+          }
+          aiSkaterCount={
+            typeof adminSettings.aiSkaterCount === 'number'
+              ? adminSettings.aiSkaterCount
+              : 22
+          }
+          outerLaneSpeedPct={
+            typeof adminSettings.outerLaneSpeedPct === 'number'
+              ? adminSettings.outerLaneSpeedPct
+              : 100
+          }
+          middleLaneSpeedPct={
+            typeof adminSettings.middleLaneSpeedPct === 'number'
+              ? adminSettings.middleLaneSpeedPct
+              : 100
+          }
+          innerLaneSpeedPct={
+            typeof adminSettings.innerLaneSpeedPct === 'number'
+              ? adminSettings.innerLaneSpeedPct
+              : 100
+          }
+          arcadeMachinesEnabled={adminSettings.arcadeMachinesEnabled !== false}
+          nurseEnabled={adminSettings.nurseEnabled !== false}
+          pointsSystemEnabled={adminSettings.pointsSystemEnabled !== false}
+          localPeerId={tabSessionIdRef.current}
+          isMultiplayerHost={mpRole === 'host'}
+          sharedHallObjects={sharedHallObjects}
+          onEmitSharedHallObjects={handleEmitSharedHallObjects}
         />
 
         {/* 7. RETRO-BANNER AUF DER BAHN FÜR SONNTAGS-CLIQUE-MODUS (2+1-REGEL) - KEIN KLICK-TRIGGER! */}
@@ -7913,7 +8432,9 @@ export function App() {
         {/* ================================================================= */}
         {isCurtainOpen && !isBlockedByMaintenance && (
           <PocketPdaDrawer
-            hasPocketPda={Boolean(lockerSettings.hasPocketPda)}
+            hasPocketPda={Boolean(
+              lockerSettings.hasPocketPda || isMultiplayerActive
+            )}
             playerName={playerName}
             playerPixels={playerPixels}
             totalEarnedPoints={totalEarnedPoints}
@@ -7939,7 +8460,7 @@ export function App() {
             }
             newspaperBody={
               adminSettings.newspaperBody ||
-              'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'
+              'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'
             }
             newspaperTips={
               adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS
@@ -7970,6 +8491,47 @@ export function App() {
               setLockerTab('certificates');
               setShowLockerModal(true);
             }}
+            activeHallModes={
+              adminSettings.activeHallModes ??
+              (hallGameMode !== 'free-skate' ? [hallGameMode] : [])
+            }
+            onToggleHallMode={(modeId) => {
+              const current =
+                adminSettings.activeHallModes ??
+                (hallGameMode !== 'free-skate' ? [hallGameMode] : []);
+              const exists = current.includes(modeId);
+              const nextModes = exists
+                ? current.filter((m) => m !== modeId)
+                : [...current, modeId];
+              setAdminSettings((prev) => {
+                const next = {
+                  ...prev,
+                  activeHallModes: nextModes,
+                };
+                saveAdminSettings(next);
+                return next;
+              });
+              setHallGameMode(
+                nextModes.length > 0 ? nextModes[0] : 'free-skate'
+              );
+              if (modeId === 'springerstaffel') {
+                setSpringerStaffelShowSec(exists ? 0 : 120);
+              }
+            }}
+            onResetHallModes={() => {
+              setAdminSettings((prev) => {
+                const next = {
+                  ...prev,
+                  activeHallModes: [],
+                };
+                saveAdminSettings(next);
+                return next;
+              });
+              setHallGameMode('free-skate');
+              setSpringerStaffelShowSec(0);
+            }}
+            isMultiplayerActive={isMultiplayerActive}
+            mpRoomId={mpRoomId}
           />
         )}
 
@@ -7981,18 +8543,34 @@ export function App() {
           (alphaBetaConfig.enabled && !isAlphaBetaAuthorized)) && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-[#1A051D]/98 via-[#0B0716]/98 to-[#05050B]/98 p-4 overflow-y-auto backdrop-blur-md">
             <div className="relative w-full max-w-4xl rounded-2xl bg-[#110C1D] border-2 border-fuchsia-500/60 shadow-[0_0_80px_rgba(232,121,249,0.35)] p-6 md:p-8 text-[#FFF8E7]">
-              {/* Top Neon Emblem */}
+              {/* Top Neon Emblem + WILLKOMMEN ZUM ALPHA-TEST + Live Event/DJ Announcement */}
               <div className="text-center border-b border-fuchsia-500/30 pb-4">
-                <div className="inline-block px-3 py-0.5 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/40 font-mono text-xs text-fuchsia-300 mb-2">
-                  ✦ HANAUER ROLLSCHUH-CHRONIK • {APP_VERSION_LABEL} ✦
+                <div className="inline-flex flex-wrap items-center justify-center gap-2 px-3.5 py-1 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/50 font-mono text-xs text-fuchsia-200 mb-2">
+                  <span className="font-black text-amber-300">
+                    🚀 WILLKOMMEN ZUM ALPHA-TEST
+                  </span>
+                  <span>•</span>
+                  <span>✦ PALLADIUM 86 CHRONIK • {APP_VERSION_LABEL} ✦</span>
                 </div>
                 <h1 className="font-display font-black text-3xl md:text-5xl tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 via-amber-200 to-cyan-300 drop-shadow-[0_0_20px_rgba(232,121,249,0.5)]">
-                  PALLADIUM ROLLER ARENA HANAU
+                  PALLADIUM 86 – ONLINE-ROLLSCHUHBAHN
                 </h1>
                 <p className="text-sm text-amber-200/80 font-mono mt-1">
-                  Die Geschichte hinter dem Parkett — Authentischer 80er-Jahre
-                  Prototyp
+                  Willkommen zum Alpha-Test! Die Geschichte hinter dem Parkett — Authentische 80er-Jahre Roller Disco
                 </p>
+
+                {(adminSettings.eventAnnouncementText ??
+                  '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!')
+                  .trim() && (
+                  <div className="mt-3 mx-auto max-w-2xl px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-950/90 via-fuchsia-950/90 to-amber-950/90 border-2 border-cyan-400/80 shadow-[0_0_24px_rgba(34,211,238,0.35)] font-mono text-xs sm:text-sm font-black text-amber-200 flex items-center justify-center gap-2">
+                    <span className="text-base shrink-0">📢</span>
+                    <span>
+                      {adminSettings.eventAnnouncementText ??
+                        '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!'}
+                    </span>
+                  </div>
+                )}
+
                 <div className="mt-2 inline-block px-3.5 py-1 rounded-full bg-emerald-950/85 border border-emerald-400/60 font-mono text-[11px] font-bold text-emerald-200">
                   👾 100 % kostenloses Fan-Projekt – hier wird ausschließlich
                   mit gesammelten Spiel-Pixeln bezahlt, echtes Geld gibt es hier
@@ -8002,14 +8580,14 @@ export function App() {
 
               {/* Historical Chronicle Cards with Authentic 80s Stickers at the Top */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-5 mb-3">
-                {/* CARD 1: 04. November 1981 — ROLLERLAND HANAU STICKER */}
+                {/* CARD 1: 04. November 1981 — ROLLERLAND STICKER */}
                 <div className="p-4 rounded-xl bg-[#191229] border border-amber-400/40 flex flex-col">
                   <div className="h-28 mb-3 flex items-center justify-center">
                     <div className="w-full h-full rounded-lg bg-[#0d1633] border-[2.5px] border-white/95 shadow-[0_6px_18px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center p-1">
                       <svg
                         viewBox="0 0 220 92"
                         className="w-full h-full"
-                        aria-label="Original Rollerland Hanau 1981 Aufkleber"
+                        aria-label="Original Rollerland 1981 Aufkleber"
                       >
                         <rect
                           x="0"
@@ -8117,7 +8695,7 @@ export function App() {
                           fontFamily="JetBrains Mono, monospace"
                           letterSpacing="3"
                         >
-                          HANAU
+                          1981
                         </text>
                       </svg>
                     </div>
@@ -8130,21 +8708,21 @@ export function App() {
                     Alles beginnt als „Rollerland“
                   </h2>
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    Oben im damaligen Hanauer <em>Familyland</em>
+                    Oben im damaligen <em>Familyland</em>
                     -Einkaufszentrum öffnet eine der kultigsten Rollschuhbahnen
                     der Region mit großem versiegeltem Holzparkett, Pro-Shop und
                     Slush-Theke.
                   </p>
                 </div>
 
-                {/* CARD 2: August 1986 — PALLADIUM HANAU STICKER */}
+                {/* CARD 2: August 1986 — PALLADIUM 86 STICKER */}
                 <div className="p-4 rounded-xl bg-[#191229] border border-fuchsia-400/50 flex flex-col">
                   <div className="h-28 mb-3 flex items-center justify-center">
                     <div className="w-full h-full rounded-lg bg-[#bae6fd] border-[2.5px] border-white/95 shadow-[0_6px_18px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center p-1">
                       <svg
                         viewBox="0 0 220 92"
                         className="w-full h-full"
-                        aria-label="Original Palladium Hanau 1986 Aufkleber"
+                        aria-label="Original Palladium 1986 Aufkleber"
                       >
                         <defs>
                           <linearGradient
@@ -8355,7 +8933,7 @@ export function App() {
                             fontFamily="Outfit, sans-serif"
                             letterSpacing="4"
                           >
-                            HANAU
+                            1986
                           </text>
                         </g>
                       </svg>
@@ -8377,14 +8955,14 @@ export function App() {
                   </p>
                 </div>
 
-                {/* CARD 3: Heute — OVAL-EMBLEM ROLLER DISCO PALLADIUM HANAU-GRIMM CENTER */}
+                {/* CARD 3: Heute — OVAL-EMBLEM ROLLER DISCO PALLADIUM 86 ONLINE */}
                 <div className="p-4 rounded-xl bg-[#191229] border border-cyan-400/50 flex flex-col">
                   <div className="h-28 mb-3 flex items-center justify-center">
                     <div className="w-full h-full rounded-lg bg-[#090d1f] border-[2.5px] border-white/95 shadow-[0_6px_18px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center p-1">
                       <svg
                         viewBox="0 0 220 92"
                         className="w-full h-full"
-                        aria-label="Roller Disco Palladium Hanau-Grimm Center Oval-Emblem"
+                        aria-label="Roller Disco Palladium 86 Online Oval-Emblem"
                       >
                         <rect
                           x="0"
@@ -8449,7 +9027,7 @@ export function App() {
                           fontFamily="JetBrains Mono, monospace"
                           letterSpacing="0.8"
                         >
-                          HANAU-Grimm Center
+                          PALLADIUM 86 ONLINE
                         </text>
                       </svg>
                     </div>
@@ -8925,7 +9503,7 @@ export function App() {
                       ) : (
                         <>
                           Willkommens-Slush bereits eingelöst • Bei weiteren Besuchen sammelst du{' '}
-                          <strong>Original Palladium-Hanau T-Shirt, 80er-Neon-Mütze &amp; Rollschuh-Glöckchen</strong> im Spind!
+                          <strong>Original Palladium-86 T-Shirt, 80er-Neon-Mütze &amp; Rollschuh-Glöckchen</strong> im Spind!
                         </>
                       )}
                     </p>
@@ -10283,7 +10861,7 @@ export function App() {
                         🏆 Offizielle Palladium-Urkunden- &amp; Pokalwand
                       </span>
                       <p className="text-[10px] text-slate-300 font-sans">
-                        Klicke auf eine Urkunde zum Vergrößern (mit deinem Namen, Datum &amp; Palladium-Hanau-Stempel).
+                        Klicke auf eine Urkunde zum Vergrößern (mit deinem Namen, Datum &amp; Palladium-86-Stempel).
                       </p>
                     </div>
                     <div className="flex items-center gap-2 text-[10px] font-mono">
@@ -10315,7 +10893,7 @@ export function App() {
                         >
                           <div className="flex items-center justify-between border-b-2 border-amber-700/40 pb-2">
                             <span className="font-mono text-[10px] font-black uppercase tracking-widest text-amber-900">
-                              ★ ROLLER DISCO PALLADIUM HANAU • OFFIZIELLE URKUNDE ★
+                              ★ ROLLER DISCO PALLADIUM 86 • OFFIZIELLE URKUNDE ★
                             </span>
                             <button
                               type="button"
@@ -10361,7 +10939,7 @@ export function App() {
                             >
                               {cert.hasRedWaxSeal
                                 ? '🔴 ROTES WACHS-SIEGEL • KÖNIG DER LÜFTE'
-                                : '🏛️ STEMPEL: PALLADIUM HANAU 1986'}
+                                : '🏛️ STEMPEL: PALLADIUM 86'}
                             </span>
                           </div>
                         </div>
@@ -11001,7 +11579,7 @@ export function App() {
               {/* Top Illuminated Foyer Header above the Glass Door */}
               <div className="px-6 py-3 bg-gradient-to-r from-slate-900 via-[#1b112c] to-slate-900 border-b-4 border-slate-600 flex items-center justify-between">
                 <span className="font-mono text-xs text-cyan-300 tracking-widest uppercase">
-                  ✦ EINGANG FOYER • HANAU-GRIMM CENTER ✦
+                  ✦ EINGANG FOYER • PALLADIUM 86 ONLINE ✦
                 </span>
                 <span className="font-mono text-[11px] text-amber-300">
                   {APP_VERSION_LABEL}
@@ -11044,7 +11622,7 @@ export function App() {
                 <div className="absolute inset-0 z-20 flex items-center justify-center p-6">
                   <div className="max-w-lg w-full rounded-2xl bg-[#100c1c]/95 border-2 border-amber-400 shadow-[0_0_50px_rgba(251,191,36,0.45)] p-6 text-center backdrop-blur-md">
                     <div className="inline-block px-3 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 font-mono text-[11px] text-amber-300 font-bold mb-2">
-                      🧹🛼 PALLADIUM ROLLER ARENA HANAU • TÜRSCHILD
+                      🧹🛼 PALLADIUM 86 – ONLINE-ROLLSCHUHBAHN • TÜRSCHILD
                     </div>
                     <h2 className="font-display font-black text-xl md:text-2xl text-white tracking-wide">
                       🚧 Wegen Putz- &amp; Renovierungsarbeiten vorübergehend
@@ -11128,7 +11706,7 @@ export function App() {
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rose-500/40 pb-2">
                 <div className="flex items-center gap-2.5 flex-wrap">
                   <h2 className="font-display font-black text-base sm:text-lg xl:text-xl text-white">
-                    🎛️ HALLENLEITER-REGIE — PALLADIUM HANAU
+                    🎛️ HALLENLEITER-REGIE — PALLADIUM 86
                   </h2>
                   <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-rose-950/90 border border-rose-500/40 text-rose-300 uppercase">
                     PIN-GESCHÜTZT • 4-TAB KACHEL-SYSTEM
@@ -11238,6 +11816,7 @@ export function App() {
                           },
                           { id: 'look_build' as const, short: '🎨 Tab 4: Look & Baumenü' },
                           { id: 'ranks_points' as const, short: '👑 Tab 5: Ränge & Punkte' },
+                          { id: 'diagnose' as const, short: '🟢 Tab 6: Lampen & Diagnose' },
                         ] as const
                       ).map((t) => (
                         <button
@@ -11263,13 +11842,13 @@ export function App() {
                     </button>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+                  <div className="grid grid-cols-2 lg:grid-cols-6 gap-2">
                     {(
                       [
                         {
                           id: 'track' as const,
-                          label: '🛼 Tab 1: Bahn, Shows & Fahrtrichtung',
-                          sub: 'Modi, Springer-Staffel, Richtung & Live-Monitor',
+                          label: '🛼 Tab 1: Bahn, Shows & KI',
+                          sub: 'Multi-Modi, 4 KI-Regler, Schalter & Richtung',
                         },
                         {
                           id: 'light_dj' as const,
@@ -11294,6 +11873,11 @@ export function App() {
                           id: 'ranks_points' as const,
                           label: '👑 Tab 5: Ränge & Punkte',
                           sub: 'XP-Schwellen, Führerschein-Farbe & Ehren-Punkte',
+                        },
+                        {
+                          id: 'diagnose' as const,
+                          label: '🟢 Tab 6: Lampen & Diagnose',
+                          sub: 'Live-Status-Lampen aller Modi, KIs & Schalter',
                         },
                       ] as const
                     ).map((tab) => {
@@ -11539,11 +12123,62 @@ export function App() {
               {adminTab === 'track' && (
                 <div className="grid grid-cols-1 gap-3 items-stretch">
                   <div className="p-3.5 rounded-xl bg-slate-900/95 border border-cyan-500/40 space-y-3">
-                    <div className="flex items-center justify-between">
+                    {/* Editierbare Event- / Gast-DJ-Ankündigung (Echtzeit-Sync für alle Multiplayer-Clients & Willkommens-Modal) */}
+                    <div className="p-2.5 rounded-xl bg-slate-950/90 border border-amber-400/60 space-y-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="font-mono text-xs font-bold text-amber-300">
+                          📢 Event- / Gast-DJ-Ankündigung (Willkommens-Modal &amp; Multiplayer-Sync):
+                        </label>
+                        <span className="font-mono text-[10px] text-emerald-300">
+                          🟢 Live-Sync aktiv
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={
+                            adminSettings.eventAnnouncementText ??
+                            '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!'
+                          }
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setAdminSettings((s) => {
+                              const next = {
+                                ...s,
+                                eventAnnouncementText: val,
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            });
+                          }}
+                          placeholder="z.B. Heute mit Gast-DJ Magic Force • Einlass startet um 19:00 Uhr!"
+                          className="flex-1 min-w-[220px] px-2.5 py-1.5 rounded-lg bg-slate-900 border border-amber-400/60 font-mono text-xs text-amber-100 focus:outline-none focus:border-cyan-400"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const txt = (
+                              adminSettings.eventAnnouncementText ?? ''
+                            ).trim();
+                            if (txt) {
+                              showHallAnnouncement(`📢 EVENT-HINWEIS: ${txt}`);
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono text-xs font-black cursor-pointer shrink-0"
+                        >
+                          📢 In Halle einblenden
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
-                        🎪 Hallen-Modi &amp; Shows (Direkt-Kacheln)
+                        🎪 Hallen-Modi &amp; Shows (Mehrfach-Auswahl / Multi-Toggle kombinierbar)
                       </h3>
-                      {hallGameMode === 'ballspiel' && (
+                      {(hallGameMode === 'ballspiel' ||
+                        (adminSettings.activeHallModes || []).includes(
+                          'ballspiel'
+                        )) && (
                         <span className="px-2 py-0.5 rounded bg-amber-950 border border-amber-400 font-mono text-[10px] text-amber-200 font-bold">
                           🏐 IM SPIEL: {telemetry.ballspielRemaining} /{' '}
                           {telemetry.ballspielTotal}
@@ -11551,42 +12186,107 @@ export function App() {
                       )}
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
-                      {(
-                        [
-                          { id: 'free-skate', label: '🛼 Frei' },
-                          { id: 'ballspiel', label: '🟠 Ballspiel' },
-                          { id: 'slalom', label: '🚧 Slalom' },
-                          { id: 'stuhlsprung', label: '🪑 Hochsprung' },
-                          { id: 'springerstaffel', label: '🤸‍♂️ Springer-Staffel' },
-                        ] as { id: HallGameMode; label: string }[]
-                      ).map((g) => {
-                        const active = hallGameMode === g.id;
-                        return (
+                    {(() => {
+                      const currentModes =
+                        adminSettings.activeHallModes ??
+                        (hallGameMode !== 'free-skate' ? [hallGameMode] : []);
+                      const toggleMode = (
+                        modeId:
+                          | 'ballspiel'
+                          | 'slalom'
+                          | 'stuhlsprung'
+                          | 'springerstaffel'
+                      ) => {
+                        const isCurrentlyOn = currentModes.includes(modeId);
+                        const nextModes = isCurrentlyOn
+                          ? currentModes.filter((m) => m !== modeId)
+                          : [...currentModes, modeId];
+                        setAdminSettings((s) => {
+                          const next = {
+                            ...s,
+                            activeHallModes: nextModes,
+                          };
+                          saveAdminSettings(next);
+                          return next;
+                        });
+                        setHallGameMode(
+                          nextModes.length > 0 ? nextModes[0] : 'free-skate'
+                        );
+                        if (modeId === 'springerstaffel') {
+                          setSpringerStaffelShowSec(isCurrentlyOn ? 0 : 120);
+                        }
+                      };
+                      const clearAllModes = () => {
+                        setAdminSettings((s) => {
+                          const next = {
+                            ...s,
+                            activeHallModes: [],
+                          };
+                          saveAdminSettings(next);
+                          return next;
+                        });
+                        setHallGameMode('free-skate');
+                        setSpringerStaffelShowSec(0);
+                      };
+                      return (
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
                           <button
-                            key={g.id}
                             type="button"
-                            onClick={() => setHallGameMode(g.id)}
+                            onClick={clearAllModes}
                             className={`min-h-[40px] py-2 px-2 rounded-xl font-mono text-[11px] font-bold border cursor-pointer transition ${
-                              active
-                                ? 'bg-fuchsia-500 text-white border-white shadow-[0_0_14px_rgba(232,121,249,0.5)]'
-                                : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-fuchsia-400/60'
+                              currentModes.length === 0
+                                ? 'bg-emerald-500 text-slate-950 border-white shadow-[0_0_14px_rgba(16,185,129,0.5)]'
+                                : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-emerald-400/60'
                             }`}
                           >
-                            {g.label}: {active ? 'AN' : 'AUS'}
+                            🛼 Frei: {currentModes.length === 0 ? 'AN' : 'AUS'}
                           </button>
-                        );
-                      })}
-                    </div>
+                          {(
+                            [
+                              { id: 'ballspiel', label: '🟠 Ballspiel' },
+                              { id: 'slalom', label: '🚧 Slalom' },
+                              { id: 'stuhlsprung', label: '🪑 Hochsprung' },
+                              {
+                                id: 'springerstaffel',
+                                label: '🤸‍♂️ Springer-Staffel',
+                              },
+                            ] as {
+                              id:
+                                | 'ballspiel'
+                                | 'slalom'
+                                | 'stuhlsprung'
+                                | 'springerstaffel';
+                              label: string;
+                            }[]
+                          ).map((g) => {
+                            const active = currentModes.includes(g.id);
+                            return (
+                              <button
+                                key={g.id}
+                                type="button"
+                                onClick={() => toggleMode(g.id)}
+                                className={`min-h-[40px] py-2 px-2 rounded-xl font-mono text-[11px] font-bold border cursor-pointer transition ${
+                                  active
+                                    ? 'bg-fuchsia-500 text-white border-white shadow-[0_0_14px_rgba(232,121,249,0.5)]'
+                                    : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-fuchsia-400/60'
+                                }`}
+                              >
+                                {g.label}: {active ? 'AN' : 'AUS'}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
 
-                    {/* Direkter Springer-Staffel-Show Start/Stopp Button + Timer */}
+                    {/* Direkter Springer-Staffel-Show Start/Stopp Button + Timer (max. 4 Skateguards ohne KI-Stau) */}
                     <div className="p-3 rounded-xl bg-slate-950/90 border border-amber-400/50 flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <div className="font-mono text-xs font-bold text-amber-300">
-                          🤸‍♂️ Springer-Staffel-Show (Geordnete Anlaufspur &amp; Sprung-Reihe)
+                          🤸‍♂️ Springer-Staffel-Show (Max. 4 Skateguards • kein KI-Stau)
                         </div>
                         <div className="text-[10px] font-mono text-slate-400">
-                          Skater reihen sich hintereinander auf der Anlaufspur ein und springen nacheinander über HOCHSPRUNG 1–4.
+                          Bis zu 4 Skateguards springen geordnet über HOCHSPRUNG 1–4, während alle anderen KIs frei weiterrollen.
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
@@ -11599,26 +12299,300 @@ export function App() {
                         <button
                           type="button"
                           onClick={() => {
-                            if (
-                              hallGameMode === 'springerstaffel' &&
-                              springerStaffelShowSec > 0
-                            ) {
-                              setSpringerStaffelShowSec(0);
-                              setHallGameMode('free-skate');
-                            } else {
-                              setHallGameMode('springerstaffel');
-                              setSpringerStaffelShowSec(120);
-                            }
+                            const currentModes =
+                              adminSettings.activeHallModes ??
+                              (hallGameMode !== 'free-skate'
+                                ? [hallGameMode]
+                                : []);
+                            const isStaffelOn =
+                              currentModes.includes('springerstaffel');
+                            const nextModes: (
+                              | 'ballspiel'
+                              | 'slalom'
+                              | 'stuhlsprung'
+                              | 'springerstaffel'
+                            )[] = isStaffelOn
+                              ? currentModes.filter(
+                                  (m) => m !== 'springerstaffel'
+                                )
+                              : [...currentModes, 'springerstaffel'];
+                            setAdminSettings((s) => {
+                              const next = {
+                                ...s,
+                                activeHallModes: nextModes,
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            });
+                            setHallGameMode(
+                              nextModes.length > 0 ? nextModes[0] : 'free-skate'
+                            );
+                            setSpringerStaffelShowSec(isStaffelOn ? 0 : 120);
                           }}
                           className={`min-h-[38px] px-3.5 py-1.5 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
-                            hallGameMode === 'springerstaffel'
+                            (adminSettings.activeHallModes || []).includes(
+                              'springerstaffel'
+                            ) || hallGameMode === 'springerstaffel'
                               ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.5)]'
                               : 'bg-slate-800 hover:bg-slate-700 text-amber-200 border-amber-400/60'
                           }`}
                         >
-                          {hallGameMode === 'springerstaffel'
+                          {(adminSettings.activeHallModes || []).includes(
+                            'springerstaffel'
+                          ) || hallGameMode === 'springerstaffel'
                             ? '⏹️ Springer-Staffel-Show stoppen (AN)'
                             : '▶️ Springer-Staffel-Show starten'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 2. VIER PRÄZISE KI- & BAHN-SCHIEBEREGLER (KI-Anzahl 0-30 + Außen-, Mittel-, Innenbahn-Tempo) */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-400/60 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-xs font-bold text-cyan-300 uppercase">
+                          🎚️ KI-Anzahl (0–30) &amp; Spur-Geschwindigkeiten (Live-Sync):
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAdminSettings((s) => {
+                                const next = { ...s, aiSkaterCount: 0 };
+                                saveAdminSettings(next);
+                                return next;
+                              })
+                            }
+                            className="px-2 py-0.5 rounded bg-rose-950 hover:bg-rose-900 border border-rose-400/70 text-rose-200 font-mono text-[10px] font-bold cursor-pointer"
+                          >
+                            0 KIs (Teambesprechung)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAdminSettings((s) => {
+                                const next = {
+                                  ...s,
+                                  aiSkaterCount: 22,
+                                  outerLaneSpeedPct: 100,
+                                  middleLaneSpeedPct: 100,
+                                  innerLaneSpeedPct: 100,
+                                };
+                                saveAdminSettings(next);
+                                return next;
+                              })
+                            }
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-cyan-200 font-mono text-[10px] font-bold cursor-pointer"
+                          >
+                            ↺ Standard (22 KIs / 100%)
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 font-mono text-xs">
+                        {/* Regler 1: KI-Anzahl (0 bis 30) */}
+                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-amber-200 font-bold">
+                              🤖 KI-Anzahl (0–30):
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-amber-400/20 border border-amber-300 text-amber-200 text-[11px] font-black">
+                              {adminSettings.aiSkaterCount ?? 22} KIs
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={30}
+                            step={1}
+                            value={adminSettings.aiSkaterCount ?? 22}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setAdminSettings((s) => {
+                                const next = { ...s, aiSkaterCount: val };
+                                saveAdminSettings(next);
+                                return next;
+                              });
+                            }}
+                            className="w-full accent-amber-400 cursor-pointer"
+                          />
+                          <div className="text-[9.5px] text-slate-400">
+                            0 = Alle KIs ausgeblendet
+                          </div>
+                        </div>
+
+                        {/* Regler 2: Außenbahn Tempo */}
+                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-cyan-200 font-bold">
+                              🚀 Außenbahn-Tempo:
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-cyan-400/20 border border-cyan-300 text-cyan-200 text-[11px] font-black">
+                              {adminSettings.outerLaneSpeedPct ?? 100}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={50}
+                            max={160}
+                            step={5}
+                            value={adminSettings.outerLaneSpeedPct ?? 100}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setAdminSettings((s) => {
+                                const next = { ...s, outerLaneSpeedPct: val };
+                                saveAdminSettings(next);
+                                return next;
+                              });
+                            }}
+                            className="w-full accent-cyan-400 cursor-pointer"
+                          />
+                          <div className="text-[9.5px] text-slate-400">
+                            Schnellspur außen (50–160%)
+                          </div>
+                        </div>
+
+                        {/* Regler 3: Mittelbahn Tempo */}
+                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-fuchsia-200 font-bold">
+                              ⚡ Mittelbahn-Tempo:
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-fuchsia-400/20 border border-fuchsia-300 text-fuchsia-200 text-[11px] font-black">
+                              {adminSettings.middleLaneSpeedPct ?? 100}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={50}
+                            max={160}
+                            step={5}
+                            value={adminSettings.middleLaneSpeedPct ?? 100}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setAdminSettings((s) => {
+                                const next = { ...s, middleLaneSpeedPct: val };
+                                saveAdminSettings(next);
+                                return next;
+                              });
+                            }}
+                            className="w-full accent-fuchsia-400 cursor-pointer"
+                          />
+                          <div className="text-[9.5px] text-slate-400">
+                            Cruise-Spur Mitte (50–160%)
+                          </div>
+                        </div>
+
+                        {/* Regler 4: Innenbahn Tempo */}
+                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-emerald-200 font-bold">
+                              🌀 Innenbahn-Tempo:
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-400/20 border border-emerald-300 text-emerald-200 text-[11px] font-black">
+                              {adminSettings.innerLaneSpeedPct ?? 100}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={50}
+                            max={160}
+                            step={5}
+                            value={adminSettings.innerLaneSpeedPct ?? 100}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setAdminSettings((s) => {
+                                const next = { ...s, innerLaneSpeedPct: val };
+                                saveAdminSettings(next);
+                                return next;
+                              });
+                            }}
+                            className="w-full accent-emerald-400 cursor-pointer"
+                          />
+                          <div className="text-[9.5px] text-slate-400">
+                            Innere Spur (50–160%)
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 3. COCKPIT-SCHALTER FÜR SPIELAUTOMATEN, KRANKENSCHWESTER & PUNKTESYSTEM */}
+                    <div className="p-3 rounded-xl bg-slate-950/90 border border-fuchsia-400/60 space-y-2">
+                      <div className="font-mono text-xs font-bold text-fuchsia-300 uppercase">
+                        🕹️ Hallen-Elemente &amp; Punktesystem (Echtzeit-Schalter):
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const next = {
+                                ...s,
+                                arcadeMachinesEnabled: !(
+                                  s.arcadeMachinesEnabled !== false
+                                ),
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            })
+                          }
+                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            adminSettings.arcadeMachinesEnabled !== false
+                              ? 'bg-emerald-400 text-slate-950 border-white shadow-[0_0_12px_rgba(16,185,129,0.45)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          🕹️ Spielautomaten in der Halle:{' '}
+                          {adminSettings.arcadeMachinesEnabled !== false
+                            ? 'AN'
+                            : 'AUS'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const next = {
+                                ...s,
+                                nurseEnabled: !(s.nurseEnabled !== false),
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            })
+                          }
+                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            adminSettings.nurseEnabled !== false
+                              ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_12px_rgba(34,211,238,0.45)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          🩺 Krankenschwester / Sanitäterin:{' '}
+                          {adminSettings.nurseEnabled !== false ? 'AN' : 'AUS'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const next = {
+                                ...s,
+                                pointsSystemEnabled: !(
+                                  s.pointsSystemEnabled !== false
+                                ),
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            })
+                          }
+                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                            adminSettings.pointsSystemEnabled !== false
+                              ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.45)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          🏆 Punktesystem:{' '}
+                          {adminSettings.pointsSystemEnabled !== false
+                            ? 'AN'
+                            : 'AUS'}
                         </button>
                       </div>
                     </div>
@@ -13141,7 +14115,7 @@ export function App() {
                               if (!nameClean || !chanClean) return;
                               const tickerClean = newGuestDjTicker.trim()
                                 ? newGuestDjTicker.trim()
-                                : `+++ ON AIR: ${nameClean.toUpperCase()} +++ KLECKNIX TWIN-DECKS +++ LIVE IM PALLADIUM HANAU +++`;
+                                : `+++ ON AIR: ${nameClean.toUpperCase()} +++ KLECKNIX TWIN-DECKS +++ LIVE IM PALLADIUM 86 +++`;
                               const newPreset: GuestDjPreset = {
                                 id: `guest_dj_${Date.now()}`,
                                 name: nameClean,
@@ -13305,6 +14279,33 @@ export function App() {
                           }))
                         }
                         className="w-full px-2 py-1 rounded bg-slate-950 border border-slate-700 text-[11px] font-mono text-amber-300"
+                      />
+                    </div>
+
+                    {/* Editierbare Event- / Gast-DJ-Ankündigung auch direkt in Tab 2 bei den DJ-Controls */}
+                    <div className="pt-1">
+                      <label className="block font-mono text-[10px] text-amber-300 font-bold mb-0.5">
+                        📢 Event- / Gast-DJ-Ankündigung (Willkommens-Modal &amp; Live-Sync):
+                      </label>
+                      <input
+                        type="text"
+                        value={
+                          adminSettings.eventAnnouncementText ??
+                          '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!'
+                        }
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setAdminSettings((s) => {
+                            const next = {
+                              ...s,
+                              eventAnnouncementText: val,
+                            };
+                            saveAdminSettings(next);
+                            return next;
+                          });
+                        }}
+                        placeholder="Heute mit Gast-DJ ... • Einlass startet um 19:00 Uhr"
+                        className="w-full px-2 py-1 rounded bg-slate-950 border border-amber-400/60 text-[11px] font-mono text-amber-200"
                       />
                     </div>
                   </div>
@@ -13490,7 +14491,7 @@ export function App() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => handleOpenHostRoom('palladium-hanau-89')}
+                          onClick={() => handleOpenHostRoom('palladium-86-online')}
                           className="min-h-[34px] flex-1 py-1 px-2.5 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-[11px] cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.4)]"
                         >
                           🚀 Multiplayer-Raum öffnen
@@ -14944,7 +15945,7 @@ export function App() {
                                   newCrewName.trim() || 'Palladium-Crew';
                                 const cleanQuote =
                                   newCrewQuote.trim() ||
-                                  'Willkommen im Palladium Hanau ’86!';
+                                  'Willkommen im Palladium 86!';
                                 const preset =
                                   CUSTOM_CREW_SPAWN_PRESETS[newCrewSpawnSpot] ||
                                   CUSTOM_CREW_SPAWN_PRESETS.eingang;
@@ -15351,7 +16352,7 @@ export function App() {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <span className="font-mono text-[11px] font-bold uppercase text-amber-300">
-                            📰 13. 80er-Retro-Hallenzeitung („Der Palladium-Kurier – Hanau ’86“)
+                            📰 13. 80er-Retro-Hallenzeitung („Der Palladium-Kurier – Palladium 86“)
                           </span>
                           <p className="text-[10px] font-mono text-slate-400">
                             Zeitungsständer vorne am Eingang/Empfang • „Zeitung aktualisieren &amp; veröffentlichen“ erhöht die Ausgaben-ID, speichert in Supabase/LocalStorage &amp; aktiviert das „NEU!“-Badge:
@@ -15547,7 +16548,7 @@ export function App() {
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono text-[10px]">
                         <div className="space-y-1">
                           <label className="block text-amber-200 font-bold">
-                            Hauptschlagzeile („PALLADIUM KURIER – HANAU ’86“):
+                            Hauptschlagzeile („PALLADIUM KURIER – PALLADIUM 86“):
                           </label>
                           <input
                             type="text"
@@ -15576,7 +16577,7 @@ export function App() {
                             maxLength={1200}
                             value={
                               adminSettings.newspaperBody ??
-                              'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'
+                              'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'
                             }
                             onChange={(e) =>
                               setAdminSettings((s) => ({
@@ -16610,6 +17611,274 @@ export function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* ============================================================= */}
+                  {/* 🟢 TAB 6: LAMPEN & DIAGNOSE (LIVE-STATUS-ÜBERSICHT & DIREKT-TOGGLES) */}
+                  {/* ============================================================= */}
+                  {adminTab === 'diagnose' && (
+                    <div className="pt-2.5 border-t border-slate-800/90 space-y-3 font-mono text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h3 className="font-bold text-sm uppercase text-emerald-300">
+                            🟢 LIVE-STATUS-ÜBERSICHT (LAMPEN- &amp; DIAGNOSE-COCKPIT • {APP_VERSION_LABEL})
+                          </h3>
+                          <p className="text-[10.5px] text-slate-400">
+                            Alle aktiven Hallen-Modi, KI-Parameter, Schalter und Ankündigungen auf einen Blick – klicke direkt auf eine Status-Lampe zum Umschalten!
+                          </p>
+                        </div>
+                        <span className="px-2.5 py-1 rounded-full bg-emerald-950 border border-emerald-400 text-emerald-200 text-[10.5px] font-bold">
+                          {isPrivateRoom && mpRoomId
+                            ? `🔒 Privat-Raum Sync (${mpRoomId})`
+                            : '🌐 24/7 Echtzeit-Sync aktiv'}
+                        </span>
+                      </div>
+
+                      {/* 1. Klickbare Status-Lampen für Hallen-Modi & Shows */}
+                      <div className="p-3 rounded-xl bg-slate-950/90 border border-fuchsia-400/50 space-y-2">
+                        <div className="text-xs font-bold text-fuchsia-300 uppercase">
+                          🎪 Aktive Hallen-Modi &amp; Shows (Mehrfach-Auswahl per Klick):
+                        </div>
+                        {(() => {
+                          const currentModes =
+                            adminSettings.activeHallModes ??
+                            (hallGameMode !== 'free-skate'
+                              ? [hallGameMode]
+                              : []);
+                          const toggleLampMode = (
+                            m:
+                              | 'ballspiel'
+                              | 'slalom'
+                              | 'stuhlsprung'
+                              | 'springerstaffel'
+                          ) => {
+                            const isOn = currentModes.includes(m);
+                            const nextModes = isOn
+                              ? currentModes.filter((x) => x !== m)
+                              : [...currentModes, m];
+                            setAdminSettings((s) => {
+                              const next = {
+                                ...s,
+                                activeHallModes: nextModes,
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            });
+                            setHallGameMode(
+                              nextModes.length > 0 ? nextModes[0] : 'free-skate'
+                            );
+                            if (m === 'springerstaffel') {
+                              setSpringerStaffelShowSec(isOn ? 0 : 120);
+                            }
+                          };
+                          return (
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                              {(
+                                [
+                                  {
+                                    id: 'ballspiel' as const,
+                                    label: '🟠 Ballspiel',
+                                  },
+                                  { id: 'slalom' as const, label: '🚧 Slalom' },
+                                  {
+                                    id: 'stuhlsprung' as const,
+                                    label: '🪑 Hochsprung',
+                                  },
+                                  {
+                                    id: 'springerstaffel' as const,
+                                    label: '🤸‍♂️ Springer-Staffel (max. 4 Guards)',
+                                  },
+                                ] as const
+                              ).map((item) => {
+                                const isOn = currentModes.includes(item.id);
+                                return (
+                                  <button
+                                    key={item.id}
+                                    type="button"
+                                    onClick={() => toggleLampMode(item.id)}
+                                    className={`p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 cursor-pointer transition ${
+                                      isOn
+                                        ? 'bg-emerald-950/90 border-emerald-400 text-emerald-100 shadow-[0_0_14px_rgba(16,185,129,0.35)]'
+                                        : 'bg-slate-900/90 border-slate-700 text-slate-400 hover:border-slate-500'
+                                    }`}
+                                  >
+                                    <span className="font-bold text-xs">
+                                      {item.label}
+                                    </span>
+                                    <span className="flex items-center gap-1.5 shrink-0 font-black text-[10.5px]">
+                                      <span
+                                        className={`w-3 h-3 rounded-full border ${
+                                          isOn
+                                            ? 'bg-emerald-400 border-white shadow-[0_0_8px_#34d399]'
+                                            : 'bg-slate-600 border-slate-400'
+                                        }`}
+                                      />
+                                      {isOn ? 'AN' : 'AUS'}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      {/* 2. Klickbare Status-Lampen für Spielautomaten, Krankenschwester, Punktesystem & Personal */}
+                      <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-400/50 space-y-2">
+                        <div className="text-xs font-bold text-cyan-300 uppercase">
+                          🕹️ System- &amp; Hallen-Lampen (Direkt umschaltbar):
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          {(
+                            [
+                              {
+                                key: 'arcadeMachinesEnabled' as const,
+                                label: '🕹️ Spielautomaten in der Halle',
+                                isOn:
+                                  adminSettings.arcadeMachinesEnabled !== false,
+                              },
+                              {
+                                key: 'nurseEnabled' as const,
+                                label: '🩺 Krankenschwester / Sanitäterin',
+                                isOn: adminSettings.nurseEnabled !== false,
+                              },
+                              {
+                                key: 'pointsSystemEnabled' as const,
+                                label: '🏆 Punktesystem (XP & Popups)',
+                                isOn:
+                                  adminSettings.pointsSystemEnabled !== false,
+                              },
+                              {
+                                key: 'cleaningLadyEnabled' as const,
+                                label: '🧹 Putzfrau auf der Bahn',
+                                isOn:
+                                  adminSettings.cleaningLadyEnabled !== false,
+                              },
+                              {
+                                key: 'waitressEnabled' as const,
+                                label: '🛼 Kellnerin (Bistro-Service)',
+                                isOn: adminSettings.waitressEnabled !== false,
+                              },
+                              {
+                                key: 'oldBarackEnabled' as const,
+                                label: '👴 „Der alte Barack“',
+                                isOn: adminSettings.oldBarackEnabled !== false,
+                              },
+                            ] as const
+                          ).map((lamp) => (
+                            <button
+                              key={lamp.key}
+                              type="button"
+                              onClick={() =>
+                                setAdminSettings((s) => {
+                                  const next = {
+                                    ...s,
+                                    [lamp.key]: !lamp.isOn,
+                                  };
+                                  saveAdminSettings(next);
+                                  return next;
+                                })
+                              }
+                              className={`p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 cursor-pointer transition ${
+                                lamp.isOn
+                                  ? 'bg-emerald-950/90 border-emerald-400 text-emerald-100 shadow-[0_0_14px_rgba(16,185,129,0.3)]'
+                                  : 'bg-slate-900/90 border-slate-700 text-slate-400 hover:border-slate-500'
+                              }`}
+                            >
+                              <span className="font-bold text-xs">
+                                {lamp.label}
+                              </span>
+                              <span className="flex items-center gap-1.5 shrink-0 font-black text-[10.5px]">
+                                <span
+                                  className={`w-3 h-3 rounded-full border ${
+                                    lamp.isOn
+                                      ? 'bg-emerald-400 border-white shadow-[0_0_8px_#34d399]'
+                                      : 'bg-slate-600 border-slate-400'
+                                  }`}
+                                />
+                                {lamp.isOn ? 'AN' : 'AUS'}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* 3. Live-Diagnose der aktiven KI-Anzahl + Bahngeschwindigkeiten */}
+                      <div className="p-3 rounded-xl bg-slate-950/90 border border-amber-400/50 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-amber-300 uppercase">
+                            🤖 Aktive KI-Anzahl &amp; Spur-Geschwindigkeiten:
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            {[0, 10, 22, 30].map((cnt) => (
+                              <button
+                                key={cnt}
+                                type="button"
+                                onClick={() =>
+                                  setAdminSettings((s) => {
+                                    const next = { ...s, aiSkaterCount: cnt };
+                                    saveAdminSettings(next);
+                                    return next;
+                                  })
+                                }
+                                className={`px-2 py-0.5 rounded font-bold text-[10px] border cursor-pointer ${
+                                  (adminSettings.aiSkaterCount ?? 22) === cnt
+                                    ? 'bg-amber-400 text-slate-950 border-white'
+                                    : 'bg-slate-900 text-slate-300 border-slate-700'
+                                }`}
+                              >
+                                {cnt} KIs
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                          <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-between">
+                            <span className="text-slate-300">🤖 Aktive KIs:</span>
+                            <span className="font-black text-amber-300">
+                              {adminSettings.aiSkaterCount ?? 22} / 30
+                            </span>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-between">
+                            <span className="text-slate-300">🚀 Außenbahn:</span>
+                            <span className="font-black text-cyan-300">
+                              {adminSettings.outerLaneSpeedPct ?? 100}%
+                            </span>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-between">
+                            <span className="text-slate-300">⚡ Mittelbahn:</span>
+                            <span className="font-black text-fuchsia-300">
+                              {adminSettings.middleLaneSpeedPct ?? 100}%
+                            </span>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-between">
+                            <span className="text-slate-300">🌀 Innenbahn:</span>
+                            <span className="font-black text-emerald-300">
+                              {adminSettings.innerLaneSpeedPct ?? 100}%
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 4. Vorschau & Direkt-Bearbeitung der aktuellen Event- / Gast-DJ-Ankündigung */}
+                      <div className="p-3 rounded-xl bg-slate-950/90 border border-emerald-400/60 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-emerald-300 uppercase">
+                            📢 Live-Vorschau: Aktuelle Event- / Gast-DJ-Ankündigung
+                          </span>
+                          <span className="text-[10px] text-emerald-300 font-bold">
+                            🟢 Aktiv auf Startseite &amp; im Willkommens-Modal
+                          </span>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-gradient-to-r from-cyan-950/90 via-fuchsia-950/90 to-amber-950/90 border border-amber-400/70 text-amber-200 font-bold text-xs">
+                          📢{' '}
+                          {(
+                            adminSettings.eventAnnouncementText ??
+                            '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!'
+                          ).trim() || '— Keine Ankündigung eingetragen —'}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -16619,20 +17888,35 @@ export function App() {
         {/* ===================================================================== */}
         {/* 9. 80s MULTIPLAYER INVITATION WELCOME MODAL (?room=<RAUM_ID>)         */}
         {/* ===================================================================== */}
-        {showGuestJoinModal && initialUrlRoomId && (
+        {showGuestJoinModal && (mpRoomId || initialUrlRoomId) && (
           <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/85 p-4 overflow-y-auto backdrop-blur-md">
             <div className="w-full max-w-lg rounded-2xl bg-[#120D20] border-2 border-cyan-400 shadow-[0_0_55px_rgba(0,240,255,0.45)] p-5 text-white space-y-4">
-              <div className="text-center space-y-1">
+              <div className="text-center space-y-1.5">
                 <span className="inline-block px-2.5 py-0.5 rounded-full bg-cyan-950 border border-cyan-400/60 font-mono text-[10px] text-cyan-300 uppercase">
-                  🌐 Live-Einladung • Raum: {initialUrlRoomId} • {APP_VERSION_LABEL}
+                  {isPrivateRoom ? '🔒 PRIVAT-RAUM' : '🌐 LIVE-EINLADUNG'} • RAUM:{' '}
+                  {(mpRoomId || initialUrlRoomId || 'PALLADIUM-86-ONLINE').toUpperCase()} • ALPHA-TEST • {APP_VERSION_LABEL}
                 </span>
-                <h2 className="font-display font-black text-lg text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-amber-200 to-fuchsia-400">
-                  Willkommen im Palladium Hanau!
+                <h2 className="font-display font-black text-xl text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-amber-200 to-fuchsia-400">
+                  Willkommen zum Alpha-Test im Palladium 86!
                 </h2>
                 <p className="text-xs text-slate-300">
-                  Du betrittst die echte 24/7-Multiplayer-Bahn – rolle live mit
-                  deinen Freunden zur 80er-Show!
+                  {isPrivateRoom
+                    ? `Du betrittst den geschlossenen Privat-Raum „${(
+                        mpRoomId ||
+                        initialUrlRoomId ||
+                        ''
+                      ).toUpperCase()}“ im Palladium 86 Online!`
+                    : 'Du betrittst die echte 24/7-Multiplayer-Rollschuhbahn im Palladium 86 Online – rolle live mit deinen Freunden zur 80er-Show!'}
                 </p>
+                {(adminSettings.eventAnnouncementText ??
+                  '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!')
+                  .trim() && (
+                  <div className="mt-2 px-3 py-2 rounded-xl bg-gradient-to-r from-cyan-950/90 via-fuchsia-950/90 to-amber-950/90 border border-amber-400/80 font-mono text-xs font-bold text-amber-200 shadow-[0_0_16px_rgba(251,191,36,0.3)]">
+                    📢{' '}
+                    {adminSettings.eventAnnouncementText ??
+                      '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!'}
+                  </div>
+                )}
               </div>
 
               <div className="space-y-3">
@@ -16655,7 +17939,7 @@ export function App() {
                         mpStatus !== 'connecting'
                       ) {
                         handleConnectAsGuest(
-                          initialUrlRoomId,
+                          mpRoomId || initialUrlRoomId || 'PALLADIUM-86-ONLINE',
                           guestJoinNameInput,
                           playerShirtColor
                         );
@@ -16780,13 +18064,23 @@ export function App() {
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="button"
+                  onClick={() => {
+                    setShowGuestJoinModal(false);
+                    setShowPortalScreen(true);
+                  }}
+                  className="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 font-mono text-xs font-bold cursor-pointer"
+                >
+                  🏠 Modus-Auswahl
+                </button>
+                <button
+                  type="button"
                   disabled={
                     guestJoinNameInput.trim().length < 2 ||
                     mpStatus === 'connecting'
                   }
                   onClick={() =>
                     handleConnectAsGuest(
-                      initialUrlRoomId,
+                      mpRoomId || initialUrlRoomId || 'PALLADIUM-86-ONLINE',
                       guestJoinNameInput,
                       playerShirtColor
                     )
@@ -16816,7 +18110,7 @@ export function App() {
               <div className="flex items-center justify-between border-b border-slate-700 pb-3">
                 <div>
                   <span className="font-mono text-xs text-amber-300 uppercase">
-                    Palladium Hanau Treuepass • Gespeichert im localStorage
+                    Palladium 86 Treuepass • Gespeichert im localStorage
                   </span>
                   <h2 className="font-display font-black text-2xl text-white">
                     🎫 DIGITALE 10er-STEMPELKARTE ({stampCard.stamps} / 10)
@@ -17914,7 +19208,7 @@ export function App() {
                   defaultCrewName: customMember?.crewName || 'Palladium-Crew',
                   defaultQuote:
                     customMember?.quote ||
-                    'Willkommen im Palladium Hanau ’86!',
+                    'Willkommen im Palladium 86!',
                   crewKey: 'cashier' as const,
                 };
             const crewName = isStandardStation
@@ -18563,7 +19857,7 @@ export function App() {
           })()}
 
         {/* ===================================================================== */}
-        {/* 12B. 🪪 GRAUER 80ER-PAPIERFÜHRERSCHEIN ("PALLADIUM HANAU ’86")         */}
+        {/* 12B. 🪪 GRAUER 80ER-PAPIERFÜHRERSCHEIN ("PALLADIUM 86")                */}
         {/* ===================================================================== */}
         {showExplorerCertificateModal && (
           <PaperDriverLicenseModal
@@ -18577,7 +19871,7 @@ export function App() {
             hallPointsXp={totalEarnedPoints}
             collectedPixels={playerPixels}
             createdAtText={explorerCreatedAt}
-            licenseNumber={`HU-86-${cloudPlayerId
+            licenseNumber={`P86-${cloudPlayerId
               .replace(/[^a-zA-Z0-9]/g, '')
               .slice(-6)
               .toUpperCase()}`}
@@ -18605,7 +19899,7 @@ export function App() {
         )}
 
         {/* ===================================================================== */}
-        {/* 12C. 📰 80ER-RETRO-ZEITUNGS-MODAL ("PALLADIUM KURIER – HANAU ’86")     */}
+        {/* 12C. 📰 80ER-RETRO-ZEITUNGS-MODAL ("PALLADIUM KURIER – PALLADIUM 86")  */}
         {/* ===================================================================== */}
         {showNewspaperModal && (
           <div
@@ -18638,12 +19932,12 @@ export function App() {
                     ★ OFFIZIELLES HALLENBLATT ★
                   </span>
                   <span>
-                    STAND: {adminSettings.newspaperUpdatedAt || '15.11.2026'}
+                    STAND: {adminSettings.newspaperUpdatedAt || '18.11.2026'}
                   </span>
                 </div>
 
                 <h2 className="font-display font-black text-2xl sm:text-4xl tracking-wider uppercase text-[#1a1109]">
-                  PALLADIUM KURIER – HANAU ’86
+                  PALLADIUM KURIER – PALLADIUM 86
                 </h2>
                 <div className="text-[11px] font-mono font-bold uppercase tracking-widest text-[#6b4c2b] mt-0.5">
                   Die unabhängige Rollschuh-, Musik- &amp; Update-Zeitung auf acht Rollen • {APP_VERSION_LABEL}
@@ -18670,7 +19964,7 @@ export function App() {
                   </div>
                   <div className="whitespace-pre-line text-justify first-letter:text-3xl first-letter:font-black first-letter:float-left first-letter:mr-2 first-letter:leading-none first-letter:text-rose-900">
                     {adminSettings.newspaperBody ||
-                      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'}
+                      'Willkommen im Palladium 86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'}
                   </div>
                 </div>
 
@@ -18725,9 +20019,10 @@ export function App() {
               <div className="mt-3 pt-2.5 border-t-2 border-[#2b1d10] flex flex-wrap items-center justify-between gap-2 font-mono text-[10.5px] text-[#4a3520]">
                 <div className="space-y-0.5">
                   <div className="font-bold text-[#2b1d10]">
-                    DRUCK &amp; VERLAG: PALLADIUM ROLLER DISCO HANAU • www.palladium86.de •{' '}
+                    DRUCK &amp; VERLAG: PALLADIUM 86 ONLINE • www.palladium86.de •{' '}
                     {adminSettings.newspaperContactEmail ||
-                      'info@palladium86.de'}
+                      'info@palladium86.de'}{' '}
+                    • {APP_VERSION_LABEL}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -18766,7 +20061,7 @@ export function App() {
               <div className="flex items-center justify-between border-b-2 border-cyan-500/40 pb-3">
                 <div>
                   <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">
-                    ★ PALLADIUM HANAU 1986 • 80ER-ARCADE-BESTENLISTE ★
+                    ★ PALLADIUM 86 • 80ER-ARCADE-BESTENLISTE ★
                   </div>
                   <h2 className="font-display font-black text-xl sm:text-2xl text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-cyan-300 to-fuchsia-300">
                     🏆 HALLEN-EHRENTAFEL (TOP 10)
@@ -18974,6 +20269,280 @@ export function App() {
         {initialControllerRoomId && (
           <SmartphoneTouchGamepadOverlay targetRoomId={initialControllerRoomId} />
         )}
+
+        {/* ===================================================================== */}
+        {/* 14. 🌟 GEMEINSAME START-/PORTAL-SEITE (HAUPTEINGANG PALLADIUM 86)     */}
+        {/* ===================================================================== */}
+        {showPortalScreen && !initialControllerRoomId && (
+          <div className="fixed inset-0 z-[85] flex items-center justify-center bg-gradient-to-b from-[#16051E]/98 via-[#0A0716]/98 to-[#05040B]/98 p-4 overflow-y-auto backdrop-blur-md">
+            <div className="relative w-full max-w-5xl rounded-3xl bg-[#110C1F] border-2 border-fuchsia-500/80 shadow-[0_0_90px_rgba(232,121,249,0.4)] p-5 sm:p-8 text-[#FFF8E7] space-y-6 my-auto">
+              {/* Header: WILLKOMMEN ZUM ALPHA-TEST + Titel + Live Event-/DJ-Ankündigung */}
+              <div className="text-center space-y-2 border-b border-fuchsia-500/30 pb-5">
+                <div className="inline-flex flex-wrap items-center justify-center gap-2 px-4 py-1 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/60 font-mono text-xs text-fuchsia-200">
+                  <span className="font-black text-amber-300">
+                    🚀 WILLKOMMEN ZUM ALPHA-TEST
+                  </span>
+                  <span>•</span>
+                  <span>PALLADIUM ONLINE • {APP_VERSION_LABEL}</span>
+                </div>
+
+                <h1 className="font-display font-black text-3xl sm:text-5xl tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 via-amber-200 to-cyan-300 drop-shadow-[0_0_24px_rgba(232,121,249,0.55)]">
+                  ✦ PALLADIUM 86 ✦ – ONLINE-ROLLSCHUHBAHN
+                </h1>
+
+                <p className="font-mono text-xs sm:text-sm text-amber-100/85 max-w-2xl mx-auto">
+                  Wähle deinen Eingang in unsere 80er-Jahre Roller Disco: Rolle live in die öffentliche 24/7-Halle, trainiere solo oder eröffne einen geschlossenen Privat-Raum!
+                </p>
+
+                {(adminSettings.eventAnnouncementText ??
+                  '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!')
+                  .trim() && (
+                  <div className="mt-3 mx-auto max-w-3xl px-4 py-2.5 rounded-2xl bg-gradient-to-r from-cyan-950/95 via-fuchsia-950/95 to-amber-950/95 border-2 border-cyan-400/80 shadow-[0_0_28px_rgba(34,211,238,0.4)] font-mono text-xs sm:text-sm font-black text-amber-200 flex items-center justify-center gap-2">
+                    <span className="text-base shrink-0">📢</span>
+                    <span>
+                      {adminSettings.eventAnnouncementText ??
+                        '🎧 Heute Live-Party auf 8 Rollen • Gast-DJ & 80er-Show ab 19:00 Uhr!'}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Drei Auswahlkarten nebeneinander (auf Smartphones untereinander) */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+                {/* KARTE 1: LIVE-MULTIPLAYER (24/7 HALLE) */}
+                <div className="p-5 rounded-2xl bg-gradient-to-b from-cyan-950/75 via-slate-950/95 to-slate-950 border-2 border-cyan-400/80 shadow-[0_0_30px_rgba(34,211,238,0.25)] flex flex-col justify-between space-y-4">
+                  <div className="space-y-2">
+                    <div className="inline-block px-2.5 py-0.5 rounded-full bg-cyan-500/20 border border-cyan-400/60 font-mono text-[10px] font-black text-cyan-300 uppercase">
+                      ÖFFENTLICHE HAUPTHALLE • PALLADIUM-86-ONLINE
+                    </div>
+                    <h2 className="font-display font-black text-xl text-cyan-300">
+                      🌐 LIVE-MULTIPLAYER (24/7 HALLE)
+                    </h2>
+                    <p className="font-mono text-xs text-slate-200 leading-relaxed">
+                      Rolle live mit deinen Freunden zur 80er-Show, chatte in der Arena und erlebe Live-Events &amp; DJ-Sets.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFX.unlockAudioContext();
+                      const publicRoom = 'PALLADIUM-86-ONLINE';
+                      setMpRoomId(publicRoom);
+                      setShowPortalScreen(false);
+                      if (typeof window !== 'undefined') {
+                        const url = new URL(window.location.href);
+                        url.searchParams.set('room', publicRoom);
+                        window.history.replaceState({}, '', url.toString());
+                      }
+                      if (
+                        (playerName || '').trim().length >= 2 &&
+                        mobilityChoice
+                      ) {
+                        setIsCurtainOpen(true);
+                        setShowChronicleModal(false);
+                        setShowGuestJoinModal(false);
+                        handleConnectAsGuest(
+                          publicRoom,
+                          playerName.trim(),
+                          playerShirtColor || '#00f0ff'
+                        );
+                      } else {
+                        setGuestJoinNameInput((playerName || '').trim());
+                        setShowGuestJoinModal(true);
+                      }
+                    }}
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-400 via-emerald-400 to-amber-300 hover:brightness-110 text-slate-950 font-mono font-black text-xs sm:text-sm border border-white shadow-[0_0_20px_rgba(34,211,238,0.5)] cursor-pointer transition"
+                  >
+                    🌐 24/7 Multiplayer-Halle betreten
+                  </button>
+                </div>
+
+                {/* KARTE 2: SINGLEPLAYER (SOLO-BAHN) */}
+                <div className="p-5 rounded-2xl bg-gradient-to-b from-fuchsia-950/75 via-slate-950/95 to-slate-950 border-2 border-fuchsia-400/80 shadow-[0_0_30px_rgba(232,121,249,0.25)] flex flex-col justify-between space-y-4">
+                  <div className="space-y-2">
+                    <div className="inline-block px-2.5 py-0.5 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/60 font-mono text-[10px] font-black text-fuchsia-300 uppercase">
+                      TRAINING &amp; HIGHSCORES • OFFLINE / SOLO
+                    </div>
+                    <h2 className="font-display font-black text-xl text-fuchsia-300">
+                      🛼 SINGLEPLAYER (SOLO-BAHN)
+                    </h2>
+                    <p className="font-mono text-xs text-slate-200 leading-relaxed">
+                      Trainiere in Ruhe für dich, fahre mit deinen Wunsch-KIs, knalle Highscores raus und übe deine Sprünge.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFX.unlockAudioContext();
+                      cleanupPeerSession();
+                      setMpRole('solo');
+                      setMpRoomId(null);
+                      setMpStatus('idle');
+                      setShowGuestJoinModal(false);
+                      setShowPortalScreen(false);
+                      if (typeof window !== 'undefined') {
+                        const url = new URL(window.location.href);
+                        url.searchParams.delete('room');
+                        window.history.replaceState({}, '', url.toString());
+                      }
+                    }}
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-fuchsia-500 via-pink-500 to-amber-400 hover:brightness-110 text-white font-mono font-black text-xs sm:text-sm border border-white shadow-[0_0_20px_rgba(232,121,249,0.5)] cursor-pointer transition"
+                  >
+                    🛼 Solo-Bahn starten
+                  </button>
+                </div>
+
+                {/* KARTE 3: PRIVATEN RAUM ERSTELLEN (TEAM / VIP) */}
+                <div className="p-5 rounded-2xl bg-gradient-to-b from-amber-950/75 via-slate-950/95 to-slate-950 border-2 border-amber-400/80 shadow-[0_0_30px_rgba(251,191,36,0.25)] flex flex-col justify-between space-y-4">
+                  <div className="space-y-2">
+                    <div className="inline-block px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 font-mono text-[10px] font-black text-amber-300 uppercase">
+                      GESCHLOSSENE INSTANZ • ?room=...
+                    </div>
+                    <h2 className="font-display font-black text-xl text-amber-300">
+                      🔒 PRIVATEN RAUM ERSTELLEN (TEAM / VIP)
+                    </h2>
+                    <p className="font-mono text-xs text-slate-200 leading-relaxed">
+                      Erstellt einen geschlossenen Raum mit eigenem Einladungslink (eigener Chat, eigene Spielerliste &amp; eigene KI-/Cockpit-Einstellungen).
+                    </p>
+                    <div className="pt-1 space-y-1.5">
+                      <label className="block font-mono text-[10.5px] text-amber-200 font-bold">
+                        Wunschname oder Zufallscode:
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          maxLength={24}
+                          value={privateRoomCodeInput}
+                          onChange={(e) =>
+                            setPrivateRoomCodeInput(
+                              e.target.value
+                                .toUpperCase()
+                                .replace(/[^A-Z0-9-_]/g, '')
+                            )
+                          }
+                          placeholder="z.B. TEAM-8642"
+                          className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-amber-400/60 font-mono text-xs text-amber-200 font-bold focus:outline-none focus:border-cyan-400"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPrivateRoomCodeInput(
+                              `TEAM-${Math.floor(1000 + Math.random() * 9000)}`
+                            )
+                          }
+                          title="Neuen Zufallscode würfeln"
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 font-mono text-xs text-amber-200 cursor-pointer"
+                        >
+                          🎲
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {portalRoomCopiedToast && (
+                      <div className="px-2.5 py-1 rounded-lg bg-emerald-950 border border-emerald-400 text-emerald-200 font-mono text-[10.5px] font-bold text-center">
+                        {portalRoomCopiedToast}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFX.unlockAudioContext();
+                        const cleanCode =
+                          (privateRoomCodeInput || '')
+                            .trim()
+                            .toUpperCase()
+                            .replace(/[^A-Z0-9-_]/g, '') ||
+                          `TEAM-${Math.floor(1000 + Math.random() * 9000)}`;
+                        const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
+                          cleanCode
+                        )}`;
+                        navigator.clipboard?.writeText(inviteUrl).catch(() => {});
+                        if (typeof window !== 'undefined') {
+                          window.history.replaceState({}, '', inviteUrl);
+                        }
+                        setMpRoomId(cleanCode);
+                        setRoomChatMessages([]);
+                        setPortalRoomCopiedToast(
+                          `📋 Link kopiert: ?room=${cleanCode}`
+                        );
+                        setShowPortalScreen(false);
+                        if (
+                          (playerName || '').trim().length >= 2 &&
+                          mobilityChoice
+                        ) {
+                          setIsCurtainOpen(true);
+                          setShowChronicleModal(false);
+                          setShowGuestJoinModal(false);
+                          handleConnectAsGuest(
+                            cleanCode,
+                            playerName.trim(),
+                            playerShirtColor || '#ff2a85'
+                          );
+                        } else {
+                          setGuestJoinNameInput((playerName || '').trim());
+                          setShowGuestJoinModal(true);
+                        }
+                      }}
+                      className="w-full py-3 px-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono font-black text-xs sm:text-sm border border-white shadow-[0_0_20px_rgba(251,191,36,0.5)] cursor-pointer transition"
+                    >
+                      🔒 Privat-Raum starten &amp; Link kopieren
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Unten: Zwei dezente Schnell-Buttons für „📰 Palladium Kurier lesen“ und „⚙️ Admin-Cockpit“ */}
+              <div className="pt-3 border-t border-fuchsia-500/30 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPortalScreen(false);
+                      handleOpenNewspaperModal();
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-amber-400/60 text-amber-200 font-mono text-xs font-bold cursor-pointer transition flex items-center gap-1.5"
+                  >
+                    <span>📰 Palladium Kurier lesen</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPortalScreen(false);
+                      if (isAdminUnlocked && !isTesterAccount) {
+                        setShowAdminTerminal(true);
+                      } else {
+                        setPinInput('');
+                        setPinError(null);
+                        setShowAdminPinModal(true);
+                      }
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-400/60 text-cyan-200 font-mono text-xs font-bold cursor-pointer transition flex items-center gap-1.5"
+                  >
+                    <span>⚙️ Admin-Cockpit</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  {isCurtainOpen && (
+                    <button
+                      type="button"
+                      onClick={() => setShowPortalScreen(false)}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-950 hover:bg-emerald-900 border border-emerald-400/70 text-emerald-200 font-mono text-xs font-bold cursor-pointer transition"
+                    >
+                      ▶️ Zurück in die Halle
+                    </button>
+                  )}
+                  <span className="font-mono text-[11px] text-slate-400">
+                    created by Jürgen Becker (JR) • {APP_VERSION_LABEL}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );
@@ -19177,7 +20746,7 @@ function SmartphoneTouchGamepadOverlay({
       </div>
 
       <div className="text-center font-mono text-[10px] text-slate-400">
-        Palladium Hanau &apos;86 • 80er-Touch-Gamepad • Echtzeit-WebRTC
+        Palladium 86 • 80er-Touch-Gamepad • Echtzeit-WebRTC • {APP_VERSION_LABEL}
       </div>
     </div>
   );

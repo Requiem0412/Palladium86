@@ -1,6 +1,6 @@
 /**
  * Web Audio API 80s Retro Sound Synthesizer, Webradio/Mix-Engine & Smoothed Sound-to-Light Analyser
- * (PALLADIUM HANAU • Alpha v0.2 • Aktualisiert am 13.11.2026)
+ * (PALLADIUM 86 • V0.9-ALPHA • Aktualisiert am 18.11.2026)
  */
 
 import { DjJingleSlot, RadioTrackItem } from '../config/arenaConfig';

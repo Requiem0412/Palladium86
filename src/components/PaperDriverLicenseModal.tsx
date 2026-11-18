@@ -175,7 +175,7 @@ export const PaperDriverLicenseModal: React.FC<
             <h2
               className={`text-lg sm:text-2xl font-extrabold tracking-tight ${t.headerText}`}
             >
-              🪪 ROLLSCHUH-FÜHRERSCHEIN – PALLADIUM HANAU ’86
+              🪪 ROLLSCHUH-FÜHRERSCHEIN – PALLADIUM 86
             </h2>
           </div>
           <div

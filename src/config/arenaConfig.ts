@@ -1,13 +1,17 @@
 /**
- * PALLADIUM ROLLER ARENA HANAU (STAND: Alpha v0.2 • Aktualisiert am 13.11.2026)
+ * PALLADIUM 86 – ONLINE-ROLLSCHUHBAHN (STAND: V0.9-ALPHA • Aktualisiert am 18.11.2026)
  * Zentrale Konfiguration, Konstanten, Upgrades, Challenges & 16:9 Breitbild-Geometrie (1920 x 1080 px)
  */
 
 // ============================================================================
-// 1. EDITIERBARE TOP-LEVEL KONSTANTEN (ADMIN-PIN & GEISTER-SKATER)
+// 1. ZENTRALE VERSIONS- & ZEITSTEMPEL-KONSTANTEN + ADMIN-PIN
 // ============================================================================
 
-export const APP_VERSION_LABEL = 'v3.0.8-FUTURE-EDITION';
+export const APP_VERSION = 'V0.9-ALPHA';
+export const APP_BUILD_DATE_ISO = '2026-11-18';
+export const APP_BUILD_DATETIME = '18.11.2026 11:15';
+export const APP_VERSION_LABEL = `${APP_VERSION} • ${APP_BUILD_DATETIME}`;
+export const APP_ZIP_FILENAME = `palladium86-${APP_VERSION}-${APP_BUILD_DATE_ISO}.zip`;
 
 export const ADMIN_PIN = '1986';
 
@@ -73,7 +77,7 @@ export const LEGACY_DEFAULT_GHOSTS: string[] = [
   'Holger 86',
   'JR (Jürgen Becker)',
   'Palladium-Legende',
-  'Nachtläufer Hanau',
+  'Nachtläufer 86',
 ];
 
 export type StationDialogId =
@@ -129,7 +133,7 @@ export const STATION_DIALOG_DEFAULTS: Record<StationDialogId, StationDialogMeta>
     crewKey: 'cashier',
     defaultCrewName: 'Kassen-Karin',
     defaultQuote:
-      "Willkommen im Palladium Hanau '86! Stempel aufs Handgelenk, Freigetränk-Chip einstecken und ab ins Neon-Licht!",
+      'Willkommen im Palladium 86! Stempel aufs Handgelenk, Freigetränk-Chip einstecken und ab ins Neon-Licht!',
     accentHex: '#fde047',
   },
   verleih: {
@@ -213,7 +217,7 @@ export const DEFAULT_DJ_JINGLE_SLOTS: DjJingleSlot[] = [
   {
     id: 'intro',
     label: '🎙️ Ladies & Gentlemen Intro',
-    bubbleText: '🎙️ LADIES & GENTLEMEN — WILLKOMMEN IM PALLADIUM HANAU!',
+    bubbleText: '🎙️ LADIES & GENTLEMEN — WILLKOMMEN IM PALLADIUM 86!',
     audioUrl: '',
     keyNumber: 1,
     showInHandheld: true,
@@ -332,7 +336,7 @@ export const HALL_ANNOUNCEMENT_PRESETS: HallAnnouncementPreset[] = [
     bannerText:
       '💑 ACHTUNG DURCHSAGE: JETZT BEGINNT DER PAARLAUF! BITTE HAND IN HAND AUF DER GROSSEN ROLLSCHUHBAHN ROLLEN! +++',
     speechText:
-      'Jetzt beginnt der Paarlauf im Palladium Hanau! Schnappt euch euren Partner auf acht Rollen!',
+      'Jetzt beginnt der Paarlauf im Palladium 86! Schnappt euch euren Partner auf acht Rollen!',
     useThreeToneGong: true,
   },
   {
@@ -405,8 +409,8 @@ export const DEFAULT_80S_RADIO_PLAYLIST: RadioTrackItem[] = [
     bpm: 118,
   },
   {
-    id: 'mix_hanau_miami_bass',
-    title: 'Hanau Jam-Floor — 808 Miami Bass & Freestyle',
+    id: 'mix_palladium_miami_bass',
+    title: 'Palladium 86 Jam-Floor — 808 Miami Bass & Freestyle',
     subtitle: 'DJ Magic Force Special • 124 BPM',
     streamUrl: 'https://stream.nightride.fm/nightride.m4a',
     synthStyle: 'miami-bass',
@@ -625,7 +629,7 @@ export const ARENA_LAYOUT = {
     topRightX: 1665,
     bottomLeftX: 442,
     bottomRightX: 1710,
-    // Großes neongrünes Leuchtschild "✦✦ PALLADIUM HANAU ✦✦" mittig auf der 2.5D-Rückwand
+    // Großes neongrünes Leuchtschild "✦ PALLADIUM 86 ✦" mittig auf der 2.5D-Rückwand
     neonSignCenterX: 1075,
     neonSignCenterY: 56,
     neonSignWidth: 580,
