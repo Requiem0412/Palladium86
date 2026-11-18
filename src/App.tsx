@@ -34,6 +34,10 @@ import {
   LightingMode,
   LiveBroadcastSampleEvent,
   LiveHallAnnouncementEvent,
+  LOCKED_ARENA_ZONES,
+  LOCKED_ZONE_BANNER_PRESETS,
+  LockableZoneId,
+  LockedArenaZonesConfig,
   NameDisplayMode,
   NeonUnderglowColor,
   NeonWristbandColor,
@@ -149,6 +153,7 @@ import {
   DEFAULT_NEWSPAPER_TIPS,
   DEFAULT_ROLE_KEYS,
   exportNewspaperFacebookEditionPng,
+  renderNewspaperQrCodeDataUrl,
   loadUnlockedRoleHandheldSession,
   RoleHandheldType,
   RoleKeysConfig,
@@ -207,6 +212,7 @@ import {
   upsertCloudVisit,
   VipGuestListEntry,
 } from './lib/supabaseCloud';
+import { PocketPdaDrawer } from './components/PocketPdaDrawer';
 
 const MULTIPLAYER_OUTFIT_COLORS = [
   { id: 'neon-pink', label: 'Neon-Pink', hex: '#ff2a85' },
@@ -307,8 +313,15 @@ interface AdminSyncPayload {
   newspaperBody?: string;
   newspaperTips?: string;
   newspaperUpdatedAt?: string;
+  newspaperQrUrl?: string;
+  newspaperContactEmail?: string;
   hallPowerEnabled?: boolean;
   roleKeys?: RoleKeysConfig;
+  lockedZones?: LockedArenaZonesConfig;
+  cleaningLadyEnabled?: boolean;
+  waitressEnabled?: boolean;
+  oldBarackEnabled?: boolean;
+  staffShiftOverride?: 'auto' | 'day' | 'evening';
 }
 
 type MultiplayerPacket =
@@ -519,10 +532,13 @@ export function App() {
   const [newspaperPublishToast, setNewspaperPublishToast] = useState<
     string | null
   >(null);
+  const [pdaPickupToast, setPdaPickupToast] = useState<string | null>(null);
   const [adminTab, setAdminTab] = useState<
     'track' | 'light_dj' | 'access' | 'look_build' | 'ranks_points'
   >('track');
   const [springerStaffelShowSec, setSpringerStaffelShowSec] =
+    useState<number>(0);
+  const [shiftHandoverTriggerSeq, setShiftHandoverTriggerSeq] =
     useState<number>(0);
   const [showDjSoundboardHud, setShowDjSoundboardHud] =
     useState<boolean>(false);
@@ -813,6 +829,49 @@ export function App() {
       handleUpdateCustomLayout(nextLayout);
     },
     [customLayout, handleUpdateCustomLayout, selectedBuildItemId]
+  );
+
+  const handleMoveSelectedBuildItem = useCallback(
+    (dx: number, dy: number) => {
+      if (!selectedBuildItemId) return;
+      if (selectedBuildItemId.startsWith('mod:')) {
+        const modId = selectedBuildItemId.slice(4) as EditableModuleId;
+        const curMod =
+          customLayout.modules[modId] ||
+          DEFAULT_CUSTOM_ARENA_LAYOUT.modules[modId];
+        if (!curMod) return;
+        handleUpdateCustomLayout({
+          ...customLayout,
+          modules: {
+            ...DEFAULT_CUSTOM_ARENA_LAYOUT.modules,
+            ...customLayout.modules,
+            [modId]: {
+              ...curMod,
+              x: Math.max(8, Math.min(1880, Math.round(curMod.x + dx))),
+              y: Math.max(8, Math.min(1040, Math.round(curMod.y + dy))),
+            },
+          },
+        });
+      } else if (selectedBuildItemId.startsWith('npc:')) {
+        const npcId = selectedBuildItemId.slice(4);
+        const curNpc = editableNpcList.find((n) => n.id === npcId);
+        const curAnchor = customLayout.npcAnchors[npcId] || {
+          homeX: curNpc?.homeX ?? curNpc?.x ?? 960,
+          homeY: curNpc?.homeY ?? curNpc?.y ?? 540,
+        };
+        handleUpdateCustomLayout({
+          ...customLayout,
+          npcAnchors: {
+            ...customLayout.npcAnchors,
+            [npcId]: {
+              homeX: Math.max(24, Math.min(1896, Math.round(curAnchor.homeX + dx))),
+              homeY: Math.max(24, Math.min(1056, Math.round(curAnchor.homeY + dy))),
+            },
+          },
+        });
+      }
+    },
+    [customLayout, editableNpcList, handleUpdateCustomLayout, selectedBuildItemId]
   );
 
   // DJ-Jingle & Sprachmemo-Pult + 10. Echte DJ-Audio-Samples & 11. Eigene DJ-Kanzel State
@@ -1540,6 +1599,25 @@ export function App() {
         typeof cloudProf.outfit_color === 'string'
       ) {
         setPlayerShirtColor(cloudProf.outfit_color);
+      }
+      const cloudLocker = (
+        cloudProf.settings as
+          | { lockerSettings?: Partial<LockerPlayerSettings> }
+          | undefined
+      )?.lockerSettings;
+      if (cloudLocker && typeof cloudLocker === 'object') {
+        setLockerSettings((prev) => {
+          const merged: LockerPlayerSettings = {
+            ...prev,
+            hasPocketPda: Boolean(prev.hasPocketPda || cloudLocker.hasPocketPda),
+            pdaMinigameHighscore: Math.max(
+              prev.pdaMinigameHighscore || 0,
+              Number(cloudLocker.pdaMinigameHighscore) || 0
+            ),
+          };
+          saveLockerPlayerSettings(merged);
+          return merged;
+        });
       }
     });
     return () => {
@@ -2323,12 +2401,26 @@ export function App() {
   };
 
   const handleToggleCamera = useCallback(() => {
+    const views = adminSettings.enabledCameraViews ?? {
+      topDown: true,
+      chase: true,
+      ego: true,
+    };
+    const activeOrder: CameraViewMode[] = (
+      [
+        views.topDown !== false ? 'top-down' : null,
+        views.chase !== false ? 'chase' : null,
+        views.ego !== false ? 'ego' : null,
+      ] as (CameraViewMode | null)[]
+    ).filter((v): v is CameraViewMode => v !== null);
+    if (activeOrder.length === 0) return;
     setCameraMode((prev) => {
-      const next: CameraViewMode =
-        prev === 'top-down' ? 'chase' : prev === 'chase' ? 'ego' : 'top-down';
-      return next;
+      const idx = activeOrder.indexOf(prev);
+      return idx === -1
+        ? activeOrder[0]
+        : activeOrder[(idx + 1) % activeOrder.length];
     });
-  }, []);
+  }, [adminSettings.enabledCameraViews]);
 
   const handleToggleCharacterMode = useCallback(() => {
     setCharacterMode((prev) => (prev === 'skater' ? 'wheelchair' : 'skater'));
@@ -2455,7 +2547,7 @@ export function App() {
       strobeBurstCount,
       customLayout,
       newspaperEnabled: adminSettings.newspaperEnabled !== false,
-      newspaperIssueId: Math.max(1, Number(adminSettings.newspaperIssueId) || 1),
+      newspaperIssueId: Math.max(1, Number(adminSettings.newspaperIssueId) || 2),
       newspaperHeadline:
         adminSettings.newspaperHeadline ||
         'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
@@ -2464,6 +2556,9 @@ export function App() {
         'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
       newspaperTips: adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS,
       newspaperUpdatedAt: adminSettings.newspaperUpdatedAt || '15.11.2026',
+      newspaperQrUrl: adminSettings.newspaperQrUrl || 'https://palladium86.de',
+      newspaperContactEmail:
+        adminSettings.newspaperContactEmail || 'info@palladium86.de',
       hallPowerEnabled: adminSettings.hallPowerEnabled !== false,
       roleKeys: adminSettings.roleKeys || DEFAULT_ROLE_KEYS,
     };
@@ -2522,6 +2617,8 @@ export function App() {
     adminSettings.newspaperBody,
     adminSettings.newspaperTips,
     adminSettings.newspaperUpdatedAt,
+    adminSettings.newspaperQrUrl,
+    adminSettings.newspaperContactEmail,
     adminSettings.hallPowerEnabled,
     adminSettings.roleKeys,
   ]);
@@ -2632,10 +2729,18 @@ export function App() {
           typeof s.newspaperEnabled === 'boolean'
             ? s.newspaperEnabled
             : prev.newspaperEnabled,
-        newspaperIssueId:
-          typeof s.newspaperIssueId === 'number' && s.newspaperIssueId > 0
+        newspaperIssueId: (() => {
+          if (
+            typeof localStorage !== 'undefined' &&
+            !localStorage.getItem('palladium_newspaper_issue_reset_v2_cloud')
+          ) {
+            localStorage.setItem('palladium_newspaper_issue_reset_v2_cloud', '1');
+            return 2;
+          }
+          return typeof s.newspaperIssueId === 'number' && s.newspaperIssueId > 0
             ? s.newspaperIssueId
-            : prev.newspaperIssueId,
+            : prev.newspaperIssueId;
+        })(),
         newspaperHeadline:
           typeof s.newspaperHeadline === 'string'
             ? s.newspaperHeadline
@@ -2652,6 +2757,14 @@ export function App() {
           typeof s.newspaperUpdatedAt === 'string'
             ? s.newspaperUpdatedAt
             : prev.newspaperUpdatedAt,
+        newspaperQrUrl:
+          typeof s.newspaperQrUrl === 'string'
+            ? s.newspaperQrUrl
+            : prev.newspaperQrUrl,
+        newspaperContactEmail:
+          typeof s.newspaperContactEmail === 'string'
+            ? s.newspaperContactEmail
+            : prev.newspaperContactEmail,
         hallPowerEnabled:
           typeof s.hallPowerEnabled === 'boolean'
             ? s.hallPowerEnabled
@@ -4379,7 +4492,7 @@ export function App() {
 
   const currentNewspaperIssueId = Math.max(
     1,
-    Number(adminSettings.newspaperIssueId) || 1
+    Number(adminSettings.newspaperIssueId) || 2
   );
   const readNewspaperIssuesList = certificatesState.readNewspaperIssues || [];
   const hasUnreadNewspaperIssue =
@@ -4401,7 +4514,7 @@ export function App() {
     soundFX.playChallengeUnlocked();
     setShowNewspaperModal(true);
     setDismissedNewspaperIssueId(
-      Math.max(1, Number(adminSettings.newspaperIssueId) || 1)
+      Math.max(1, Number(adminSettings.newspaperIssueId) || 2)
     );
     setNewspaperBannerAutoHidden(true);
 
@@ -4409,7 +4522,7 @@ export function App() {
     const prevIssues = Array.isArray(cur.readNewspaperIssues)
       ? cur.readNewspaperIssues
       : [];
-    const issueId = Math.max(1, Number(adminSettings.newspaperIssueId) || 1);
+    const issueId = Math.max(1, Number(adminSettings.newspaperIssueId) || 2);
     const nextIssues = prevIssues.includes(issueId)
       ? prevIssues
       : [...prevIssues, issueId];
@@ -4603,6 +4716,41 @@ export function App() {
       showTaskCompletedBanner(stepLabels[stepId]);
     },
     [recordCompletedTaskForCertificates, showTaskCompletedBanner]
+  );
+
+  const handleOpenAndClaimLocker = useCallback(
+    (
+      initialTab?:
+        | 'gear'
+        | 'tasks'
+        | 'events'
+        | 'certificates'
+        | 'guestbook'
+        | 'feedback'
+    ) => {
+      handleIntroStepComplete('open_locker');
+      setLockerSettings((prev) => {
+        if (prev.hasPocketPda) return prev;
+        const next: LockerPlayerSettings = {
+          ...prev,
+          hasPocketPda: true,
+        };
+        saveLockerPlayerSettings(next);
+        soundFX.playChallengeUnlocked();
+        const pdaMsg =
+          '📟 Du hast deinen persönlichen Palladium-PDA aus deinem Spind genommen!';
+        setPdaPickupToast(pdaMsg);
+        window.setTimeout(() => {
+          setPdaPickupToast((curr) => (curr === pdaMsg ? null : curr));
+        }, 4800);
+        return next;
+      });
+      if (initialTab) {
+        setLockerTab(initialTab);
+      }
+      setShowLockerModal(true);
+    },
+    [handleIntroStepComplete]
   );
 
   const handleDrinkFromLocker = useCallback(() => {
@@ -5435,14 +5583,19 @@ export function App() {
         'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.',
       tips: adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS,
       versionLabel: APP_VERSION_LABEL,
+      qrUrl: adminSettings.newspaperQrUrl || 'https://palladium86.de',
+      contactEmail:
+        adminSettings.newspaperContactEmail || 'info@palladium86.de',
     });
     setFacebookDownloadToast(
-      '✅ Facebook-PNG (1200×1200 px) gespeichert & Post-Text kopiert!'
+      '✅ Facebook-PNG (1200×1200 px inkl. QR-Code) gespeichert & Post-Text kopiert!'
     );
     window.setTimeout(() => setFacebookDownloadToast(null), 4500);
   }, [
     adminSettings.newspaperBody,
+    adminSettings.newspaperContactEmail,
     adminSettings.newspaperHeadline,
+    adminSettings.newspaperQrUrl,
     adminSettings.newspaperTips,
     adminSettings.newspaperUpdatedAt,
     currentNewspaperIssueId,
@@ -5471,6 +5624,11 @@ export function App() {
   };
 
   const triggerNearStationOrNewspaperInteraction = useCallback(() => {
+    if (telemetry.nearLockers) {
+      soundFX.unlockAudioContext();
+      handleOpenAndClaimLocker();
+      return;
+    }
     if (telemetry.nearArcadeMachine) {
       soundFX.unlockAudioContext();
       setActiveArcadeGameId(telemetry.nearArcadeMachine);
@@ -5844,7 +6002,7 @@ export function App() {
               className="w-full px-2 py-1 rounded bg-slate-950 border border-emerald-400/50 text-emerald-100 text-[10px]"
             />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 pt-1">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-1">
             <button
               type="button"
               onClick={handleOpenNewspaperModal}
@@ -5855,8 +6013,36 @@ export function App() {
             <button
               type="button"
               onClick={() => {
+                const keepIssueId = Math.max(
+                  1,
+                  Number(adminSettings.newspaperIssueId) || 2
+                );
+                const updatedDate = new Date().toLocaleDateString('de-DE', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                });
+                setAdminSettings((prev) => {
+                  const next: AdminPersistentSettings = {
+                    ...prev,
+                    newspaperEnabled: true,
+                    newspaperIssueId: keepIssueId,
+                    newspaperUpdatedAt: updatedDate,
+                  };
+                  saveAdminSettings(next);
+                  return next;
+                });
+                soundFX.playChallengeUnlocked();
+              }}
+              className="py-1.5 px-2 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[9.5px] font-black cursor-pointer"
+            >
+              ✏️ Ausgabe #{currentNewspaperIssueId} korrigieren
+            </button>
+            <button
+              type="button"
+              onClick={() => {
                 const nextIssueId =
-                  Math.max(1, Number(adminSettings.newspaperIssueId) || 1) + 1;
+                  Math.max(1, Number(adminSettings.newspaperIssueId) || 2) + 1;
                 const updatedDate = new Date().toLocaleDateString('de-DE', {
                   day: '2-digit',
                   month: '2-digit',
@@ -5876,7 +6062,7 @@ export function App() {
               }}
               className="py-1.5 px-2 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[9.5px] font-black cursor-pointer"
             >
-              🚀 Live veröffentlichen
+              🚀 Neue Ausgabe (+1)
             </button>
             <button
               type="button"
@@ -6280,8 +6466,11 @@ export function App() {
           <button
             type="button"
             onClick={() => {
-              handleIntroStepComplete('open_locker');
-              setShowLockerModal((v) => !v);
+              if (showLockerModal) {
+                setShowLockerModal(false);
+              } else {
+                handleOpenAndClaimLocker();
+              }
             }}
             title="Spind & Profil öffnen"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#0B0E17]/88 hover:bg-slate-900 border border-cyan-400/50 text-xs font-mono shadow-lg backdrop-blur-xs cursor-pointer transition"
@@ -6527,9 +6716,7 @@ export function App() {
                     type="button"
                     onClick={() => {
                       setShowVisitorQuickMenu(false);
-                      handleIntroStepComplete('open_locker');
-                      setLockerTab('gear');
-                      setShowLockerModal(true);
+                      handleOpenAndClaimLocker('gear');
                     }}
                     className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-400/50 text-cyan-200 font-bold text-left flex items-center justify-between cursor-pointer"
                   >
@@ -6543,9 +6730,7 @@ export function App() {
                     type="button"
                     onClick={() => {
                       setShowVisitorQuickMenu(false);
-                      handleIntroStepComplete('open_locker');
-                      setLockerTab('tasks');
-                      setShowLockerModal(true);
+                      handleOpenAndClaimLocker('tasks');
                     }}
                     className="w-full px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-200 font-bold text-left cursor-pointer"
                   >
@@ -6998,9 +7183,14 @@ export function App() {
               Auswahl:{' '}
               <strong>
                 {selectedBuildItemId?.startsWith('mod:')
-                  ? customLayout.modules[
-                      selectedBuildItemId.slice(4) as EditableModuleId
-                    ]?.label || selectedBuildItemId
+                  ? (
+                      customLayout.modules[
+                        selectedBuildItemId.slice(4) as EditableModuleId
+                      ] ||
+                      DEFAULT_CUSTOM_ARENA_LAYOUT.modules[
+                        selectedBuildItemId.slice(4) as EditableModuleId
+                      ]
+                    )?.label || selectedBuildItemId
                   : selectedBuildItemId?.startsWith('npc:')
                   ? editableNpcList.find(
                       (n) => n.id === selectedBuildItemId.slice(4)
@@ -7008,6 +7198,42 @@ export function App() {
                   : 'Klicke Objekt auf Spielfeld'}
               </strong>
             </span>
+            {selectedBuildItemId && (
+              <div className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-slate-900 border border-cyan-400/50 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => handleMoveSelectedBuildItem(-4, 0)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-200 font-bold cursor-pointer"
+                  title="Links verschieben (-4px)"
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleMoveSelectedBuildItem(0, -4)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-200 font-bold cursor-pointer"
+                  title="Hoch verschieben (-4px)"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleMoveSelectedBuildItem(0, 4)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-200 font-bold cursor-pointer"
+                  title="Runter verschieben (+4px)"
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleMoveSelectedBuildItem(4, 0)}
+                  className="px-1.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-200 font-bold cursor-pointer"
+                  title="Rechts verschieben (+4px)"
+                >
+                  →
+                </button>
+              </div>
+            )}
             {selectedBuildItemId?.startsWith('mod:') && (
               <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900 border border-amber-400/50 text-[10px]">
                 <span className="text-slate-300">B:</span>
@@ -7197,7 +7423,7 @@ export function App() {
           showSpeechBubbles={lockerSettings.showSpeechBubbles}
           vipDiscoSkatesEquipped={lockerSettings.vipDiscoSkatesEquipped}
           lockerDrinkBoostTrigger={lockerDrinkBoostTrigger}
-          onOpenLockerModal={() => setShowLockerModal(true)}
+          onOpenLockerModal={() => handleOpenAndClaimLocker()}
           onIntroStepComplete={handleIntroStepComplete}
           skateDirection={adminSettings.skateDirection || 'ccw'}
           springerStaffelShowActive={springerStaffelShowSec > 0}
@@ -7249,6 +7475,12 @@ export function App() {
           }}
           ballspielResetSeq={ballspielResetSeq}
           onBallspielRoundFinished={handleBallspielRoundFinished}
+          lockedZones={adminSettings.lockedZones || LOCKED_ARENA_ZONES}
+          cleaningLadyEnabled={adminSettings.cleaningLadyEnabled !== false}
+          waitressEnabled={adminSettings.waitressEnabled !== false}
+          oldBarackEnabled={adminSettings.oldBarackEnabled !== false}
+          staffShiftOverride={adminSettings.staffShiftOverride || 'auto'}
+          shiftHandoverTriggerSeq={shiftHandoverTriggerSeq}
         />
 
         {/* 7. RETRO-BANNER AUF DER BAHN FÜR SONNTAGS-CLIQUE-MODUS (2+1-REGEL) - KEIN KLICK-TRIGGER! */}
@@ -7366,6 +7598,18 @@ export function App() {
             );
           })()}
 
+        {/* RETRO TOAST BEI ABHOLUNG DES POCKET-PDAS AM SPIND */}
+        {pdaPickupToast && (
+          <div className="pointer-events-none fixed top-14 left-1/2 -translate-x-1/2 z-[120] px-5 py-3 rounded-xl bg-gradient-to-r from-slate-950/98 via-[#0B1E28]/98 to-slate-950/98 border-2 border-cyan-400 shadow-[0_0_35px_rgba(34,211,238,0.75)] text-center font-mono">
+            <div className="text-[10px] uppercase tracking-widest text-amber-300 font-black">
+              ★ PALLADIUM POCKET-PDA ’86 AKTIVIERT ★
+            </div>
+            <div className="text-xs sm:text-sm font-black text-cyan-200 mt-0.5">
+              {pdaPickupToast}
+            </div>
+          </div>
+        )}
+
         {/* CHALLENGE UNLOCKED 80s RETRO BANNER */}
         {unlockedToast && (
           <div className="pointer-events-none absolute top-14 left-1/2 -translate-x-1/2 z-40 px-6 py-3 rounded-lg bg-gradient-to-r from-fuchsia-950/95 via-indigo-950/95 to-cyan-950/95 border-2 border-amber-300 shadow-[0_0_30px_rgba(251,191,36,0.6)] text-center">
@@ -7420,7 +7664,9 @@ export function App() {
         {isCurtainOpen &&
           !activeStationDialog &&
           !showNewspaperModal &&
-          (telemetry.nearCashier ||
+          !showLockerModal &&
+          (telemetry.nearLockers ||
+            telemetry.nearCashier ||
             telemetry.nearSkateRental ||
             telemetry.nearProShop ||
             telemetry.nearBistroCounter ||
@@ -7430,6 +7676,34 @@ export function App() {
             (telemetry.nearNewspaperStand &&
               adminSettings.newspaperEnabled !== false)) &&
           (() => {
+            if (
+              telemetry.nearLockers &&
+              !telemetry.nearCashier &&
+              !telemetry.nearSkateRental &&
+              !telemetry.nearProShop &&
+              !telemetry.nearBistroCounter &&
+              !telemetry.nearDjTower &&
+              !telemetry.nearCustomCrewId
+            ) {
+              return (
+                <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.5)] text-xs font-mono">
+                  <span className="text-base">🗄️</span>
+                  <span className="text-cyan-200 font-bold">
+                    {lockerSettings.hasPocketPda
+                      ? 'Schließfächer (Mein Spind & Ausrüstung)'
+                      : 'Schließfächer (Spind öffnen & 📟 Pocket-PDA abholen!)'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenAndClaimLocker()}
+                    className="px-3 py-1 rounded-full bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-[11px] cursor-pointer"
+                  >
+                    [E] Spind öffnen
+                  </button>
+                </div>
+              );
+            }
+
             if (
               telemetry.nearLeaderboardBoard &&
               !telemetry.nearCashier &&
@@ -7632,6 +7906,71 @@ export function App() {
               </button>
             </div>
           </>
+        )}
+
+        {/* ================================================================= */}
+        {/* 3d. AUSFAHRBARER 80ER-RETRO-PDA ("PALLADIUM POCKET-PDA ’86")      */}
+        {/* ================================================================= */}
+        {isCurtainOpen && !isBlockedByMaintenance && (
+          <PocketPdaDrawer
+            hasPocketPda={Boolean(lockerSettings.hasPocketPda)}
+            playerName={playerName}
+            playerPixels={playerPixels}
+            totalEarnedPoints={totalEarnedPoints}
+            hallRankTitle={hallRankInfo.title}
+            hallRankIcon={hallRankInfo.icon}
+            skatedLaps={Math.max(
+              telemetry.laps || 0,
+              hallStats.bestLapRecord || 0
+            )}
+            bestLapSec={
+              ballspielBestTimeSec && ballspielBestTimeSec > 0
+                ? ballspielBestTimeSec
+                : 0
+            }
+            slalomRecord={slalomRecord}
+            ballspielBestTimeSec={ballspielBestTimeSec}
+            certificatesState={certificatesState}
+            newspaperIssueId={currentNewspaperIssueId}
+            newspaperUpdatedAt={adminSettings.newspaperUpdatedAt || '15.11.2026'}
+            newspaperHeadline={
+              adminSettings.newspaperHeadline ||
+              'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!'
+            }
+            newspaperBody={
+              adminSettings.newspaperBody ||
+              'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen, das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.'
+            }
+            newspaperTips={
+              adminSettings.newspaperTips || DEFAULT_NEWSPAPER_TIPS
+            }
+            hasUnreadNewspaperIssue={hasUnreadNewspaperIssue}
+            pdaMinigameHighscore={lockerSettings.pdaMinigameHighscore || 0}
+            onUpdateMinigameHighscore={(nextBest) =>
+              setLockerSettings((prev) => {
+                if (nextBest <= (prev.pdaMinigameHighscore || 0)) return prev;
+                const updated: LockerPlayerSettings = {
+                  ...prev,
+                  pdaMinigameHighscore: nextBest,
+                };
+                saveLockerPlayerSettings(updated);
+                return updated;
+              })
+            }
+            onAwardBonusPixels={(bonusPx) =>
+              setPlayerPixels((px) => px + bonusPx)
+            }
+            onOpenNewspaperModal={handleOpenNewspaperModal}
+            onOpenDriverLicense={() => {
+              soundFX.playChallengeUnlocked();
+              setShowExplorerCertificateModal(true);
+            }}
+            onSelectCertificate={(certId) => {
+              setZoomedCertId(certId);
+              setLockerTab('certificates');
+              setShowLockerModal(true);
+            }}
+          />
         )}
 
         {/* ===================================================================== */}
@@ -9304,6 +9643,24 @@ export function App() {
                 </button>
               </div>
 
+              {/* Pocket-PDA ’86 Status im Spind */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#09151E] border border-cyan-400/50 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">📟</span>
+                  <div>
+                    <div className="font-black text-cyan-200 text-[11px]">
+                      PALLADIUM POCKET-PDA ’86 (IM SPIND ABGEHOLT)
+                    </div>
+                    <div className="text-[10px] text-slate-400">
+                      Dein persönlicher 80er-Retro-PDA ist unten am Bildschirmrand über den Reiter „📟 PDA“ jederzeit ausfahrbar!
+                    </div>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/60 text-emerald-300 text-[10px] font-black">
+                  ✅ EINGESTECKT
+                </span>
+              </div>
+
               {/* 6 Haupt-Reiter (Tabs) im Kachel-/Button-Stil inkl. 🏆 Urkunden & 📖 Gästebuch */}
               <div className="grid grid-cols-2 sm:grid-cols-6 gap-1.5">
                 {(
@@ -9810,8 +10167,8 @@ export function App() {
                         {
                           id: 'springerstaffel' as HallGameMode,
                           title: '🤸‍♂️ Springer-Staffel-Show (Hochsprung)',
-                          desc: 'Geordnete Anlaufspur über die 4 Hochsprung-Gestelle ab 60 cm!',
-                          target: { x: 540, y: 740 },
+                          desc: '4 Stunt-Springer im Staffel-Takt über die Hindernisse (Skate Guards sperren die Bahn)!',
+                          target: { x: 760, y: 894 },
                         },
                         {
                           id: 'slalom' as HallGameMode,
@@ -11088,6 +11445,93 @@ export function App() {
                       </div>
                     </div>
                   )}
+
+                  {/* 3 AN/AUS-Schalter für Besucher-Kamera-Ansichten */}
+                  {(() => {
+                    const camViews = adminSettings.enabledCameraViews ?? {
+                      topDown: true,
+                      chase: true,
+                      ego: true,
+                    };
+                    const toggleCamView = (
+                      key: 'topDown' | 'chase' | 'ego',
+                      mode: CameraViewMode
+                    ) => {
+                      const currentVal = camViews[key] !== false;
+                      const activeCount =
+                        (camViews.topDown !== false ? 1 : 0) +
+                        (camViews.chase !== false ? 1 : 0) +
+                        (camViews.ego !== false ? 1 : 0);
+                      if (currentVal && activeCount <= 1) return; // Mindestens 1 Ansicht muss aktiv bleiben
+                      const nextViews = {
+                        topDown: camViews.topDown !== false,
+                        chase: camViews.chase !== false,
+                        ego: camViews.ego !== false,
+                        [key]: !currentVal,
+                      };
+                      setAdminSettings((s) => ({
+                        ...s,
+                        enabledCameraViews: nextViews,
+                      }));
+                      if (currentVal && cameraMode === mode) {
+                        const fallbackOrder: CameraViewMode[] = (
+                          [
+                            nextViews.topDown ? 'top-down' : null,
+                            nextViews.chase ? 'chase' : null,
+                            nextViews.ego ? 'ego' : null,
+                          ] as (CameraViewMode | null)[]
+                        ).filter((v): v is CameraViewMode => v !== null);
+                        if (fallbackOrder.length > 0) {
+                          setCameraMode(fallbackOrder[0]);
+                        }
+                      }
+                    };
+                    return (
+                      <div className="pt-1 border-t border-emerald-500/30 flex flex-wrap items-center justify-between gap-1.5">
+                        <span className="font-mono text-[10px] font-bold uppercase text-emerald-300">
+                          🎥 Kamera-Ansichten (Taste V):
+                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => toggleCamView('topDown', 'top-down')}
+                            className={`px-2 py-1 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                              camViews.topDown !== false
+                                ? 'bg-emerald-600/30 border-emerald-400 text-emerald-200'
+                                : 'bg-slate-900 border-slate-700 text-slate-400'
+                            }`}
+                          >
+                            Ansicht 1 (Übersicht):{' '}
+                            {camViews.topDown !== false ? 'AN' : 'AUS'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => toggleCamView('chase', 'chase')}
+                            className={`px-2 py-1 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                              camViews.chase !== false
+                                ? 'bg-cyan-600/30 border-cyan-400 text-cyan-200'
+                                : 'bg-slate-900 border-slate-700 text-slate-400'
+                            }`}
+                          >
+                            Ansicht 2 (Nah-Zoom):{' '}
+                            {camViews.chase !== false ? 'AN' : 'AUS'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => toggleCamView('ego', 'ego')}
+                            className={`px-2 py-1 rounded font-mono text-[10px] font-bold border transition cursor-pointer ${
+                              camViews.ego !== false
+                                ? 'bg-fuchsia-600/30 border-fuchsia-400 text-fuchsia-200'
+                                : 'bg-slate-900 border-slate-700 text-slate-400'
+                            }`}
+                          >
+                            Ansicht 3 (Ego-Perspektive):{' '}
+                            {camViews.ego !== false ? 'AN' : 'AUS'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -14942,6 +15386,164 @@ export function App() {
                         </div>
                       </div>
 
+                      {/* 8. EINFACHES COPY-&-PASTE-FELD + QR-CODE ZIEL-URL FÜR DEN PALLADIUM KURIER */}
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 p-2 rounded-lg bg-slate-900/90 border border-amber-400/40 font-mono text-[10px]">
+                        <div className="md:col-span-2 space-y-1">
+                          <label className="block text-amber-300 font-bold">
+                            📋 1-Feld Copy-&amp;-Paste Schnell-Import (Überschrift &amp; Artikeltext einfügen → aktualisiert sofort Vorschau &amp; Facebook-PNG):
+                          </label>
+                          <textarea
+                            rows={2}
+                            placeholder="Text hier einfügen: Erste Zeile = Hauptschlagzeile, restliche Zeilen = Artikeltext (oder Format: Ausgabe #3 | 18.11.2026 | Schlagzeile | Text)..."
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              if (!raw.trim()) return;
+                              if (raw.includes('|')) {
+                                const parts = raw.split('|').map((p) => p.trim());
+                                if (parts.length >= 4) {
+                                  const parsedIssue = parseInt(
+                                    parts[0].replace(/\D+/g, ''),
+                                    10
+                                  );
+                                  setAdminSettings((s) => {
+                                    const next = {
+                                      ...s,
+                                      newspaperIssueId:
+                                        !isNaN(parsedIssue) && parsedIssue > 0
+                                          ? parsedIssue
+                                          : s.newspaperIssueId,
+                                      newspaperUpdatedAt:
+                                        parts[1] || s.newspaperUpdatedAt,
+                                      newspaperHeadline:
+                                        parts[2] || s.newspaperHeadline,
+                                      newspaperBody: parts
+                                        .slice(3)
+                                        .join(' | '),
+                                    };
+                                    saveAdminSettings(next);
+                                    return next;
+                                  });
+                                  return;
+                                }
+                              }
+                              const lines = raw
+                                .split(/\r?\n/)
+                                .map((l) => l.trim())
+                                .filter(Boolean);
+                              if (lines.length === 1) {
+                                setAdminSettings((s) => {
+                                  const next = {
+                                    ...s,
+                                    newspaperHeadline: lines[0],
+                                  };
+                                  saveAdminSettings(next);
+                                  return next;
+                                });
+                              } else if (lines.length >= 2) {
+                                setAdminSettings((s) => {
+                                  const next = {
+                                    ...s,
+                                    newspaperHeadline: lines[0],
+                                    newspaperBody: lines.slice(1).join('\n'),
+                                  };
+                                  saveAdminSettings(next);
+                                  return next;
+                                });
+                              }
+                            }}
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-amber-400/60 text-amber-100 text-[11px]"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-cyan-300 font-bold">
+                            📱 Scanbarer QR-Code Ziel-URL &amp; Ausgaben-Datum:
+                          </label>
+                          <input
+                            type="text"
+                            value={
+                              adminSettings.newspaperQrUrl ??
+                              'https://palladium86.de'
+                            }
+                            onChange={(e) =>
+                              setAdminSettings((s) => {
+                                const next = {
+                                  ...s,
+                                  newspaperQrUrl: e.target.value,
+                                };
+                                saveAdminSettings(next);
+                                return next;
+                              })
+                            }
+                            placeholder="https://palladium86.de"
+                            className="w-full px-2 py-1 rounded bg-slate-950 border border-cyan-400/60 text-cyan-200 text-[11px]"
+                          />
+                          <label className="block text-cyan-300 font-bold pt-0.5">
+                            Kontakt-E-Mail-Adresse (Footer):
+                          </label>
+                          <input
+                            type="text"
+                            value={
+                              adminSettings.newspaperContactEmail ??
+                              'info@palladium86.de'
+                            }
+                            onChange={(e) =>
+                              setAdminSettings((s) => {
+                                const next = {
+                                  ...s,
+                                  newspaperContactEmail: e.target.value,
+                                };
+                                saveAdminSettings(next);
+                                return next;
+                              })
+                            }
+                            placeholder="info@palladium86.de"
+                            className="w-full px-2 py-1 rounded bg-slate-950 border border-cyan-400/60 text-cyan-200 text-[11px]"
+                          />
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-400">Ausgabe #:</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={999}
+                              value={currentNewspaperIssueId}
+                              onChange={(e) =>
+                                setAdminSettings((s) => {
+                                  const next = {
+                                    ...s,
+                                    newspaperIssueId: Math.max(
+                                      1,
+                                      parseInt(e.target.value, 10) || 1
+                                    ),
+                                  };
+                                  saveAdminSettings(next);
+                                  return next;
+                                })
+                              }
+                              className="w-16 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-300 font-bold"
+                            />
+                            <span className="text-slate-400">Datum:</span>
+                            <input
+                              type="text"
+                              value={
+                                adminSettings.newspaperUpdatedAt ?? '15.11.2026'
+                              }
+                              onChange={(e) =>
+                                setAdminSettings((s) => {
+                                  const next = {
+                                    ...s,
+                                    newspaperUpdatedAt: e.target.value,
+                                  };
+                                  saveAdminSettings(next);
+                                  return next;
+                                })
+                              }
+                              className="flex-1 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-200"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono text-[10px]">
                         <div className="space-y-1">
                           <label className="block text-amber-200 font-bold">
@@ -15011,14 +15613,34 @@ export function App() {
                       </div>
 
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                        <div className="text-[10px] font-mono text-slate-300">
-                          🏆 Urkunde <strong>„Vielleser auf Rollen“</strong>: Dein Fortschritt{' '}
-                          <strong className="text-amber-300">
-                            {readNewspaperIssuesList.length} / 5
-                          </strong>{' '}
-                          gelesene Ausgaben.
+                        <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-slate-300">
+                          <label className="flex items-center gap-1.5 bg-slate-900 px-2 py-1 rounded border border-amber-400/50">
+                            <span className="text-amber-200 font-bold">
+                              Ausgaben-Nr.: #
+                            </span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={999}
+                              value={currentNewspaperIssueId}
+                              onChange={(e) =>
+                                setAdminSettings((s) => {
+                                  const next = {
+                                    ...s,
+                                    newspaperIssueId: Math.max(
+                                      1,
+                                      parseInt(e.target.value, 10) || 2
+                                    ),
+                                  };
+                                  saveAdminSettings(next);
+                                  return next;
+                                })
+                              }
+                              className="w-14 px-1.5 py-0.5 rounded bg-slate-950 border border-amber-400/60 text-amber-300 font-bold text-xs"
+                            />
+                          </label>
                           {newspaperPublishToast && (
-                            <span className="ml-2 text-emerald-300 font-bold">
+                            <span className="text-emerald-300 font-bold">
                               {newspaperPublishToast}
                             </span>
                           )}
@@ -15047,10 +15669,47 @@ export function App() {
                           <button
                             type="button"
                             onClick={() => {
+                              const keepIssueId = Math.max(
+                                1,
+                                Number(adminSettings.newspaperIssueId) || 2
+                              );
+                              const updatedDate =
+                                new Date().toLocaleDateString('de-DE', {
+                                  day: '2-digit',
+                                  month: '2-digit',
+                                  year: 'numeric',
+                                });
+                              setAdminSettings((prev) => {
+                                const next: AdminPersistentSettings = {
+                                  ...prev,
+                                  newspaperEnabled: true,
+                                  newspaperIssueId: keepIssueId,
+                                  newspaperUpdatedAt: updatedDate,
+                                };
+                                saveAdminSettings(next);
+                                return next;
+                              });
+                              soundFX.playChallengeUnlocked();
+                              setNewspaperPublishToast(
+                                `✅ Ausgabe #${keepIssueId} korrigiert & gespeichert (ohne Ausgaben-Nr. zu erhöhen)!`
+                              );
+                              window.setTimeout(
+                                () => setNewspaperPublishToast(null),
+                                4500
+                              );
+                            }}
+                            className="px-3.5 py-1.5 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono text-[11px] font-black border border-white shadow-[0_0_12px_rgba(34,211,238,0.45)] cursor-pointer transition"
+                          >
+                            ✏️ Aktuelle Ausgabe korrigieren (ohne Nummer zu erhöhen • #{currentNewspaperIssueId})
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
                               const nextIssueId =
                                 Math.max(
                                   1,
-                                  Number(adminSettings.newspaperIssueId) || 1
+                                  Number(adminSettings.newspaperIssueId) || 2
                                 ) + 1;
                               const updatedDate =
                                 new Date().toLocaleDateString('de-DE', {
@@ -15070,7 +15729,7 @@ export function App() {
                               });
                               soundFX.playChallengeUnlocked();
                               setNewspaperPublishToast(
-                                `✅ Ausgabe #${nextIssueId} veröffentlicht & „NEU!“-Badge für alle Besucher aktiviert!`
+                                `✅ Neue Ausgabe #${nextIssueId} veröffentlicht & „NEU!“-Badge für alle Besucher aktiviert!`
                               );
                               window.setTimeout(
                                 () => setNewspaperPublishToast(null),
@@ -15079,7 +15738,7 @@ export function App() {
                             }}
                             className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-300 to-cyan-300 hover:brightness-110 text-slate-950 font-mono text-xs font-black border border-white shadow-[0_0_16px_rgba(251,191,36,0.55)] cursor-pointer transition"
                           >
-                            📰 Zeitung aktualisieren &amp; veröffentlichen (Ausgabe #{currentNewspaperIssueId + 1})
+                            📰 Neue Ausgabe veröffentlichen (+1 → #{currentNewspaperIssueId + 1})
                           </button>
                         </div>
                       </div>
@@ -15166,10 +15825,12 @@ export function App() {
                         </span>
                       </div>
 
-                      {/* Compact W / H (+/-) & ↻ Drehen toolbar for the currently selected Room Module */}
+                      {/* Compact W / H (+/-) & ↻ Drehen + Fein-Schritt Pfeil-Buttons for the currently selected Room Module or Object */}
                       {selectedBuildItemId?.startsWith('mod:') && (() => {
                         const selModId = selectedBuildItemId.slice(4) as EditableModuleId;
-                        const selMod = customLayout.modules[selModId];
+                        const selMod =
+                          customLayout.modules[selModId] ||
+                          DEFAULT_CUSTOM_ARENA_LAYOUT.modules[selModId];
                         if (!selMod) return null;
                         return (
                           <div className="flex flex-wrap items-center justify-between gap-1.5 p-1.5 rounded bg-slate-900/95 border border-amber-400/60 text-[10px]">
@@ -15177,7 +15838,41 @@ export function App() {
                               🎯 {selMod.label} ({Math.round(selMod.x)}, {Math.round(selMod.y)})
                             </span>
                             <div className="flex flex-wrap items-center gap-1">
-                              <span className="text-slate-300">Breite (w):</span>
+                              <span className="text-cyan-300">Pos:</span>
+                              <button
+                                type="button"
+                                onClick={() => handleMoveSelectedBuildItem(-4, 0)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-cyan-500/50 text-cyan-200 font-bold cursor-pointer"
+                                title="Links (-4 px)"
+                              >
+                                ←
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMoveSelectedBuildItem(0, -4)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-cyan-500/50 text-cyan-200 font-bold cursor-pointer"
+                                title="Hoch (-4 px)"
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMoveSelectedBuildItem(0, 4)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-cyan-500/50 text-cyan-200 font-bold cursor-pointer"
+                                title="Runter (+4 px)"
+                              >
+                                ↓
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMoveSelectedBuildItem(4, 0)}
+                                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-cyan-500/50 text-cyan-200 font-bold cursor-pointer"
+                                title="Rechts (+4 px)"
+                              >
+                                →
+                              </button>
+
+                              <span className="text-slate-300 ml-1">B:</span>
                               <button
                                 type="button"
                                 onClick={() => handleAdjustSelectedModuleSizeOrRot(-8, 0, 0)}
@@ -15185,7 +15880,7 @@ export function App() {
                               >
                                 −
                               </button>
-                              <span className="text-cyan-300 font-bold min-w-[28px] text-center">
+                              <span className="text-cyan-300 font-bold min-w-[24px] text-center">
                                 {Math.round(selMod.width)}
                               </span>
                               <button
@@ -15196,7 +15891,7 @@ export function App() {
                                 +
                               </button>
 
-                              <span className="text-slate-300 ml-1">Höhe (h):</span>
+                              <span className="text-slate-300 ml-1">H:</span>
                               <button
                                 type="button"
                                 onClick={() => handleAdjustSelectedModuleSizeOrRot(0, -8, 0)}
@@ -15204,7 +15899,7 @@ export function App() {
                               >
                                 −
                               </button>
-                              <span className="text-cyan-300 font-bold min-w-[28px] text-center">
+                              <span className="text-cyan-300 font-bold min-w-[24px] text-center">
                                 {Math.round(selMod.height)}
                               </span>
                               <button
@@ -15221,7 +15916,7 @@ export function App() {
                                 className="ml-1 px-2 py-0.5 rounded bg-amber-400/20 hover:bg-amber-400/35 border border-amber-300 text-amber-200 font-bold cursor-pointer"
                                 title="Um 45° drehen (oder Taste R auf dem Spielfeld)"
                               >
-                                ↻ Drehen ({Math.round(selMod.rot || 0)}°)
+                                ↻ ({Math.round(selMod.rot || 0)}°)
                               </button>
                               <button
                                 type="button"
@@ -15236,13 +15931,15 @@ export function App() {
                         );
                       })()}
 
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 max-h-56 overflow-y-auto pr-0.5">
                         {(
                           Object.keys(
-                            customLayout.modules
+                            DEFAULT_CUSTOM_ARENA_LAYOUT.modules
                           ) as EditableModuleId[]
                         ).map((modId) => {
-                          const m = customLayout.modules[modId];
+                          const m =
+                            customLayout.modules[modId] ||
+                            DEFAULT_CUSTOM_ARENA_LAYOUT.modules[modId];
                           const itemKey = `mod:${modId}`;
                           const isSelected = selectedBuildItemId === itemKey;
                           return (
@@ -15321,6 +16018,324 @@ export function App() {
                           );
                         })}
                       </div>
+                    </div>
+                  </div>
+
+                  {/* C) BEREICHS-SPERREN („IN ARBEIT / BAUSTELLE ’86“) & PERSONAL EINZELN SCHALTBAR (PUTZFRAU / KELLNERIN) */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 text-[10px] font-mono pt-1">
+                    {/* Bereichs-Sperren mit 80er-Neon-Banner & Chrom-Aufstellern */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-pink-500/40 space-y-1.5">
+                      <div className="flex items-center justify-between text-pink-300 font-bold">
+                        <span>
+                          🚧 Hallen-Bereiche einzeln sperrbar (80er-Neon-Banner + Chrom-Aufsteller):
+                        </span>
+                        <span className="text-[9px] text-cyan-300">
+                          Sperrt Durchfahrt &amp; [E]
+                        </span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {(
+                          [
+                            { id: 'bistro', label: '🍧 Slush-Lounge & Bistro' },
+                            { id: 'arcade', label: '🕹️ Arcade-Spielhalle' },
+                            { id: 'mirrorWall', label: '🪞 Spiegelwand / Jam-Corner' },
+                            { id: 'proShop', label: '🛒 Pro-Shop' },
+                          ] as { id: LockableZoneId; label: string }[]
+                        ).map((z) => {
+                          const currentZones =
+                            adminSettings.lockedZones || LOCKED_ARENA_ZONES;
+                          const zState = currentZones[z.id] || {
+                            locked: false,
+                            bannerText: LOCKED_ZONE_BANNER_PRESETS[0],
+                          };
+                          return (
+                            <div
+                              key={z.id}
+                              className="flex flex-wrap items-center justify-between gap-1.5 p-1.5 rounded bg-slate-900/90 border border-slate-800"
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdminSettings((s) => {
+                                    const base =
+                                      s.lockedZones || LOCKED_ARENA_ZONES;
+                                    const next: AdminPersistentSettings = {
+                                      ...s,
+                                      lockedZones: {
+                                        ...base,
+                                        [z.id]: {
+                                          ...zState,
+                                          locked: !zState.locked,
+                                        },
+                                      },
+                                    };
+                                    saveAdminSettings(next);
+                                    return next;
+                                  })
+                                }
+                                className={`px-2.5 py-1 rounded font-bold border cursor-pointer transition ${
+                                  zState.locked
+                                    ? 'bg-pink-600 text-white border-cyan-300 shadow-[0_0_10px_rgba(236,72,153,0.5)]'
+                                    : 'bg-emerald-950/80 text-emerald-300 border-emerald-500/50'
+                                }`}
+                              >
+                                {z.label}:{' '}
+                                {zState.locked ? '🔒 GESPERRT' : '🟢 OFFEN'}
+                              </button>
+                              <select
+                                value={
+                                  LOCKED_ZONE_BANNER_PRESETS.includes(
+                                    zState.bannerText as (typeof LOCKED_ZONE_BANNER_PRESETS)[number]
+                                  )
+                                    ? zState.bannerText
+                                    : LOCKED_ZONE_BANNER_PRESETS[0]
+                                }
+                                onChange={(e) =>
+                                  setAdminSettings((s) => {
+                                    const base =
+                                      s.lockedZones || LOCKED_ARENA_ZONES;
+                                    const next: AdminPersistentSettings = {
+                                      ...s,
+                                      lockedZones: {
+                                        ...base,
+                                        [z.id]: {
+                                          ...zState,
+                                          bannerText: e.target.value,
+                                        },
+                                      },
+                                    };
+                                    saveAdminSettings(next);
+                                    return next;
+                                  })
+                                }
+                                className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-amber-200 text-[9.5px]"
+                              >
+                                {LOCKED_ZONE_BANNER_PRESETS.map((preset) => (
+                                  <option key={preset} value={preset}>
+                                    {preset}
+                                  </option>
+                                ))}
+                              </select>
+                              <input
+                                type="text"
+                                maxLength={46}
+                                value={zState.bannerText}
+                                onChange={(e) =>
+                                  setAdminSettings((s) => {
+                                    const base =
+                                      s.lockedZones || LOCKED_ARENA_ZONES;
+                                    const next: AdminPersistentSettings = {
+                                      ...s,
+                                      lockedZones: {
+                                        ...base,
+                                        [z.id]: {
+                                          ...zState,
+                                          bannerText: e.target.value,
+                                        },
+                                      },
+                                    };
+                                    saveAdminSettings(next);
+                                    return next;
+                                  })
+                                }
+                                placeholder="Banner-Text..."
+                                className="flex-1 min-w-[140px] px-2 py-0.5 rounded bg-slate-950 border border-pink-400/40 text-cyan-200 text-[9.5px]"
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Personal & Originale einzeln schaltbar (Hallen-Putzfrau, Bistro-Kellnerin & Der alte Barack) */}
+                    <div className="p-2 rounded-lg bg-slate-950/90 border border-emerald-500/40 space-y-2">
+                      <div className="flex items-center justify-between text-emerald-300 font-bold">
+                        <span>
+                          🧹🍧🪈 Hallen-Personal &amp; Originale einzeln schaltbar:
+                        </span>
+                        <span className="text-[9px] text-amber-300">
+                          Live in der Szene
+                        </span>
+                      </div>
+                      <p className="text-[9.5px] text-slate-400 leading-relaxed">
+                        Schalte Putz-Paula (ohne Rollschuhe in den Randbereichen), die Bistro-Kellnerin (Tablett hoch vor dem Oberkörper) und das Hallen-Original „Der alte Barack“ (Spaziergang mit qualmender Pfeife durch alle offenen Randzonen) einzeln AN oder AUS:
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const next: AdminPersistentSettings = {
+                                ...s,
+                                cleaningLadyEnabled:
+                                  s.cleaningLadyEnabled === false ? true : false,
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            })
+                          }
+                          className={`p-2 rounded-lg font-bold border text-left cursor-pointer transition ${
+                            adminSettings.cleaningLadyEnabled !== false
+                              ? 'bg-cyan-500/20 border-cyan-300 text-cyan-200 shadow-[0_0_12px_rgba(0,240,255,0.25)]'
+                              : 'bg-slate-900 border-slate-700 text-slate-400'
+                          }`}
+                        >
+                          <div className="text-[10.5px]">
+                            🧹 Hallen-Putzfrau:{' '}
+                            <span className="font-black">
+                              {adminSettings.cleaningLadyEnabled !== false
+                                ? 'AN'
+                                : 'AUS'}
+                            </span>
+                          </div>
+                          <div className="text-[8.5px] text-slate-300 mt-0.5">
+                            Zu Fuß ohne Rollschuhe (Randbereiche)
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const next: AdminPersistentSettings = {
+                                ...s,
+                                waitressEnabled:
+                                  s.waitressEnabled === false ? true : false,
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            })
+                          }
+                          className={`p-2 rounded-lg font-bold border text-left cursor-pointer transition ${
+                            adminSettings.waitressEnabled !== false
+                              ? 'bg-pink-500/20 border-pink-300 text-pink-200 shadow-[0_0_12px_rgba(236,72,153,0.25)]'
+                              : 'bg-slate-900 border-slate-700 text-slate-400'
+                          }`}
+                        >
+                          <div className="text-[10.5px]">
+                            🍧 Bistro-Kellnerin:{' '}
+                            <span className="font-black">
+                              {adminSettings.waitressEnabled !== false
+                                ? 'AN'
+                                : 'AUS'}
+                            </span>
+                          </div>
+                          <div className="text-[8.5px] text-slate-300 mt-0.5">
+                            Tablett vor dem Oberkörper (Bistro-Tische)
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdminSettings((s) => {
+                              const next: AdminPersistentSettings = {
+                                ...s,
+                                oldBarackEnabled:
+                                  s.oldBarackEnabled === false ? true : false,
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            })
+                          }
+                          className={`p-2 rounded-lg font-bold border text-left cursor-pointer transition ${
+                            adminSettings.oldBarackEnabled !== false
+                              ? 'bg-amber-500/20 border-amber-300 text-amber-200 shadow-[0_0_12px_rgba(245,158,11,0.25)]'
+                              : 'bg-slate-900 border-slate-700 text-slate-400'
+                          }`}
+                        >
+                          <div className="text-[10.5px]">
+                            🪈 Der alte Barack:{' '}
+                            <span className="font-black">
+                              {adminSettings.oldBarackEnabled !== false
+                                ? 'AN'
+                                : 'AUS'}
+                            </span>
+                          </div>
+                          <div className="text-[8.5px] text-slate-300 mt-0.5">
+                            Spaziergang mit qualmender Pfeife (Randbereiche)
+                          </div>
+                        </button>
+                      </div>
+
+                      {/* Uhrzeitbasierter Schichtwechsel (Tagschicht bis 18:00 Uhr / Abendschicht ab 18:00 Uhr) + Live-Ablösung testen */}
+                      {(() => {
+                        const isAutoEvening = new Date().getHours() >= 18;
+                        const effectiveShift: 'day' | 'evening' =
+                          adminSettings.staffShiftOverride === 'day'
+                            ? 'day'
+                            : adminSettings.staffShiftOverride === 'evening'
+                            ? 'evening'
+                            : isAutoEvening
+                            ? 'evening'
+                            : 'day';
+                        return (
+                          <div className="mt-2 pt-2 border-t border-emerald-500/30 flex flex-wrap items-center justify-between gap-2">
+                            <div className="space-y-0.5">
+                              <div className="text-[10.5px] font-bold text-amber-300">
+                                {effectiveShift === 'evening'
+                                  ? '🌙 Aktive Schicht: Abendschicht (ab 18:00 Uhr)'
+                                  : '☀️ Aktive Schicht: Tagschicht (bis 18:00 Uhr)'}
+                                {adminSettings.staffShiftOverride &&
+                                  adminSettings.staffShiftOverride !== 'auto' && (
+                                    <span className="ml-1.5 text-[9px] text-cyan-300">
+                                      (Test-Modus)
+                                    </span>
+                                  )}
+                              </div>
+                              <div className="text-[9px] text-slate-300">
+                                {effectiveShift === 'evening'
+                                  ? 'Besetzung: Kellnerin Kim • Wisch-Uschi • DJ Laser-Mike • Kassen-Ralf'
+                                  : 'Besetzung: Kellnerin Nena • Putz-Paula • DJ Magic Force • Kassen-Gabi'}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextShift: 'day' | 'evening' =
+                                    effectiveShift === 'evening'
+                                      ? 'day'
+                                      : 'evening';
+                                  setAdminSettings((s) => {
+                                    const next: AdminPersistentSettings = {
+                                      ...s,
+                                      staffShiftOverride: nextShift,
+                                    };
+                                    saveAdminSettings(next);
+                                    return next;
+                                  });
+                                  setShiftHandoverTriggerSeq(
+                                    (prev) => prev + 1
+                                  );
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[10px] border border-white shadow-[0_0_12px_rgba(251,191,36,0.4)] cursor-pointer transition"
+                              >
+                                🔄 Schicht-Ablösung testen
+                              </button>
+                              {adminSettings.staffShiftOverride &&
+                                adminSettings.staffShiftOverride !== 'auto' && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setAdminSettings((s) => {
+                                        const next: AdminPersistentSettings = {
+                                          ...s,
+                                          staffShiftOverride: 'auto',
+                                        };
+                                        saveAdminSettings(next);
+                                        return next;
+                                      })
+                                    }
+                                    className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-200 font-bold text-[9.5px] border border-cyan-400/50 cursor-pointer"
+                                  >
+                                    🕒 Uhrzeit-Automatik
+                                  </button>
+                                )}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -17618,7 +18633,7 @@ export function App() {
               {/* Vintage 1986 Masthead */}
               <div className="border-b-4 border-double border-[#2b1d10] pb-2.5 text-center">
                 <div className="flex flex-wrap items-center justify-between text-[10px] sm:text-xs font-mono uppercase tracking-widest text-[#4a3520] border-b border-[#8a6d4b] pb-1 mb-2 pr-8">
-                  <span>HANAU-GRIMM CENTER • AUSGABE #{currentNewspaperIssueId}</span>
+                  <span>PALLADIUM ONLINE • AUSGABE #{currentNewspaperIssueId}</span>
                   <span className="font-bold text-rose-800">
                     ★ OFFIZIELLES HALLENBLATT ★
                   </span>
@@ -17659,7 +18674,7 @@ export function App() {
                   </div>
                 </div>
 
-                {/* Column 2: Hallen-Tipps & Vielleser-Urkunden-Pass */}
+                {/* Column 2: Hallen-Tipps & Retro QR-Code Kasten-Box */}
                 <div className="space-y-3">
                   <div className="font-mono text-[11px] font-black uppercase tracking-wider text-[#1e3a8a] border-b border-[#b89f7d] pb-1">
                     🛼 PALLADIUM-TIPPS &amp; HALLEN-GUIDE ’86
@@ -17674,24 +18689,27 @@ export function App() {
                       ))}
                   </ul>
 
-                  {/* Vielleser auf Rollen Stamp Box */}
-                  <div className="p-3 rounded-lg bg-[#e4d5b7] border-2 border-[#3a2817] space-y-1.5 font-mono">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10.5px] font-black uppercase text-rose-900">
-                        🏆 URKUNDE: „VIELLESER AUF ROLLEN“
-                      </span>
-                      <span className="px-2 py-0.5 rounded bg-[#2b1d10] text-amber-200 text-[10px] font-black">
-                        {Math.min(5, readNewspaperIssuesList.length)} / 5 Ausgaben
-                      </span>
+                  {/* Retro-Zeitungsstil QR-Code Kasten-Box (CORS-frei als SVG eingebunden) */}
+                  <div className="p-3 rounded-lg bg-[#e4d5b7] border-2 border-[#3a2817] flex items-center gap-3.5 font-mono shadow-inner">
+                    <img
+                      src={renderNewspaperQrCodeDataUrl(
+                        adminSettings.newspaperQrUrl || 'https://palladium86.de',
+                        120
+                      )}
+                      alt="QR-Code https://palladium86.de"
+                      className="w-24 h-24 rounded border-2 border-[#2b1d10] bg-[#fdf8ec] shrink-0"
+                    />
+                    <div className="space-y-1 text-left">
+                      <div className="text-[11px] font-black uppercase text-rose-900 leading-tight">
+                        DIREKT AUF DIE BAHN: QR-CODE SCANNEN • PALLADIUM86.DE
+                      </div>
+                      <div className="text-xs font-black text-[#140d06] break-all">
+                        {adminSettings.newspaperQrUrl || 'https://palladium86.de'}
+                      </div>
+                      <p className="text-[10px] text-[#332415] leading-snug">
+                        Mit der Smartphone-Kamera scannen &amp; direkt in unserer Online-Arena auf acht Rollen mitfahren!
+                      </p>
                     </div>
-                    <p className="text-[10.5px] text-[#332415] leading-snug">
-                      {certificatesState.unlocked.vielleser_5?.unlocked
-                        ? '🎉 Glückwunsch! Du bist offizieller Stammleser des Palladium-Kuriers – deine Urkunde hängt im Spind!'
-                        : `Lies ${Math.max(
-                            0,
-                            5 - readNewspaperIssuesList.length
-                          )} weitere Zeitungsausgabe(n), um die Gold-Urkunde „Vielleser auf Rollen“ freizuschalten!`}
-                    </p>
                   </div>
                 </div>
               </div>
@@ -17703,11 +18721,15 @@ export function App() {
                 nicht! ★
               </div>
 
-              {/* Newspaper Footer with 1-Click Facebook-PNG Download */}
+              {/* Newspaper Footer with www.palladium86.de, Contact E-Mail & 1-Click Facebook-PNG Download */}
               <div className="mt-3 pt-2.5 border-t-2 border-[#2b1d10] flex flex-wrap items-center justify-between gap-2 font-mono text-[10.5px] text-[#4a3520]">
-                <span>
-                  DRUCK &amp; VERLAG: PALLADIUM ROLLER DISCO HANAU • AUSGABE #{currentNewspaperIssueId}
-                </span>
+                <div className="space-y-0.5">
+                  <div className="font-bold text-[#2b1d10]">
+                    DRUCK &amp; VERLAG: PALLADIUM ROLLER DISCO HANAU • www.palladium86.de •{' '}
+                    {adminSettings.newspaperContactEmail ||
+                      'info@palladium86.de'}
+                  </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"

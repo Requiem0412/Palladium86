@@ -18,6 +18,7 @@ import {
   EditableModuleRect,
   GuestDjPreset,
   LEGACY_DEFAULT_GHOSTS,
+  LockedArenaZonesConfig,
   PALLADIUM_CHALLENGES,
   ProShopUpgradesState,
   RadioTrackItem,
@@ -191,6 +192,8 @@ export interface LockerPlayerSettings {
   collectibles?: string[];
   avatarRole?: AvatarCliqueRole;
   sundayCliqueTicket?: SundayCliqueTicket;
+  hasPocketPda?: boolean;
+  pdaMinigameHighscore?: number;
 }
 
 export interface AdminPersistentSettings {
@@ -248,9 +251,21 @@ export interface AdminPersistentSettings {
   newspaperBody?: string;
   newspaperTips?: string;
   newspaperUpdatedAt?: string;
+  newspaperQrUrl?: string;
+  newspaperContactEmail?: string;
   hallPowerEnabled?: boolean;
   roleKeys?: RoleKeysConfig;
   rankThresholds?: number[];
+  lockedZones?: LockedArenaZonesConfig;
+  cleaningLadyEnabled?: boolean;
+  waitressEnabled?: boolean;
+  oldBarackEnabled?: boolean;
+  staffShiftOverride?: 'auto' | 'day' | 'evening';
+  enabledCameraViews?: {
+    topDown: boolean;
+    chase: boolean;
+    ego: boolean;
+  };
 }
 
 export type RoleHandheldType = 'dj' | 'licht' | 'presse';
@@ -771,13 +786,15 @@ export function loadAdminSettings(): AdminPersistentSettings {
     customCrewMembers: [],
     djJingleSlots: DEFAULT_DJ_JINGLE_SLOTS.map((s) => ({ ...s })),
     newspaperEnabled: true,
-    newspaperIssueId: 1,
+    newspaperIssueId: 2,
     newspaperHeadline:
       'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!',
     newspaperBody:
-      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.\n\nTipp der Redaktion: Klicke oben im HUD auf deinen mittleren Avatar-Kreis für deine persönliche „Entdecker auf acht Rollen“-Urkunde – und lies regelmäßig den Palladium-Kurier, um dir nach 5 Ausgaben die Gold-Urkunde „Vielleser auf Rollen“ zu sichern!',
+      'Willkommen im Palladium Hanau ’86! Ab sofort erwarten euch unsere 5 interaktiven 16-Bit-Stationen (Kasse, Verleih, Pro-Shop, Snack-Bar & DJ-Kanzel), das echte 3x3-Sampler-Launchpad für DJ Magic Force sowie der neue Sonntags-Clique-Modus (2+1-Regel) mit +25% Gruppen-Bonus.\n\nTipp der Redaktion: Klicke oben im HUD auf deinen mittleren Avatar-Kreis für deinen persönlichen Rollschuh-Führerschein – und scanne den QR-Code rechts, um direkt mit deinen Freunden auf acht Rollen durchzustarten!',
     newspaperTips: DEFAULT_NEWSPAPER_TIPS,
     newspaperUpdatedAt: '15.11.2026',
+    newspaperQrUrl: 'https://palladium86.de',
+    newspaperContactEmail: 'info@palladium86.de',
     hallPowerEnabled: true,
     roleKeys: { ...DEFAULT_ROLE_KEYS },
   };
@@ -785,6 +802,19 @@ export function loadAdminSettings(): AdminPersistentSettings {
     const raw = localStorage.getItem(KEYS.ADMIN_SETTINGS);
     if (raw) {
       const parsed = JSON.parse(raw);
+      // Einmaliger Reset des Ausgaben-Zählers auf Ausgabe #2
+      if (!localStorage.getItem('palladium_newspaper_issue_reset_v2')) {
+        localStorage.setItem('palladium_newspaper_issue_reset_v2', '1');
+        parsed.newspaperIssueId = 2;
+        try {
+          localStorage.setItem(
+            KEYS.ADMIN_SETTINGS,
+            JSON.stringify({ ...defaults, ...parsed, newspaperIssueId: 2 })
+          );
+        } catch {
+          // ignore storage quota errors
+        }
+      }
       if (
         !parsed.maintenanceReopenText ||
         parsed.maintenanceReopenText === 'Wir öffnen wieder um 20:00 Uhr'
@@ -1620,6 +1650,8 @@ export function loadLockerPlayerSettings(): LockerPlayerSettings {
     vipDiscoSkatesEquipped: false,
     drinksInLocker: 1,
     collectibles: [],
+    hasPocketPda: false,
+    pdaMinigameHighscore: 0,
   };
   try {
     const raw = localStorage.getItem(KEYS.LOCKER_SETTINGS);
@@ -1651,6 +1683,12 @@ export function loadLockerPlayerSettings(): LockerPlayerSettings {
         collectibles: Array.isArray(parsed.collectibles)
           ? parsed.collectibles.map(String)
           : [],
+        hasPocketPda: Boolean(parsed.hasPocketPda),
+        pdaMinigameHighscore:
+          typeof parsed.pdaMinigameHighscore === 'number' &&
+          Number.isFinite(parsed.pdaMinigameHighscore)
+            ? Math.max(0, Math.round(parsed.pdaMinigameHighscore))
+            : 0,
       };
     }
   } catch {
@@ -2085,12 +2123,188 @@ export function saveCertificatesState(state: PalladiumCertificatesState): void {
  * 5. 1-KLICK FACEBOOK-EDITION DER ZEITUNG (1200 x 1200 px Offscreen-Canvas PNG)
  * Reine Social-Media-Ausgabe ohne Buttons, ohne "×", ohne "Gelesen ✓" und ohne Urkunden-Box.
  */
+/**
+ * Generates an ISO/IEC 18004 compliant QR Code matrix (Version 2-L or 3-L, Mask 0)
+ * for URLs up to 53 bytes (e.g. "https://palladium86.de") with zero external dependencies.
+ */
+export function buildScannableQrMatrix(rawText: string): boolean[][] {
+  const text = (rawText || 'https://palladium86.de').trim().slice(0, 52);
+  const utf8 = Array.from(new TextEncoder().encode(text));
+  const isV3 = utf8.length > 32;
+  const version = isV3 ? 3 : 2;
+  const size = isV3 ? 29 : 25;
+  const dataCap = isV3 ? 55 : 34;
+  const ecCount = isV3 ? 15 : 10;
+
+  const bits: number[] = [];
+  const pushBits = (val: number, len: number) => {
+    for (let i = len - 1; i >= 0; i--) bits.push((val >> i) & 1);
+  };
+  pushBits(0b0100, 4); // Byte mode
+  pushBits(utf8.length, 8);
+  for (const b of utf8) pushBits(b, 8);
+  pushBits(0, Math.min(4, dataCap * 8 - bits.length));
+  while (bits.length % 8 !== 0) bits.push(0);
+
+  const dataBytes: number[] = [];
+  for (let i = 0; i < bits.length; i += 8) {
+    let byte = 0;
+    for (let j = 0; j < 8; j++) byte = (byte << 1) | bits[i + j];
+    dataBytes.push(byte);
+  }
+  let padToggle = true;
+  while (dataBytes.length < dataCap) {
+    dataBytes.push(padToggle ? 0xec : 0x11);
+    padToggle = !padToggle;
+  }
+
+  // GF(256) Reed-Solomon Error Correction (primitive polynomial 0x11d)
+  const exp = new Uint8Array(512);
+  const log = new Uint8Array(256);
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    exp[i] = x;
+    exp[i + 255] = x;
+    log[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  let gen = [1];
+  for (let i = 0; i < ecCount; i++) {
+    const next = new Array(gen.length + 1).fill(0);
+    for (let j = 0; j < gen.length; j++) {
+      next[j] ^= gen[j];
+      next[j + 1] ^= exp[log[gen[j]] + i];
+    }
+    gen = next;
+  }
+  const msg = new Uint8Array(dataCap + ecCount);
+  msg.set(dataBytes, 0);
+  for (let i = 0; i < dataCap; i++) {
+    const coef = msg[i];
+    if (coef !== 0) {
+      for (let j = 1; j < gen.length; j++) {
+        msg[i + j] ^= exp[log[gen[j]] + log[coef]];
+      }
+    }
+  }
+  const codewords = [...dataBytes, ...Array.from(msg.slice(dataCap))];
+
+  const grid: boolean[][] = Array.from({ length: size }, () =>
+    Array(size).fill(false)
+  );
+  const reserved: boolean[][] = Array.from({ length: size }, () =>
+    Array(size).fill(false)
+  );
+  const setMod = (r: number, c: number, dark: boolean) => {
+    if (r >= 0 && r < size && c >= 0 && c < size) {
+      grid[r][c] = dark;
+      reserved[r][c] = true;
+    }
+  };
+  const placeFinder = (r0: number, c0: number) => {
+    for (let dr = -1; dr <= 7; dr++) {
+      for (let dc = -1; dc <= 7; dc++) {
+        const inOuter = dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6;
+        const onBorder = dr === 0 || dr === 6 || dc === 0 || dc === 6;
+        const inCore = dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4;
+        setMod(r0 + dr, c0 + dc, inOuter && (onBorder || inCore));
+      }
+    }
+  };
+  placeFinder(0, 0);
+  placeFinder(0, size - 7);
+  placeFinder(size - 7, 0);
+
+  const alignC = size - 7;
+  for (let dr = -2; dr <= 2; dr++) {
+    for (let dc = -2; dc <= 2; dc++) {
+      setMod(
+        alignC + dr,
+        alignC + dc,
+        Math.max(Math.abs(dr), Math.abs(dc)) !== 1
+      );
+    }
+  }
+  for (let i = 8; i < size - 8; i++) {
+    if (!reserved[6][i]) setMod(6, i, i % 2 === 0);
+    if (!reserved[i][6]) setMod(i, 6, i % 2 === 0);
+  }
+  setMod(size - 8, 8, true);
+  for (let i = 0; i < 9; i++) {
+    reserved[8][i] = true;
+    reserved[i][8] = true;
+  }
+  for (let i = 0; i < 8; i++) {
+    reserved[8][size - 1 - i] = true;
+    reserved[size - 1 - i][8] = true;
+  }
+
+  let bitIdx = 0;
+  const totalBits = codewords.length * 8;
+  let upward = true;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++) {
+      const r = upward ? size - 1 - vert : vert;
+      for (let lr = 0; lr < 2; lr++) {
+        const c = right - lr;
+        if (!reserved[r][c]) {
+          const bit =
+            bitIdx < totalBits
+              ? (codewords[bitIdx >> 3] >> (7 - (bitIdx & 7))) & 1
+              : 0;
+          bitIdx++;
+          const masked = (r + c) % 2 === 0 ? bit ^ 1 : bit;
+          grid[r][c] = masked === 1;
+        }
+      }
+    }
+    upward = !upward;
+  }
+
+  // Format Info for Level L (01), Mask 0 (000) -> 0x77c4
+  const fmt = 0x77c4;
+  const fBit = (idx: number) => ((fmt >> (14 - idx)) & 1) === 1;
+  for (let i = 0; i <= 5; i++) grid[8][i] = fBit(i);
+  grid[8][7] = fBit(6);
+  grid[8][8] = fBit(7);
+  grid[7][8] = fBit(8);
+  for (let i = 9; i <= 14; i++) grid[14 - i][8] = fBit(i);
+  for (let i = 0; i <= 6; i++) grid[size - 1 - i][8] = fBit(i);
+  for (let i = 7; i <= 14; i++) grid[8][size - 15 + i] = fBit(i);
+
+  return grid;
+}
+
+export function renderNewspaperQrCodeDataUrl(
+  url = 'https://palladium86.de',
+  pxSize = 148
+): string {
+  const matrix = buildScannableQrMatrix(url);
+  const n = matrix.length;
+  const margin = 3;
+  const totalMods = n + margin * 2;
+  let paths = '';
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (matrix[r][c]) {
+        paths += `<rect x="${c + margin}" y="${r + margin}" width="1" height="1" fill="#110c07"/>`;
+      }
+    }
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${pxSize}" height="${pxSize}" viewBox="0 0 ${totalMods} ${totalMods}" shape-rendering="crispEdges"><rect width="${totalMods}" height="${totalMods}" fill="#fdf8ec"/>${paths}</svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
 export function exportNewspaperFacebookEditionPng(opts: {
   issueId: number;
   updatedAt: string;
   headline: string;
   body: string;
   tips?: string;
+  qrUrl?: string;
+  contactEmail?: string;
   versionLabel: string;
 }): void {
   if (typeof document === 'undefined') return;
@@ -2142,7 +2356,7 @@ export function exportNewspaperFacebookEditionPng(opts: {
   ctx.font = 'bold 17px "JetBrains Mono", monospace';
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  ctx.fillText(`HANAU-GRIMM CENTER • AUSGABE #${opts.issueId}`, 60, 56);
+  ctx.fillText(`PALLADIUM ONLINE • AUSGABE #${opts.issueId}`, 60, 56);
 
   ctx.fillStyle = '#9f1239';
   ctx.textAlign = 'center';
@@ -2324,7 +2538,7 @@ export function exportNewspaperFacebookEditionPng(opts: {
   ctx.font = '20px Georgia, serif';
   let curRightY = colTop + 44;
   for (const line of tipsLines) {
-    if (curRightY > footerTop - 210) break;
+    if (curRightY > footerTop - 224) break;
     if (!line) {
       curRightY += 14;
       continue;
@@ -2333,50 +2547,94 @@ export function exportNewspaperFacebookEditionPng(opts: {
     curRightY += 30;
   }
 
-  // Authentic 1986 Palladium Roller Disco Callout Box in lower right column (pure editorial graphic, no buttons/certificates)
-  const promoTop = Math.max(curRightY + 18, footerTop - 190);
-  const promoH = footerTop - 26 - promoTop;
-  if (promoH >= 110) {
+  // Authentic 1986 Palladium Roller Disco Callout Box + Scannable QR Code in lower-right corner
+  const targetQrUrl = (opts.qrUrl || 'https://palladium86.de').trim();
+  const promoTop = Math.max(curRightY + 14, footerTop - 198);
+  const promoH = footerTop - 22 - promoTop;
+  if (promoH >= 130) {
     ctx.fillStyle = '#e4d5b7';
     ctx.fillRect(colRightX, promoTop, colWidth, promoH);
     ctx.strokeStyle = '#3a2817';
     ctx.lineWidth = 3;
     ctx.strokeRect(colRightX, promoTop, colWidth, promoH);
 
-    ctx.fillStyle = '#2b1d10';
-    ctx.font = '900 22px "Outfit", Georgia, serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(
-      '★ ROLLER DISCO PALLADIUM HANAU ’86 ★',
-      colRightX + colWidth / 2,
-      promoTop + 20
-    );
+    // Draw high-contrast scannable QR code in bottom-right of box
+    const qrBoxSize = Math.min(146, promoH - 20);
+    const qrX = colRightX + colWidth - qrBoxSize - 12;
+    const qrY = promoTop + Math.round((promoH - qrBoxSize) / 2);
 
+    ctx.fillStyle = '#fdf8ec';
+    ctx.fillRect(qrX, qrY, qrBoxSize, qrBoxSize);
+    ctx.strokeStyle = '#2b1d10';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(qrX, qrY, qrBoxSize, qrBoxSize);
+
+    const qrMatrix = buildScannableQrMatrix(targetQrUrl);
+    const qN = qrMatrix.length;
+    const qPad = 3;
+    const qScale = qrBoxSize / (qN + qPad * 2);
+    ctx.fillStyle = '#110c07';
+    for (let r = 0; r < qN; r++) {
+      for (let c = 0; c < qN; c++) {
+        if (qrMatrix[r][c]) {
+          ctx.fillRect(
+            Math.floor(qrX + (c + qPad) * qScale),
+            Math.floor(qrY + (r + qPad) * qScale),
+            Math.ceil(qScale),
+            Math.ceil(qScale)
+          );
+        }
+      }
+    }
+
+    // Left text block next to the QR code
+    const textAreaW = qrX - colRightX - 24;
+    const textLeft = colRightX + 14;
+    ctx.textAlign = 'left';
     ctx.fillStyle = '#881337';
-    ctx.font = 'bold 15px "JetBrains Mono", monospace';
+    ctx.font = 'bold 13.5px "JetBrains Mono", monospace';
     ctx.fillText(
-      'HOLZPARKETT • 80ER-SOUND • NEON-LIGHTSHOW • MULTIPLAYER',
-      colRightX + colWidth / 2,
-      promoTop + 54
+      'DIREKT AUF DIE BAHN:',
+      textLeft,
+      promoTop + 16,
+      textAreaW
+    );
+    ctx.fillStyle = '#140d06';
+    ctx.font = '900 20px "Outfit", Georgia, serif';
+    ctx.fillText(
+      'QR-CODE SCANNEN • PALLADIUM86.DE',
+      textLeft,
+      promoTop + 38,
+      textAreaW
     );
 
-    ctx.fillStyle = '#241a10';
-    ctx.font = 'bold 16px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#2b1d10';
+    ctx.font = 'bold 13.5px "JetBrains Mono", monospace';
     ctx.fillText(
-      'JETZT KOSTENLOS IM BROWSER MITROLLEN:',
-      colRightX + colWidth / 2,
-      promoTop + 86
+      '★ PALLADIUM ONLINE ARENA ’86 ★',
+      textLeft,
+      promoTop + 72,
+      textAreaW
+    );
+    ctx.fillStyle = '#4a3520';
+    ctx.font = '13px Georgia, serif';
+    ctx.fillText(
+      'Holzparkett • 80er-Sound • Multiplayer',
+      textLeft,
+      promoTop + 94,
+      textAreaW
     );
     ctx.fillStyle = '#1e3a8a';
-    ctx.font = 'bold 18px "JetBrains Mono", monospace';
+    ctx.font = 'bold 16px "JetBrains Mono", monospace';
     ctx.fillText(
-      'palladium-arena-s94k2.vercel.app',
-      colRightX + colWidth / 2,
-      promoTop + 114
+      targetQrUrl,
+      textLeft,
+      promoTop + 118,
+      textAreaW
     );
   }
 
-  // 5. Print Footer (Strictly NO buttons, NO Gelesen ✓, NO ×, with 100% kostenloses Fan-Projekt notice)
+  // 5. Print Footer (with www.palladium86.de and contact email)
   ctx.strokeStyle = '#2b1d10';
   ctx.lineWidth = 4;
   ctx.beginPath();
@@ -2384,11 +2642,14 @@ export function exportNewspaperFacebookEditionPng(opts: {
   ctx.lineTo(W - 60, footerTop);
   ctx.stroke();
 
+  const targetContactEmail = (
+    opts.contactEmail || 'info@palladium86.de'
+  ).trim();
   ctx.fillStyle = '#2b1d10';
-  ctx.font = 'bold 15px "JetBrains Mono", monospace';
+  ctx.font = 'bold 14px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
   ctx.fillText(
-    'DRUCK & VERLAG: PALLADIUM ROLLER DISCO HANAU • JETZT MITROLLEN: palladium-arena-s94k2.vercel.app',
+    `DRUCK & VERLAG: PALLADIUM ROLLER DISCO HANAU • www.palladium86.de • ${targetContactEmail}`,
     W / 2,
     footerTop + 14
   );
@@ -2417,7 +2678,7 @@ export function exportNewspaperFacebookEditionPng(opts: {
       'SONDERAUSGABE: NEON-LIGHTSHOW, 5 PIXEL-STATIONEN & SONNTAGS-CLIQUE LIVE!'
     }\n\n${
       opts.body || ''
-    }\n\n👾 100 % kostenloses Fan-Projekt – hier wird ausschließlich mit gesammelten Spiel-Pixeln bezahlt, echtes Geld gibt es hier nicht!\n🛼 Jetzt direkt im Browser mitrollen: https://palladium-arena-s94k2.vercel.app`;
+    }\n\n👾 100 % kostenloses Fan-Projekt – hier wird ausschließlich mit gesammelten Spiel-Pixeln bezahlt, echtes Geld gibt es hier nicht!\n🛼 Jetzt direkt im Browser mitrollen: ${targetQrUrl}`;
     navigator.clipboard.writeText(postText).catch(() => {
       // ignore clipboard permissions error
     });

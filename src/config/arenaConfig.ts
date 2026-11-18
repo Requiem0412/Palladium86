@@ -27,6 +27,12 @@ export const DEFAULT_LAYOUT = {
     bistroTable2: { x: 215, y: 922, w: 40, h: 40, rot: 0, label: 'BISTRO-TISCH 2' },
     bistroTable3: { x: 335, y: 922, w: 40, h: 40, rot: 0, label: 'BISTRO-TISCH 3' },
     bistroTable4: { x: 150, y: 995, w: 40, h: 40, rot: 0, label: 'BISTRO-TISCH 4' },
+    bistroChair1: { x: 64, y: 958, w: 22, h: 22, rot: 0, label: 'BISTRO-STUHL 1' },
+    bistroChair2: { x: 274, y: 958, w: 22, h: 22, rot: 0, label: 'BISTRO-STUHL 2' },
+    newspaperStand: { x: 1807, y: 891, w: 96, h: 38, rot: 0, label: 'ZEITUNGSSTÄNDER (KURIER)' },
+    arcadeCab1: { x: 60, y: 246, w: 48, h: 36, rot: 0, label: 'ARCADE 1: MONKEY STOMP' },
+    arcadeCab2: { x: 124, y: 246, w: 48, h: 36, rot: 0, label: 'ARCADE 2: DISCO INVADERS' },
+    arcadeCab3: { x: 188, y: 246, w: 48, h: 36, rot: 0, label: 'ARCADE 3: PAC-ROLLER' },
   },
   npcAnchors: {
     'speed-1': { name: 'Paceline-Leader Kai', homeX: 1604, homeY: 329, orbitAngle: 0.48, laneRadiusX: 668, laneRadiusY: 336 },
@@ -852,6 +858,59 @@ export const ARENA_LAYOUT = {
     height: 42,
     rot: 0,
   },
+
+  // E) EINZEL-OBJEKTE (Zeitungsständer, Arcade-Automaten 1–3, Einzel-Stühle am Bistro)
+  newspaperStand: {
+    x: 1807,
+    y: 891,
+    width: 96,
+    height: 38,
+    centerX: 1855,
+    centerY: 910,
+  },
+  arcadeCabinets: [
+    { id: 'monkey-stomp' as const, modId: 'arcadeCab1' as const, x: 84, y: 264, width: 48, height: 36 },
+    { id: 'disco-invaders' as const, modId: 'arcadeCab2' as const, x: 148, y: 264, width: 48, height: 36 },
+    { id: 'pac-roller' as const, modId: 'arcadeCab3' as const, x: 212, y: 264, width: 48, height: 36 },
+  ],
+  bistroChairs: [
+    { id: 'bistro-chair-1', modId: 'bistroChair1' as const, x: 75, y: 969, radius: 11 },
+    { id: 'bistro-chair-2', modId: 'bistroChair2' as const, x: 285, y: 969, radius: 11 },
+  ],
+};
+
+export type LockableZoneId = 'bistro' | 'arcade' | 'mirrorWall' | 'proShop';
+
+export interface LockedZoneEntry {
+  locked: boolean;
+  bannerText: string;
+}
+
+export type LockedArenaZonesConfig = Record<LockableZoneId, LockedZoneEntry>;
+
+export const LOCKED_ZONE_BANNER_PRESETS: string[] = [
+  '✨ IN ARBEIT – WIR BASTELN NOCH! ✨',
+  '🛠️ BAUSTELLE ’86 – BALD OFFEN!',
+  '🎨 FRISCH LACKIERT – GLEICH FREI!',
+];
+
+export const LOCKED_ARENA_ZONES: LockedArenaZonesConfig = {
+  bistro: {
+    locked: false,
+    bannerText: '✨ IN ARBEIT – WIR BASTELN NOCH! ✨',
+  },
+  arcade: {
+    locked: false,
+    bannerText: '🛠️ BAUSTELLE ’86 – BALD OFFEN!',
+  },
+  mirrorWall: {
+    locked: false,
+    bannerText: '✨ IN ARBEIT – WIR BASTELN NOCH! ✨',
+  },
+  proShop: {
+    locked: false,
+    bannerText: '🛠️ BAUSTELLE ’86 – BALD OFFEN!',
+  },
 };
 
 export type EditableModuleId =
@@ -867,7 +926,13 @@ export type EditableModuleId =
   | 'bistroTable1'
   | 'bistroTable2'
   | 'bistroTable3'
-  | 'bistroTable4';
+  | 'bistroTable4'
+  | 'bistroChair1'
+  | 'bistroChair2'
+  | 'newspaperStand'
+  | 'arcadeCab1'
+  | 'arcadeCab2'
+  | 'arcadeCab3';
 
 export interface EditableModuleRect {
   x: number;
@@ -1002,6 +1067,54 @@ export const DEFAULT_CUSTOM_ARENA_LAYOUT: CustomArenaLayoutState = {
       rot: DEFAULT_LAYOUT.modules.bistroTable4.rot,
       label: DEFAULT_LAYOUT.modules.bistroTable4.label,
     },
+    bistroChair1: {
+      x: DEFAULT_LAYOUT.modules.bistroChair1.x,
+      y: DEFAULT_LAYOUT.modules.bistroChair1.y,
+      width: DEFAULT_LAYOUT.modules.bistroChair1.w,
+      height: DEFAULT_LAYOUT.modules.bistroChair1.h,
+      rot: DEFAULT_LAYOUT.modules.bistroChair1.rot,
+      label: DEFAULT_LAYOUT.modules.bistroChair1.label,
+    },
+    bistroChair2: {
+      x: DEFAULT_LAYOUT.modules.bistroChair2.x,
+      y: DEFAULT_LAYOUT.modules.bistroChair2.y,
+      width: DEFAULT_LAYOUT.modules.bistroChair2.w,
+      height: DEFAULT_LAYOUT.modules.bistroChair2.h,
+      rot: DEFAULT_LAYOUT.modules.bistroChair2.rot,
+      label: DEFAULT_LAYOUT.modules.bistroChair2.label,
+    },
+    newspaperStand: {
+      x: DEFAULT_LAYOUT.modules.newspaperStand.x,
+      y: DEFAULT_LAYOUT.modules.newspaperStand.y,
+      width: DEFAULT_LAYOUT.modules.newspaperStand.w,
+      height: DEFAULT_LAYOUT.modules.newspaperStand.h,
+      rot: DEFAULT_LAYOUT.modules.newspaperStand.rot,
+      label: DEFAULT_LAYOUT.modules.newspaperStand.label,
+    },
+    arcadeCab1: {
+      x: DEFAULT_LAYOUT.modules.arcadeCab1.x,
+      y: DEFAULT_LAYOUT.modules.arcadeCab1.y,
+      width: DEFAULT_LAYOUT.modules.arcadeCab1.w,
+      height: DEFAULT_LAYOUT.modules.arcadeCab1.h,
+      rot: DEFAULT_LAYOUT.modules.arcadeCab1.rot,
+      label: DEFAULT_LAYOUT.modules.arcadeCab1.label,
+    },
+    arcadeCab2: {
+      x: DEFAULT_LAYOUT.modules.arcadeCab2.x,
+      y: DEFAULT_LAYOUT.modules.arcadeCab2.y,
+      width: DEFAULT_LAYOUT.modules.arcadeCab2.w,
+      height: DEFAULT_LAYOUT.modules.arcadeCab2.h,
+      rot: DEFAULT_LAYOUT.modules.arcadeCab2.rot,
+      label: DEFAULT_LAYOUT.modules.arcadeCab2.label,
+    },
+    arcadeCab3: {
+      x: DEFAULT_LAYOUT.modules.arcadeCab3.x,
+      y: DEFAULT_LAYOUT.modules.arcadeCab3.y,
+      width: DEFAULT_LAYOUT.modules.arcadeCab3.w,
+      height: DEFAULT_LAYOUT.modules.arcadeCab3.h,
+      rot: DEFAULT_LAYOUT.modules.arcadeCab3.rot,
+      label: DEFAULT_LAYOUT.modules.arcadeCab3.label,
+    },
   },
   npcAnchors: { ...DEFAULT_LAYOUT.npcAnchors },
 };
@@ -1074,6 +1187,12 @@ export function formatLayoutConfigCodeBlock(
     'bistroTable2',
     'bistroTable3',
     'bistroTable4',
+    'bistroChair1',
+    'bistroChair2',
+    'newspaperStand',
+    'arcadeCab1',
+    'arcadeCab2',
+    'arcadeCab3',
   ];
 
   const modLines = modOrder.map((id) => {
@@ -1385,5 +1504,78 @@ export function applyCustomArenaLayout(
     height: lk.height,
     rot: lk.rot,
   };
+
+  // 10. EINZEL-OBJEKTE: ZEITUNGSSTÄNDER, ARCADE-AUTOMATEN 1–3 & BISTRO-STÜHLE 1–2
+  const nsRaw =
+    mods.newspaperStand || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.newspaperStand;
+  const ns = getModuleCollisionRect(nsRaw);
+  ARENA_LAYOUT.newspaperStand = {
+    x: ns.x,
+    y: ns.y,
+    width: ns.width,
+    height: ns.height,
+    centerX: Math.round(ns.cx),
+    centerY: Math.round(ns.cy),
+  };
+
+  const ac1 = getModuleCollisionRect(
+    mods.arcadeCab1 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.arcadeCab1
+  );
+  const ac2 = getModuleCollisionRect(
+    mods.arcadeCab2 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.arcadeCab2
+  );
+  const ac3 = getModuleCollisionRect(
+    mods.arcadeCab3 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.arcadeCab3
+  );
+  ARENA_LAYOUT.arcadeCabinets = [
+    {
+      id: 'monkey-stomp',
+      modId: 'arcadeCab1',
+      x: Math.round(ac1.cx),
+      y: Math.round(ac1.cy),
+      width: ac1.width,
+      height: ac1.height,
+    },
+    {
+      id: 'disco-invaders',
+      modId: 'arcadeCab2',
+      x: Math.round(ac2.cx),
+      y: Math.round(ac2.cy),
+      width: ac2.width,
+      height: ac2.height,
+    },
+    {
+      id: 'pac-roller',
+      modId: 'arcadeCab3',
+      x: Math.round(ac3.cx),
+      y: Math.round(ac3.cy),
+      width: ac3.width,
+      height: ac3.height,
+    },
+  ];
+
+  const bc1 = getModuleCollisionRect(
+    mods.bistroChair1 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.bistroChair1
+  );
+  const bc2 = getModuleCollisionRect(
+    mods.bistroChair2 || DEFAULT_CUSTOM_ARENA_LAYOUT.modules.bistroChair2
+  );
+  ARENA_LAYOUT.bistroChairs = [
+    {
+      id: 'bistro-chair-1',
+      modId: 'bistroChair1',
+      x: Math.round(bc1.cx),
+      y: Math.round(bc1.cy),
+      radius: Math.max(8, Math.round(Math.min(bc1.width, bc1.height) / 2)),
+    },
+    {
+      id: 'bistro-chair-2',
+      modId: 'bistroChair2',
+      x: Math.round(bc2.cx),
+      y: Math.round(bc2.cy),
+      radius: Math.max(8, Math.round(Math.min(bc2.width, bc2.height) / 2)),
+    },
+  ];
 }
+
 
