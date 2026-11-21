@@ -8,10 +8,38 @@
 // ============================================================================
 
 export const APP_VERSION = 'V0.9-ALPHA';
-export const APP_BUILD_DATE_ISO = '2026-11-18';
-export const APP_BUILD_DATETIME = '18.11.2026 11:15';
+
+declare const __APP_BUILD_DATETIME__: string | undefined;
+declare const __APP_BUILD_DATE_ISO__: string | undefined;
+
+function formatFallbackBuildDateTime(): { isoDate: string; displayDateTime: string } {
+  const d = new Date();
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = String(d.getFullYear());
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return {
+    isoDate: `${yyyy}-${mm}-${dd}`,
+    displayDateTime: `${dd}.${mm}.${yyyy} ${hh}:${min}`,
+  };
+}
+
+const _fallbackBuild = formatFallbackBuildDateTime();
+export const APP_BUILD_DATE_ISO =
+  typeof __APP_BUILD_DATE_ISO__ !== 'undefined' && __APP_BUILD_DATE_ISO__
+    ? __APP_BUILD_DATE_ISO__
+    : _fallbackBuild.isoDate;
+export const APP_BUILD_DATETIME =
+  typeof __APP_BUILD_DATETIME__ !== 'undefined' && __APP_BUILD_DATETIME__
+    ? __APP_BUILD_DATETIME__
+    : _fallbackBuild.displayDateTime;
 export const APP_VERSION_LABEL = `${APP_VERSION} • ${APP_BUILD_DATETIME}`;
 export const APP_ZIP_FILENAME = `palladium86-${APP_VERSION}-${APP_BUILD_DATE_ISO}.zip`;
+
+export const WELCOME_ALPHA_BADGE = 'WILLKOMMEN ZUM ALPHA-TEST';
+export const DEFAULT_EVENT_ANNOUNCEMENT =
+  'WILLKOMMEN ZUM ALPHA-TEST IM PALLADIUM 86! Rollt gemeinsam auf der 80er-Rollschuhbahn, testet das Ballspiel & schickt eure Musikwünsche direkt an den DJ-Tower!';
 
 export const ADMIN_PIN = '1986';
 

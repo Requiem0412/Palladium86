@@ -50,6 +50,8 @@ import {
   STATION_DIALOG_DEFAULTS,
   StationDialogId,
   TrickMoveId,
+  DEFAULT_EVENT_ANNOUNCEMENT,
+  WELCOME_ALPHA_BADGE,
 } from './config/arenaConfig';
 import Peer, { DataConnection } from 'peerjs';
 import {
@@ -212,6 +214,15 @@ import {
   upsertCloudPlayerProfile,
   upsertCloudVisit,
   VipGuestListEntry,
+  fetchCloudRoomSettings,
+  loginOrSyncCloudAccountByName,
+  subscribeToCloudPlayerProfile,
+  subscribeToCloudRoomSettings,
+  upsertCloudRoomSettings,
+  fetchVeteranRinkVotes,
+  recordVeteranRinkVote,
+  recordVisitorReferrer,
+  VeteranRinkCounts,
 } from './lib/supabaseCloud';
 import { PocketPdaDrawer } from './components/PocketPdaDrawer';
 
@@ -337,6 +348,14 @@ interface AdminSyncPayload {
   arcadeMachinesEnabled?: boolean;
   nurseEnabled?: boolean;
   pointsSystemEnabled?: boolean;
+  alphaStartScreenEnabled?: boolean;
+  entranceFlyerEnabled?: boolean;
+  entranceFlyerBadge?: string;
+  entranceFlyerTitle?: string;
+  entranceFlyerBody?: string;
+  entranceFlyerButtonText?: string;
+  singleplayerEnabled?: boolean;
+  multiplayerEnabled?: boolean;
 }
 
 type MultiplayerPacket =
@@ -432,7 +451,27 @@ type MultiplayerPacket =
 export function App() {
   // Closed-Alpha / Beta Access State & Browser Lock
   const [alphaBrowserId] = useState<string>(() => getOrCreateAlphaBrowserId());
-  const [alphaBetaConfig, setAlphaBetaConfig] = useState<AlphaBetaAccessConfig>(
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("stats") === "1") return;
+    if (sessionStorage.getItem("p86_ref_logged") === "1") return;
+    sessionStorage.setItem("p86_ref_logged", "1");
+    const explicitRef = params.get("ref") || params.get("utm_source");
+    let source = "Direkt / Messenger";
+    if (explicitRef && explicitRef.trim()) {
+      source = explicitRef.trim().toLowerCase();
+    } else if (document.referrer) {
+      try {
+        const host = new URL(document.referrer).hostname.replace(/^www\./, "").toLowerCase();
+        if (host && host !== window.location.hostname.replace(/^www\./, "").toLowerCase()) {
+          source = host;
+        }
+      } catch {}
+    }
+    void recordVisitorReferrer(source);
+  }, []);  const [alphaBetaConfig, setAlphaBetaConfig] = useState<AlphaBetaAccessConfig>(
     () => loadAlphaBetaConfig()
   );
   const [localAlphaSession, setLocalAlphaSession] =
@@ -562,7 +601,7 @@ export function App() {
   >(null);
   const [pdaPickupToast, setPdaPickupToast] = useState<string | null>(null);
   const [adminTab, setAdminTab] = useState<
-    'track' | 'light_dj' | 'access' | 'look_build' | 'ranks_points' | 'diagnose'
+    'track' | 'light_dj' | 'dj' | 'access' | 'look_build' | 'ranks_points' | 'diagnose'
   >('track');
   const [springerStaffelShowSec, setSpringerStaffelShowSec] =
     useState<number>(0);
@@ -941,6 +980,38 @@ export function App() {
   });
   const [showDjLoginModal, setShowDjLoginModal] = useState<boolean>(false);
   const [showDjBoothModal, setShowDjBoothModal] = useState<boolean>(false);
+  const [djAsDraggableModule, setDjAsDraggableModule] = useState<boolean>(false);
+  const [djModulePos, setDjModulePos] = useState<{ x: number; y: number }>(() => {
+    try {
+      const raw = window.localStorage.getItem("palladium86_dj_module_pos_v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
+          return { x: parsed.x, y: parsed.y };
+        }
+      }
+    } catch {}
+    return { x: 24, y: 72 };
+  });
+  const djDragOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
+  const [isDjDragging, setIsDjDragging] = useState<boolean>(false);
+  const [tab5ModuleOrder, setTab5ModuleOrder] = useState<Array<"ai_nurse" | "rank_xp">>(() => {
+    try {
+      const raw = window.localStorage.getItem("palladium86_tab5_module_order_v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (
+          Array.isArray(parsed) &&
+          parsed.length === 2 &&
+          parsed.includes("ai_nurse") &&
+          parsed.includes("rank_xp")
+        ) {
+          return parsed as Array<"ai_nurse" | "rank_xp">;
+        }
+      }
+    } catch {}
+    return ["ai_nurse", "rank_xp"];
+  });
   const [djPasswordInput, setDjPasswordInput] = useState<string>('');
   const [djPasswordError, setDjPasswordError] = useState<string | null>(null);
   const [strobeBurstCount, setStrobeBurstCount] = useState<number>(0);
@@ -1289,13 +1360,17 @@ export function App() {
   const [guestJoinError, setGuestJoinError] = useState<string | null>(null);
 
   // Gemeinsame Start-/Portal-Seite & Geschlossene Privat-Räume (?room=...)
-  const [showPortalScreen, setShowPortalScreen] = useState<boolean>(
-    () =>
-      !initialUrlRoomId &&
-      !initialControllerRoomId &&
-      !initialHasRegieUrlParam &&
-      !initialHandheldUrlRole
-  );
+  const [showPortalScreen, setShowPortalScreen] = useState<boolean>(false);
+  const [alphaDeviceType, setAlphaDeviceType] = useState<'pc' | 'tablet' | 'mobile'>(() => {
+    try {
+      const saved = window.localStorage.getItem('palladium86_alpha_device_type');
+      if (saved === 'pc' || saved === 'tablet' || saved === 'mobile') return saved;
+      const ua = navigator.userAgent || '';
+      if (/iPad|Tablet|PlayBook|Silk/i.test(ua) || (navigator.maxTouchPoints > 1 && window.innerWidth >= 768)) return 'tablet';
+      if (/Mobi|Android|iPhone|iPod/i.test(ua) || window.innerWidth < 768) return 'mobile';
+    } catch {}
+    return 'pc';
+  });
   const [privateRoomCodeInput, setPrivateRoomCodeInput] = useState<string>(
     () => `TEAM-${Math.floor(1000 + Math.random() * 9000)}`
   );
@@ -1346,6 +1421,25 @@ export function App() {
   useEffect(() => {
     playerNameRef.current = playerName;
   }, [playerName]);
+
+  // Automatisches Cloud-Backup von Skater-Name, Outfit & Spind-Einstellungen (Chrome <-> Safari)
+  useEffect(() => {
+    const cleanName = (playerName || '').trim();
+    if (isAnonymousGuest || cleanName.length < 2 || cleanName === 'Skater' || cleanName === 'Gast') {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void upsertCloudPlayerProfile({
+        name: cleanName,
+        outfit_color: playerShirtColor,
+        highscore: lockerSettings.pdaMinigameHighscore || 0,
+        settings: {
+          lockerSettings,
+        },
+      });
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [playerName, isAnonymousGuest, playerShirtColor, lockerSettings]);
 
   const playerShirtColorRef = useRef<string>(playerShirtColor);
   useEffect(() => {
@@ -1737,6 +1831,34 @@ export function App() {
     saveAdminSettings(adminSettings);
   }, [adminSettings]);
 
+  // Persist selected Alpha test device type (PC / Tablet / Handy)
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('palladium86_alpha_device_type', alphaDeviceType);
+      document.body.dataset.alphaDevice = alphaDeviceType;
+    } catch {}
+  }, [alphaDeviceType]);
+
+  const effectiveAlphaStartScreen = useMemo(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search).get('start');
+      if (p === 'alpha') return true;
+      if (p === 'normal') return false;
+    }
+    return Boolean(adminSettings.alphaStartScreenEnabled);
+  }, [adminSettings.alphaStartScreenEnabled]);
+
+  const [flyerDismissed, setFlyerDismissed] = useState(false);
+  const [flyerVeteranRink, setFlyerVeteranRink] = useState<string>(() => (typeof window !== "undefined" ? localStorage.getItem("p86_flyer_rink") || "" : ""));
+  const [flyerGender, setFlyerGender] = useState<string>(() => (typeof window !== "undefined" ? localStorage.getItem("p86_flyer_gender") || "" : ""));
+  const [flyerYearDigit1, setFlyerYearDigit1] = useState<string>(() => (typeof window !== "undefined" ? (localStorage.getItem("p86_flyer_year") || "")[0] || "" : ""));
+  const [flyerYearDigit2, setFlyerYearDigit2] = useState<string>(() => (typeof window !== "undefined" ? (localStorage.getItem("p86_flyer_year") || "")[1] || "" : ""));
+  const [flyerYearSaved, setFlyerYearSaved] = useState<boolean>(() => (typeof window !== "undefined" ? Boolean(localStorage.getItem("p86_flyer_year")) : false));
+  const [veteranCounts, setVeteranCounts] = useState<VeteranRinkCounts>({ palladium: 0, rollerland: 0, other: 0 });
+  const showEntranceFlyer = useMemo(() => { if (flyerDismissed) return false; if (typeof window !== 'undefined') { const f = new URLSearchParams(window.location.search).get('flyer'); if (f === '1') return true; if (f === '0') return false; } return Boolean(adminSettings.entranceFlyerEnabled); }, [flyerDismissed, adminSettings.entranceFlyerEnabled]);
+  useEffect(() => { if (showEntranceFlyer) { fetchVeteranRinkVotes().then(setVeteranCounts); } }, [showEntranceFlyer]);
+  const isSingleplayerOpen = adminSettings.singleplayerEnabled !== false;
+  const isMultiplayerOpen = adminSettings.multiplayerEnabled !== false;
   // Save radio playlist whenever changed
   useEffect(() => {
     saveRadioPlaylist(radioPlaylist);
@@ -3255,6 +3377,92 @@ export function App() {
     };
   }, [applyIncomingAdminSync, isPrivateRoom, showHallAnnouncement]);
 
+  // Live-Sync für geschlossene Privat-Räume per Raum-Code über Supabase
+  useEffect(() => {
+    if (!isPrivateRoom || !mpRoomId) return;
+    let active = true;
+    fetchCloudRoomSettings<AdminSyncPayload>(mpRoomId).then((row) => {
+      if (!active || !row) return;
+      if (row.controls && typeof row.controls === 'object') {
+        applyIncomingAdminSync(row.controls);
+      }
+      if (
+        row.announcement &&
+        row.announcement !== lastSyncedAnnouncementRef.current
+      ) {
+        lastSyncedAnnouncementRef.current = row.announcement;
+        showHallAnnouncement(row.announcement, true);
+      }
+    });
+    const unsubscribe = subscribeToCloudRoomSettings<AdminSyncPayload>(
+      mpRoomId,
+      (row) => {
+        if (!active || !row) return;
+        if (row.controls && typeof row.controls === 'object') {
+          applyIncomingAdminSync(row.controls);
+        }
+        if (
+          row.announcement &&
+          row.announcement !== lastSyncedAnnouncementRef.current
+        ) {
+          lastSyncedAnnouncementRef.current = row.announcement;
+          showHallAnnouncement(row.announcement, true);
+        }
+      }
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [applyIncomingAdminSync, isPrivateRoom, mpRoomId, showHallAnnouncement]);
+
+  // Browser-übergreifender Account- & Profil-Sync (Chrome <-> Safari) anhand des Skater-Namens
+  useEffect(() => {
+    const cleanName = (playerName || '').trim();
+    if (!cleanName || cleanName === 'Skater' || cleanName === 'Gast') return;
+    let active = true;
+    let unsubProfile: (() => void) | null = null;
+    loginOrSyncCloudAccountByName(cleanName).then((acc) => {
+      if (!active || !acc) return;
+      if (acc.outfit_color && typeof setPlayerShirtColor === 'function') {
+        setPlayerShirtColor((prev) =>
+          prev === acc.outfit_color ? prev : acc.outfit_color!
+        );
+      }
+      const cloudLocker = (
+        acc.settings as
+          | { lockerSettings?: Partial<LockerPlayerSettings> }
+          | undefined
+      )?.lockerSettings;
+      if (cloudLocker && typeof cloudLocker === 'object') {
+        setLockerSettings((prev) => {
+          const merged: LockerPlayerSettings = {
+            ...prev,
+            hasPocketPda: Boolean(prev.hasPocketPda || cloudLocker.hasPocketPda),
+            pdaMinigameHighscore: Math.max(
+              prev.pdaMinigameHighscore || 0,
+              Number(cloudLocker.pdaMinigameHighscore) || 0
+            ),
+          };
+          saveLockerPlayerSettings(merged);
+          return merged;
+        });
+      }
+      unsubProfile = subscribeToCloudPlayerProfile(acc.player_id, (prof) => {
+        if (!active) return;
+        if (prof.outfit_color && typeof setPlayerShirtColor === 'function') {
+          setPlayerShirtColor((prev) =>
+            prev === prof.outfit_color ? prev : prof.outfit_color!
+          );
+        }
+      });
+    });
+    return () => {
+      active = false;
+      if (unsubProfile) unsubProfile();
+    };
+  }, [playerName]);
+
   const cleanupPeerSession = useCallback(() => {
     hostConnectionsRef.current.forEach((c) => {
       try {
@@ -4079,6 +4287,24 @@ export function App() {
         setGuestJoinError(
           'Bitte gib mindestens 2 Zeichen für deinen Skater-Namen ein!'
         );
+        return;
+      }
+      const normalizedCheck = cleanName
+        .toLowerCase()
+        .replace(/4/g, 'a')
+        .replace(/3/g, 'e')
+        .replace(/1/g, 'i')
+        .replace(/0/g, 'o')
+        .replace(/5/g, 's')
+        .replace(/[^a-zäöüß]/g, '');
+      const blockedTerms = [
+        'nazi', 'hitler', 'adolf', 'ssmann', 'waffen', 'holocaust',
+        'hurensohn', 'fotze', 'wichser', 'arschloch', 'missgeburt', 'neger', 'kanake'
+      ];
+      if (blockedTerms.some((term) => normalizedCheck.includes(term))) {
+        const bouncerMsg = 'Mit dem Namen kommst du hier nicht rein.';
+        setGuestJoinError(bouncerMsg);
+        setBouncerMessage(bouncerMsg);
         return;
       }
       const activeMobilityChoice =
@@ -6741,6 +6967,51 @@ export function App() {
     );
   }
 
+  const handleDjHeaderPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!djAsDraggableModule) return;
+    const target = e.target as HTMLElement | null;
+    if (target && target.closest("button, input, select, textarea, a, [role='button']")) {
+      return;
+    }
+    e.preventDefault();
+    djDragOffsetRef.current = {
+      dx: e.clientX - djModulePos.x,
+      dy: e.clientY - djModulePos.y,
+    };
+    setIsDjDragging(true);
+  };
+
+  useEffect(() => {
+    if (!isDjDragging) return;
+    const onMove = (e: PointerEvent) => {
+      const offset = djDragOffsetRef.current;
+      if (!offset) return;
+      const maxX = Math.max(8, window.innerWidth - 280);
+      const maxY = Math.max(8, window.innerHeight - 90);
+      const nextPos = {
+        x: Math.min(maxX, Math.max(8, Math.round(e.clientX - offset.dx))),
+        y: Math.min(maxY, Math.max(8, Math.round(e.clientY - offset.dy))),
+      };
+      setDjModulePos(nextPos);
+    };
+    const onUp = () => {
+      setIsDjDragging(false);
+      djDragOffsetRef.current = null;
+      setDjModulePos((curr) => {
+        try {
+          window.localStorage.setItem("palladium86_dj_module_pos_v1", JSON.stringify(curr));
+        } catch {}
+        return curr;
+      });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [isDjDragging]);
+
   return (
     <div className="relative h-dvh w-screen overflow-hidden bg-[#070A12] text-[#FFF8E7] select-none flex flex-col">
       {/* MAIN FULLSCREEN ARENA CONTAINER (100vw x 100dvh - CLEAN-SCREEN-FIRST) */}
@@ -8233,7 +8504,7 @@ export function App() {
               !telemetry.nearCustomCrewId
             ) {
               return (
-                <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.5)] text-xs font-mono">
+                <div className="hidden md:flex fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.5)] text-xs font-mono">
                   <span className="text-base">🏆</span>
                   <span className="text-cyan-200 font-bold">
                     Hallen-Ehrentafel (Top 10 Bestenliste)
@@ -8260,7 +8531,7 @@ export function App() {
               !telemetry.nearCustomCrewId
             ) {
               return (
-                <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-amber-400 shadow-[0_0_24px_rgba(251,191,36,0.5)] text-xs font-mono">
+                <div className="hidden md:flex fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-amber-400 shadow-[0_0_24px_rgba(251,191,36,0.5)] text-xs font-mono">
                   <span className="text-base">📰</span>
                   <span className="text-amber-200 font-bold">
                     Palladium-Kurier (Ausgabe #{currentNewspaperIssueId})
@@ -8282,7 +8553,7 @@ export function App() {
               );
               if (cm) {
                 return (
-                  <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.5)] text-xs font-mono">
+                  <div className="hidden md:flex fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.5)] text-xs font-mono">
                     <img
                       src={getStation16BitPortraitDataUrl(
                         cm.id,
@@ -8321,7 +8592,7 @@ export function App() {
               adminSettings.crewNames?.[stMeta.crewKey] ||
               stMeta.defaultCrewName;
             return (
-              <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(0,240,255,0.45)] text-xs font-mono">
+              <div className="hidden md:flex fixed bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-2 rounded-full bg-slate-950/95 border-2 border-cyan-400 shadow-[0_0_24px_rgba(0,240,255,0.45)] text-xs font-mono">
                 <img
                   src={getStation16BitPortraitDataUrl(
                     activeNearStation,
@@ -8538,7 +8809,146 @@ export function App() {
         {/* ===================================================================== */}
         {/* 1. FIRST-VISIT VELVET CURTAIN & HISTORICAL CHRONICLE OVERLAY          */}
         {/* ===================================================================== */}
-        {(!isCurtainOpen ||
+        {showEntranceFlyer && (<div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/95 p-4 overflow-y-auto"><div className="max-w-xl w-full rounded-3xl bg-[#120B22] border-2 border-amber-400 p-6 text-white space-y-4"><div className="text-xs font-mono text-amber-300 uppercase">{flyerSettings.entranceFlyerBadge || "ZEITLICH BEGRENZTER ALPHA-TEST"}</div><h1 className="text-2xl font-black text-cyan-300">{flyerSettings.entranceFlyerTitle || "PALLADIUM 86 - EINGANGS-FLYER"}</h1><p className="text-sm text-slate-200 whitespace-pre-line">{flyerSettings.entranceFlyerBody || "Willkommen vorm Eingang des Palladium 86. Neue Infos und Features kommen hier nach und nach dazu."}</p><div className="p-3 rounded-2xl bg-slate-900/90 border border-amber-400/40 space-y-2"><div className="text-xs font-bold text-amber-300 uppercase">🛼 Wo warst du damals auf Rollen?</div><div className="grid grid-cols-1 sm:grid-cols-3 gap-2">{([{ id: "palladium", label: "Ich war im Palladium" }, { id: "rollerland", label: "Ich war im Rollerland" }, { id: "other", label: "Andere / Keine Ahnung" }] as const).map((opt) => (<button key={opt.id} type="button" onClick={async () => { if (flyerVeteranRink) return; setFlyerVeteranRink(opt.id); localStorage.setItem("p86_flyer_rink", opt.id); const next = await recordVeteranRinkVote(opt.id); setVeteranCounts(next); }} className={`py-2 px-2.5 rounded-xl border text-xs font-bold cursor-pointer transition ${flyerVeteranRink === opt.id ? "bg-amber-400 border-white text-slate-950" : "bg-slate-950/80 border-slate-700 text-slate-200 hover:border-amber-400/60"}`}>{flyerVeteranRink === opt.id ? "✓ " : ""}{opt.label} <span className="opacity-75">({veteranCounts[opt.id]})</span></button>))}</div><div className="pt-2 border-t border-slate-800 space-y-2.5">
+<div className="text-xs font-bold text-cyan-300">Bevor es losgeht – beantworte uns noch kurz (freiwillig):</div>
+<div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+<div>
+<div className="text-[11px] uppercase tracking-wider text-slate-400 mb-1">Geschlecht</div>
+<div className="grid grid-cols-3 gap-1.5">
+{([{ id: "male", label: "Männlich" }, { id: "female", label: "Weiblich" }, { id: "diverse", label: "Divers" }] as const).map((g) => (
+<button key={g.id} type="button" onClick={async () => { if (flyerGender) return; setFlyerGender(g.id); localStorage.setItem("p86_flyer_gender", g.id); await recordVisitorGender(g.id); }} className={`py-2 px-2 rounded-xl border text-xs font-bold cursor-pointer transition ${flyerGender === g.id ? "bg-cyan-400 border-white text-slate-950" : "bg-slate-950/80 border-slate-700 text-slate-200 hover:border-cyan-400/60"}`}>{flyerGender === g.id ? "✓ " : ""}{g.label}</button>
+))}
+</div>
+</div>
+<div>
+<div className="text-[11px] uppercase tracking-wider text-slate-400 mb-1">Jahrgang (z. B. 78 oder 65)</div>
+<div className="flex items-center gap-2">
+<input id="p86-year-d1" type="text" inputMode="numeric" maxLength={1} placeholder="7" value={flyerYearDigit1} disabled={flyerYearSaved} onChange={(e) => { const val = e.target.value.replace(/[^0-9]/g, "").slice(-1); setFlyerYearDigit1(val); if (val) document.getElementById("p86-year-d2")?.focus(); }} className="w-12 h-11 text-center text-xl font-black font-mono rounded-xl bg-slate-950 border-2 border-slate-700 focus:border-amber-400 text-amber-300 outline-none disabled:opacity-70" />
+<input id="p86-year-d2" type="text" inputMode="numeric" maxLength={1} placeholder="8" value={flyerYearDigit2} disabled={flyerYearSaved} onKeyDown={(e) => { if (e.key === "Backspace" && !flyerYearDigit2) document.getElementById("p86-year-d1")?.focus(); }} onChange={async (e) => { const val = e.target.value.replace(/[^0-9]/g, "").slice(-1); setFlyerYearDigit2(val); const full = `${flyerYearDigit1}${val}`; if (full.length === 2 && !flyerYearSaved) { setFlyerYearSaved(true); localStorage.setItem("p86_flyer_year", full); await recordVisitorBirthYear(full); } }} className="w-12 h-11 text-center text-xl font-black font-mono rounded-xl bg-slate-950 border-2 border-slate-700 focus:border-amber-400 text-amber-300 outline-none disabled:opacity-70" />
+{flyerYearSaved && <span className="text-xs font-bold text-emerald-400">✓ &apos;{flyerYearDigit1}{flyerYearDigit2} gezählt</span>}
+</div>
+</div>
+</div>
+</div>
+<p className="text-[11px] text-slate-400 leading-snug">Alle Angaben sind komplett freiwillig – du kannst natürlich auch ohne Auswahl direkt in die Halle. Bei uns rollst du ohne Tracker und Cookies: Deine Antworten werden rein anonym (ohne Name oder IP) in unserer Datenbank gezählt; ein lokaler Browser-Vermerk verhindert lediglich Doppelabstimmungen.</p></div><div className="text-xs font-mono text-cyan-300">{isSingleplayerOpen ? "SP: OFFEN" : "SP -> ALPHA"} | {isMultiplayerOpen ? "MP: OFFEN" : "MP -> ALPHA"}</div><div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5"><button type="button" onClick={() => { soundFX.unlockAudioContext(); setFlyerDismissed(true); if (!isSingleplayerOpen) { setAdminSettings((s) => ({ ...(s as any), alphaStartScreenEnabled: true })); } }} className="py-3 px-4 rounded-xl bg-cyan-400 text-slate-950 font-black cursor-pointer">{isSingleplayerOpen ? "Singleplayer testen" : "Alpha starten (SP aus)"}</button><button type="button" onClick={() => { soundFX.unlockAudioContext(); setFlyerDismissed(true); if (!isMultiplayerOpen) { setAdminSettings((s) => ({ ...(s as any), alphaStartScreenEnabled: true })); } else if (!isMultiplayerActive) { setFlyerDismissed(true); } }} className="py-3 px-4 rounded-xl bg-fuchsia-400 text-slate-950 font-black cursor-pointer">{isMultiplayerOpen ? "Multiplayer testen" : "Alpha starten (MP aus)"}</button></div><button type="button" onClick={() => { soundFX.unlockAudioContext(); setFlyerDismissed(true); }} className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-400 via-fuchsia-500 to-cyan-400 text-slate-950 font-black cursor-pointer">{flyerSettings.entranceFlyerButtonText || "DIREKT ZUM EINGANG"}</button></div></div>)}
+        {effectiveAlphaStartScreen &&
+          !isCurtainOpen &&
+          !showChronicleModal &&
+          !(alphaBetaConfig.enabled && !isAlphaBetaAuthorized) && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-[#14041C]/98 via-[#090614]/98 to-[#04040A]/98 p-4 overflow-y-auto backdrop-blur-md">
+            <div className="relative w-full max-w-xl rounded-3xl bg-[#110C1F] border-2 border-cyan-400/75 shadow-[0_0_70px_rgba(34,211,238,0.3)] p-6 sm:p-8 text-[#FFF8E7] space-y-6">
+              <div className="text-center space-y-2 border-b border-fuchsia-500/30 pb-4">
+                <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/60 font-mono text-xs text-fuchsia-200">
+                  <span className="font-black text-amber-300">🧪 ALPHA-PERFORMANCE-TEST</span>
+                  <span>•</span>
+                  <span>{APP_VERSION_LABEL}</span>
+                </div>
+                <h1 className="font-display font-black text-2xl sm:text-3xl tracking-wide bg-gradient-to-r from-cyan-300 via-fuchsia-300 to-amber-300 bg-clip-text text-transparent">
+                  PALLADIUM 86 ROLLER DISCO
+                </h1>
+                <p className="text-xs sm:text-sm text-slate-300">
+                  Kurz Namen eintragen, Gerät wählen und direkt auf die Bahn – Standard-Rollschuh-Setup ist schon fertig eingestellt.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block font-mono text-xs font-bold uppercase tracking-wider text-cyan-300">
+                  1. Dein Name fürs Spiel
+                </label>
+                <input
+                  type="text"
+                  value={playerName}
+                  onChange={(e) => {
+                    setIsAnonymousGuest(false);
+                    setPlayerName(e.target.value);
+                    if (bouncerMessage) setBouncerMessage(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && playerName.trim().length >= 2) {
+                      soundFX.unlockAudioContext();
+                      setMobilityChoice('own-skates');
+                      setDifficulty('intermediate');
+                      performHallEntry();
+                    }
+                  }}
+                  placeholder="Namen eingeben (mind. 2 Zeichen)..."
+                  maxLength={22}
+                  autoFocus
+                  className="w-full px-4 py-3 rounded-xl bg-slate-950 border-2 border-cyan-400/60 text-base font-bold text-white placeholder:text-slate-500 focus:border-amber-300 focus:outline-none"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block font-mono text-xs font-bold uppercase tracking-wider text-fuchsia-300">
+                  2. Womit bist du gerade online?
+                </label>
+                <div className="grid grid-cols-3 gap-2.5 sm:gap-3">
+                  {[
+                    { id: 'pc' as const, icon: '🖥️', title: 'PC', sub: 'Desktop / Laptop' },
+                    { id: 'tablet' as const, icon: '📱', title: 'Tablet', sub: 'iPad / Android Tab' },
+                    { id: 'mobile' as const, icon: '📲', title: 'Handy', sub: 'Smartphone' },
+                  ].map((dev) => {
+                    const selected = alphaDeviceType === dev.id;
+                    return (
+                      <button
+                        key={dev.id}
+                        type="button"
+                        onClick={() => setAlphaDeviceType(dev.id)}
+                        className={`p-3 sm:p-4 rounded-2xl border-2 flex flex-col items-center justify-center text-center transition cursor-pointer ${
+                          selected
+                            ? 'bg-gradient-to-b from-cyan-500/25 to-fuchsia-500/25 border-amber-300 text-white shadow-[0_0_24px_rgba(251,191,36,0.4)] scale-[1.02]'
+                            : 'bg-slate-950/90 border-slate-700/80 text-slate-300 hover:border-cyan-400/60'
+                        }`}
+                      >
+                        <span className="text-2xl sm:text-3xl mb-1">{dev.icon}</span>
+                        <span className="font-display font-black text-sm sm:text-base">{dev.title}</span>
+                        <span className="font-mono text-[10px] text-slate-400 mt-0.5">{dev.sub}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {bouncerMessage && (
+                <div className="p-3 rounded-xl bg-rose-950/95 border border-rose-400 font-mono text-xs text-rose-100">
+                  {bouncerMessage}
+                </div>
+              )}
+
+              <button
+                type="button"
+                disabled={playerName.trim().length < 2}
+                onClick={() => {
+                  const cleanName = playerName.trim();
+                  if (cleanName.length < 2) return;
+                  if (
+                    remotePlayers.some(
+                      (rp) => (rp.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+                    )
+                  ) {
+                    setBouncerMessage('Der Name fährt gerade schon auf der Bahn – nimm kurz einen anderen.');
+                    return;
+                  }
+                  soundFX.unlockAudioContext();
+                  setIsAnonymousGuest(false);
+                  setMobilityChoice('own-skates');
+                  setDifficulty('intermediate');
+                  setBouncerMessage(null);
+                  performHallEntry();
+                }}
+                className={`w-full py-4 rounded-2xl font-display font-black text-base sm:text-lg tracking-wider transition ${
+                  playerName.trim().length >= 2
+                    ? 'bg-gradient-to-r from-amber-400 via-fuchsia-500 to-cyan-400 hover:from-amber-300 hover:to-cyan-300 text-slate-950 shadow-[0_0_30px_rgba(232,121,249,0.55)] cursor-pointer'
+                    : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                }`}
+              >
+                🚀 AUF DIE BAHN ({alphaDeviceType === 'pc' ? 'PC' : alphaDeviceType === 'tablet' ? 'TABLET' : 'HANDY'})
+              </button>
+            </div>
+          </div>
+        )}
+
+        {((!effectiveAlphaStartScreen && !isCurtainOpen) ||
           showChronicleModal ||
           (alphaBetaConfig.enabled && !isAlphaBetaAuthorized)) && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-[#1A051D]/98 via-[#0B0716]/98 to-[#05050B]/98 p-4 overflow-y-auto backdrop-blur-md">
@@ -9255,8 +9665,107 @@ export function App() {
                   </div>
                 )}
 
-                {/* 2. ROLLSCHUH- & ROLLSTUHL-LOGIK (VERPFLICHTENDE AUSWAHL VOR BAHNEINTRITT) */}
-                <div className="p-3.5 rounded-xl bg-[#141024] border-2 border-fuchsia-500/50 space-y-2.5">
+                {/* SCHLANKES MOBIL-EINGANGSPORTAL (HOCHKANT: NAME + ROLLSCHUHE + START) */}
+                <div className="md:hidden p-3.5 rounded-2xl bg-[#141024] border-2 border-cyan-400/70 shadow-[0_0_24px_rgba(34,211,238,0.22)] space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs font-black tracking-wider text-cyan-300 uppercase">
+                      🎟️ EINGANGSPORTAL
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-400">
+                      Schnellstart
+                    </span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block font-mono text-[11px] font-bold text-slate-200">
+                      1. Dein Skater-Name
+                    </label>
+                    <input
+                      type="text"
+                      value={playerName}
+                      disabled={isAnonymousGuest}
+                      onChange={(e) => {
+                        setPlayerName(e.target.value);
+                        if (bouncerMessage) setBouncerMessage(null);
+                      }}
+                      placeholder="Name oder Spitzname..."
+                      maxLength={22}
+                      className="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-600 text-sm text-white focus:border-cyan-400 focus:outline-none disabled:opacity-50"
+                    />
+                    <label className="flex items-center gap-2 text-xs text-slate-300 pt-0.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isAnonymousGuest}
+                        onChange={(e) => setIsAnonymousGuest(e.target.checked)}
+                        className="accent-fuchsia-500 w-4 h-4 cursor-pointer"
+                      />
+                      <span>Anonym als Gast rollen</span>
+                    </label>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="font-mono text-[11px] font-bold text-emerald-300">
+                      2. Auf was rollst du?
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectMobilityChoice("own-skates")}
+                        className={`py-2.5 px-2 rounded-xl font-mono text-xs font-bold border transition ${
+                          mobilityChoice === "own-skates"
+                            ? "bg-emerald-500/25 border-emerald-400 text-emerald-100"
+                            : "bg-slate-900/90 border-slate-700 text-slate-300"
+                        }`}
+                      >
+                        🛼 Eigene
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectMobilityChoice("rental-skates")}
+                        className={`py-2.5 px-2 rounded-xl font-mono text-xs font-bold border transition ${
+                          mobilityChoice === "rental-skates"
+                            ? "bg-fuchsia-500/25 border-fuchsia-400 text-fuchsia-100"
+                            : "bg-slate-900/90 border-slate-700 text-slate-300"
+                        }`}
+                      >
+                        🎟️ Leih
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectMobilityChoice("wheelchair")}
+                        className={`py-2.5 px-2 rounded-xl font-mono text-xs font-bold border transition ${
+                          mobilityChoice === "wheelchair"
+                            ? "bg-cyan-500/25 border-cyan-400 text-cyan-100"
+                            : "bg-slate-900/90 border-slate-700 text-slate-300"
+                        }`}
+                      >
+                        ♿ Rollstuhl
+                      </button>
+                    </div>
+                  </div>
+
+                  {bouncerMessage && (
+                    <div className="p-2.5 rounded-xl bg-rose-950/95 border border-rose-400 font-mono text-xs font-bold text-white">
+                      🕶️ Rocky: „{bouncerMessage}“
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={!canEnterSingleplayerHall}
+                    onClick={handleEnterHall}
+                    className={`w-full py-3 rounded-xl font-display font-black text-sm tracking-wider transition ${
+                      canEnterSingleplayerHall
+                        ? "bg-gradient-to-r from-fuchsia-600 via-pink-500 to-cyan-500 text-white shadow-[0_0_20px_rgba(232,121,249,0.5)]"
+                        : "bg-slate-800 text-slate-500 border border-slate-700"
+                    }`}
+                  >
+                    🛼 AUF DIE BAHN
+                  </button>
+                </div>
+
+                {/* 2. ROLLSCHUH- & ROLLSTUHL-LOGIK (VERPFLICHTENDE AUSWAHL VOR BAHNEINTRITT - DESKTOP) */}
+                <div className="hidden md:block p-3.5 rounded-xl bg-[#141024] border-2 border-fuchsia-500/50 space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <span className="font-mono font-bold text-xs md:text-sm text-emerald-300 uppercase">
@@ -11804,8 +12313,9 @@ export function App() {
                       </span>
                       {(
                         [
-                          { id: 'track' as const, short: '🛼 Tab 1: Bahn & Shows' },
-                          { id: 'light_dj' as const, short: '🎛️ Tab 2: Licht, DJ & Kino' },
+                          { id: 'track' as const, short: '🚀 Tab 1: Startseite & Empfang' },
+                          { id: 'light_dj' as const, short: '🎛️ Tab 2: Licht & Kino' },
+                          { id: 'dj' as const, short: '🎧 DJ-Pult & Samples' },
                           {
                             id: 'access' as const,
                             short: `🔑 Tab 3: Zugang & Besucher${
@@ -11815,7 +12325,7 @@ export function App() {
                             }`,
                           },
                           { id: 'look_build' as const, short: '🎨 Tab 4: Look & Baumenü' },
-                          { id: 'ranks_points' as const, short: '👑 Tab 5: Ränge & Punkte' },
+                          { id: 'ranks_points' as const, short: '👑 Tab 5: KIs, Ränge & Punkte' },
                           { id: 'diagnose' as const, short: '🟢 Tab 6: Lampen & Diagnose' },
                         ] as const
                       ).map((t) => (
@@ -11847,13 +12357,18 @@ export function App() {
                       [
                         {
                           id: 'track' as const,
-                          label: '🛼 Tab 1: Bahn, Shows & KI',
-                          sub: 'Multi-Modi, 4 KI-Regler, Schalter & Richtung',
+                          label: '🚀 Tab 1: Startseite & Empfang',
+                          sub: 'Status-Ampel, Willkommen, Multiplayer & Singleplayer',
                         },
                         {
                           id: 'light_dj' as const,
-                          label: '🎛️ Tab 2: Licht, DJ & Kino',
-                          sub: 'Mittel-Arena, Licht/Nebel, Jingles, Radio & Kino',
+                          label: '🎛️ Tab 2: Licht & Kino',
+                          sub: 'Mittel-Arena, Licht/Nebel, Zeitplan & Kino',
+                        },
+                        {
+                          id: 'dj' as const,
+                          label: '🎧 DJ-Pult & Audio',
+                          sub: 'Webradio, Mix-Playlist, Jingles & DJ-Samples',
                         },
                         {
                           id: 'access' as const,
@@ -11871,7 +12386,7 @@ export function App() {
                         },
                         {
                           id: 'ranks_points' as const,
-                          label: '👑 Tab 5: Ränge & Punkte',
+                          label: '👑 Tab 5: KIs, Ränge & Punkte',
                           sub: 'XP-Schwellen, Führerschein-Farbe & Ehren-Punkte',
                         },
                         {
@@ -11915,8 +12430,95 @@ export function App() {
                 )}
               </div>
 
-              {/* 4. EINZIGER FIXIERTER LIVE-MONITOR IN DER REGIE (STICKY TOP: 0) + KAMERA-UMSCHALTER [ 🎥 Lokal | 🌐 Multiplayer-Halle ] */}
-              <div className="sticky top-0 z-30 flex flex-col items-center justify-center py-1 bg-[#120D20]/95 backdrop-blur-xs rounded-xl">
+              {/* 4. KOMPAKTES 3-SPALTEN-REGIE-COCKPIT (LINKS: STATUS | MITTE: LIVE-KAMERA | RECHTS: SCHNELLSCHALTER) */}
+              <div className="sticky top-0 z-30 grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr] items-start gap-2 p-1.5 bg-[#120D20]/95 backdrop-blur-xs rounded-xl border border-slate-800/80">
+                <div className="space-y-1.5">
+                <div className="rounded-xl bg-slate-950/90 border border-cyan-500/40 p-2 space-y-1.5 font-mono text-[10.5px]">
+                  <div className="flex items-center justify-between text-cyan-300 font-bold uppercase text-[10px]">
+                    <span>🚦 Live-Status</span>
+                    <span className="text-slate-400">{APP_VERSION_LABEL}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 text-[10px] leading-tight">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = { ...alphaBetaConfig, enabled: !alphaBetaConfig.enabled } as AlphaBetaAccessConfig;
+                        setAlphaBetaConfig(next);
+                        saveAlphaBetaConfig(next);
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 flex items-center justify-between gap-1 text-left cursor-pointer"
+                    >
+                      <span className="truncate font-semibold text-slate-100">{alphaBetaConfig.enabled ? 'Key-Einlass' : 'Offen'}</span>
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${!alphaBetaConfig.enabled ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                    </button>
+                    <button
+                      type="button"
+                      title="Einlass sperren / entsperren"
+                      onClick={() => {
+                        const cfg = alphaBetaConfig as AlphaBetaAccessConfig & { locked?: boolean };
+                        const nextLocked = !cfg.locked;
+                        const next = { ...cfg, enabled: nextLocked ? true : cfg.enabled, locked: nextLocked } as AlphaBetaAccessConfig;
+                        setAlphaBetaConfig(next);
+                        saveAlphaBetaConfig(next);
+                        if (nextLocked && mpRole === 'host') {
+                          handleCloseHostRoom();
+                        }
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 flex items-center justify-between gap-1 text-left cursor-pointer"
+                    >
+                      <span className="truncate font-semibold text-slate-100">
+                        {(alphaBetaConfig as AlphaBetaAccessConfig & { locked?: boolean }).locked ? '🔒 Geschlossen' : '🔓 Offen'}
+                      </span>
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${(alphaBetaConfig as AlphaBetaAccessConfig & { locked?: boolean }).locked ? 'bg-rose-500' : 'bg-emerald-400'}`} />
+                    </button>
+                    <div className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 flex items-center justify-between gap-1">
+                      <span className="truncate font-semibold text-slate-100">24/7 MP</span>
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${isMultiplayerActive && !isPrivateRoom ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+                    </div>
+                    <div className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 flex items-center justify-between gap-1">
+                      <span className="truncate font-semibold text-slate-100">Solo</span>
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${mpRole === 'solo' ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+                    </div>
+                  </div>
+                </div>
+                                <div className="p-2 rounded-lg bg-slate-950/95 border border-emerald-400/50 space-y-1.5"><div className="flex flex-wrap items-center justify-between gap-1.5"><h3 className="font-mono font-bold text-[11px] uppercase text-emerald-300">🌐 MULTIPLAYER-SPASSRAUM (LIVE-SESSION)</h3><div className="flex items-center gap-1.5"><button type="button" onClick={() => { const n = { ...alphaBetaConfig, enabled: !alphaBetaConfig.enabled }; setAlphaBetaConfig(n); saveAlphaBetaConfig(n); }} className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border cursor-pointer ${!alphaBetaConfig.enabled ? "bg-emerald-500/20 border-emerald-400 text-emerald-200" : "bg-amber-500/20 border-amber-400 text-amber-200"}`}>{!alphaBetaConfig.enabled ? "🟢 Offen" : "🔑 Key-Einlass"}</button><button type="button" onClick={() => setAdminTab("access")} className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-cyan-400/50 font-mono text-[10px] font-bold text-cyan-200 cursor-pointer">🔑 Keys verwalten</button><span className="px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-400/50 font-mono text-[10px] font-bold text-emerald-200">{mpRole === "host" ? `${remotePlayers.length + 1} Skater live in der Halle` : "Solo-Modus (KI aktiv)"}</span></div></div>{mpRole !== "host" ? (<div className="space-y-1.5"><div className="flex items-center justify-between gap-2"><div className="flex items-center gap-1">{MULTIPLAYER_OUTFIT_COLORS.map((c) => (<button key={c.id} type="button" title={`Outfit-Farbe: ${c.label}`} onClick={() => setPlayerShirtColor(c.hex)} style={{ backgroundColor: c.hex }} className={`w-4 h-4 rounded-full border cursor-pointer ${playerShirtColor === c.hex ? "border-2 border-white scale-110" : "border-slate-700 opacity-75"}`} />))}</div><button type="button" onClick={() => handleOpenHostRoom("palladium-86-online")} className="min-h-[30px] flex-1 py-1 px-2.5 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-[11px] cursor-pointer">🚀 Raum oeffnen &amp; Link erstellen</button></div><div className="flex items-center gap-1"><input type="text" readOnly value={typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}?room=palladium-86-online` : "?room=palladium-86-online"} className="flex-1 px-2 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-slate-300" /><button type="button" onClick={() => { const u = typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}?room=palladium-86-online` : "?room=palladium-86-online"; handleOpenHostRoom("palladium-86-online"); if (navigator?.clipboard) { navigator.clipboard.writeText(u); setInviteCopied(true); window.setTimeout(() => setInviteCopied(false), 2500); } }} className="px-2 py-0.5 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap">{inviteCopied ? "✅ Link kopiert!" : "📋 Link generieren & kopieren"}</button></div></div>) : (<div className="space-y-1.5"><div className="flex items-center gap-1"><input type="text" readOnly value={inviteRoomUrl} className="flex-1 px-2 py-0.5 rounded bg-slate-900 border border-emerald-500/40 font-mono text-[10px] text-emerald-200" /><button type="button" onClick={() => { if (navigator?.clipboard) { navigator.clipboard.writeText(inviteRoomUrl); setInviteCopied(true); window.setTimeout(() => setInviteCopied(false), 2500); } }} className="px-2 py-0.5 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap">{inviteCopied ? "✅ Link kopiert!" : "📋 Einladungs-Link kopieren"}</button><button type="button" onClick={handleCloseHostRoom} className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap">🛑 Raum schliessen</button></div>{/* Live Visitor List + Kick Button */}
+                        <div className="flex flex-wrap items-center gap-1 max-h-12 overflow-y-auto">
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-400/50 font-mono text-[10px] text-emerald-200">
+                            ★ {playerName || 'Host'} (Host)
+                          </span>
+                          {remotePlayers.map((rp) => (
+                            <span
+                              key={rp.peerId}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900 border border-cyan-400/50 font-mono text-[10px] text-cyan-100"
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full inline-block"
+                                style={{
+                                  backgroundColor: rp.shirtColor || '#00f0ff',
+                                }}
+                              />
+                              {rp.name}
+                              <button
+                                type="button"
+                                title="Besucher aus dem Raum werfen (Kick)"
+                                onClick={() => handleKickGuest(rp.peerId)}
+                                className="ml-0.5 px-1 rounded bg-rose-900 hover:bg-rose-700 text-rose-200 text-[9px] font-bold cursor-pointer"
+                              >
+                                Kick
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {mpNotice && (
+                      <div className="text-[9px] font-mono text-cyan-300 truncate">
+                        {mpNotice}
+                      </div>
+                    )}
+                  </div>
+
+                </div>
                 <div
                   className={`w-full ${
                     isAdminCenterCameraEnlarged
@@ -12117,17 +12719,246 @@ export function App() {
                     );
                   })()}
                 </div>
+
+                <div className="rounded-xl bg-slate-950/90 border border-fuchsia-500/40 p-2 space-y-1.5 font-mono text-[10.5px]">
+                  <div className="flex items-center justify-between text-fuchsia-300 font-bold uppercase text-[10px]">
+                    <span>⚡ Schnellschalter</span>
+                    <span className="text-slate-400">{adminSettings.aiSkaterCount ?? 22} KIs</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {([
+                      { id: 'beginner' as SingleplayerDifficulty, label: 'Anfänger' },
+                      { id: 'intermediate' as SingleplayerDifficulty, label: 'Mittel' },
+                      { id: 'pro' as SingleplayerDifficulty, label: 'Profi' },
+                    ] as const).map((lvl) => (
+                      <button
+                        key={lvl.id}
+                        type="button"
+                        onClick={() => setDifficulty(lvl.id)}
+                        className={`px-2 py-1 rounded font-bold border cursor-pointer ${difficulty === lvl.id ? 'bg-cyan-400 text-slate-950 border-white' : 'bg-slate-900 text-slate-300 border-slate-700'}`}
+                      >
+                        {lvl.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setAdminSettings((s) => { const next = { ...s, arcadeMachinesEnabled: !(s.arcadeMachinesEnabled !== false) }; saveAdminSettings(next); return next; })}
+                      className={`px-2 py-1 rounded font-bold border cursor-pointer ${adminSettings.arcadeMachinesEnabled !== false ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200' : 'bg-slate-900 text-slate-400 border-slate-700'}`}
+                    >
+                      🕹️ Automaten: {adminSettings.arcadeMachinesEnabled !== false ? 'AN' : 'AUS'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAdminSettings((s) => { const next = { ...s, pointsSystemEnabled: !(s.pointsSystemEnabled !== false) }; saveAdminSettings(next); return next; })}
+                      className={`px-2 py-1 rounded font-bold border cursor-pointer ${adminSettings.pointsSystemEnabled !== false ? 'bg-amber-500/20 border-amber-400 text-amber-200' : 'bg-slate-900 text-slate-400 border-slate-700'}`}
+                    >
+                      🏆 Punkte: {adminSettings.pointsSystemEnabled !== false ? 'AN' : 'AUS'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAdminSettings((s) => ({ ...s, skateDirection: (s.skateDirection || 'ccw') === 'ccw' ? 'cw' : 'ccw' }))}
+                      title={
+                        (adminSettings.skateDirection || 'ccw') === 'ccw'
+                          ? 'Aktuell: Gegen den Uhrzeigersinn (Normal) — Klick für Richtungswechsel'
+                          : 'Aktuell: Im Uhrzeigersinn (Richtungswechsel) — Klick für Normal'
+                      }
+                      className={`px-2 py-1 rounded font-bold border cursor-pointer ${(adminSettings.skateDirection || 'ccw') === 'ccw' ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200' : 'bg-amber-500/20 border-amber-400 text-amber-200'}`}
+                    >
+                      {(adminSettings.skateDirection || 'ccw') === 'ccw' ? '↺ Richtungswechsel' : '↻ Richtungswechsel: AN'}
+                    </button>
+                  </div>
+                </div>
               </div>
 
-              {/* TAB 1: 🛼 BAHN, SHOWS & FAHRTRICHTUNG */}
+              {/* TAB 1: 🚀 STARTSEITE & EMPFANG (STATUS-AMPEL, ALLGEMEIN, MULTIPLAYER & SINGLEPLAYER) */}
               {adminTab === 'track' && (
                 <div className="grid grid-cols-1 gap-3 items-stretch">
+                  {/* LIVE-STATUS-AMPEL: ALLGEMEIN, MULTIPLAYER & SINGLEPLAYER */}
+                  <div className="p-3.5 rounded-xl bg-slate-950/95 border-2 border-cyan-400/50 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-black text-xs uppercase tracking-wider text-cyan-300">
+                          [M01] 🚦 STARTSEITE &amp; EMPFANG — LIVE-STATUS-LAMPEN
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-slate-300">
+                          {APP_VERSION_LABEL}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] text-emerald-300">
+                        🟢 Echtzeit-Status für Besucher &amp; Halle
+                      </span>
+                    </div>
+
+                    {/* 4 Status-Lämpchen-Karten */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                      {/* Lämpchen 1: Allgemein / Einlass */}
+                      <div className="p-2.5 rounded-lg bg-slate-900/95 border border-slate-700 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-mono text-[10px] uppercase text-slate-400">
+                            Allgemein • Einlass
+                          </div>
+                          <div className="font-mono text-xs font-bold text-white truncate">
+                            {alphaBetaConfig.enabled
+                              ? 'Alpha/Beta Key-Pflicht'
+                              : 'Offener Einlass'}
+                          </div>
+                        </div>
+                        <span
+                          title={
+                            alphaBetaConfig.enabled
+                              ? 'Geschützter Einlass aktiv'
+                              : 'Offener Einlass aktiv'
+                          }
+                          className={`w-3.5 h-3.5 rounded-full shrink-0 border ${
+                            !alphaBetaConfig.enabled
+                              ? 'bg-emerald-400 border-emerald-200 shadow-[0_0_12px_rgba(52,211,153,0.95)]'
+                              : 'bg-amber-400 border-amber-200 shadow-[0_0_12px_rgba(251,191,36,0.9)]'
+                          }`}
+                        />
+                      </div>
+
+                      {/* Lämpchen 2: 24/7 Live-Multiplayer */}
+                      <div className="p-2.5 rounded-lg bg-slate-900/95 border border-slate-700 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-mono text-[10px] uppercase text-slate-400">
+                            24/7 Live-Multiplayer
+                          </div>
+                          <div className="font-mono text-xs font-bold text-white truncate">
+                            {isMultiplayerActive && !isPrivateRoom
+                              ? 'AN (Hauptbahn aktiv)'
+                              : 'AUS (Nicht verbunden)'}
+                          </div>
+                        </div>
+                        <span
+                          className={`w-3.5 h-3.5 rounded-full shrink-0 border ${
+                            isMultiplayerActive && !isPrivateRoom
+                              ? 'bg-emerald-400 border-emerald-200 shadow-[0_0_12px_rgba(52,211,153,0.95)]'
+                              : 'bg-rose-500 border-rose-300 shadow-[0_0_10px_rgba(244,63,94,0.75)]'
+                          }`}
+                        />
+                      </div>
+
+                      {/* Lämpchen 3: Geschlossene Privat-Räume */}
+                      <div className="p-2.5 rounded-lg bg-slate-900/95 border border-slate-700 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-mono text-[10px] uppercase text-slate-400">
+                            Privat-Raum
+                          </div>
+                          <div className="font-mono text-xs font-bold text-white truncate">
+                            {isMultiplayerActive && isPrivateRoom
+                              ? `AN (${(mpRoomId || '').toUpperCase()})`
+                              : 'AUS (Kein Privat-Raum)'}
+                          </div>
+                        </div>
+                        <span
+                          className={`w-3.5 h-3.5 rounded-full shrink-0 border ${
+                            isMultiplayerActive && isPrivateRoom
+                              ? 'bg-emerald-400 border-emerald-200 shadow-[0_0_12px_rgba(52,211,153,0.95)]'
+                              : 'bg-rose-500 border-rose-300 shadow-[0_0_10px_rgba(244,63,94,0.75)]'
+                          }`}
+                        />
+                      </div>
+
+                      {/* Lämpchen 4: Singleplayer */}
+                      <div className="p-2.5 rounded-lg bg-slate-900/95 border border-slate-700 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-mono text-[10px] uppercase text-slate-400">
+                            Singleplayer (Solo)
+                          </div>
+                          <div className="font-mono text-xs font-bold text-white truncate">
+                            {mpRole === 'solo'
+                              ? 'AN (Solo-Halle aktiv)'
+                              : 'AUS (Multiplayer läuft)'}
+                          </div>
+                        </div>
+                        <span
+                          className={`w-3.5 h-3.5 rounded-full shrink-0 border ${
+                            mpRole === 'solo'
+                              ? 'bg-emerald-400 border-emerald-200 shadow-[0_0_12px_rgba(52,211,153,0.95)]'
+                              : 'bg-rose-500 border-rose-300 shadow-[0_0_10px_rgba(244,63,94,0.75)]'
+                          }`}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Schnell-Steuerung: Allgemein / Multiplayer / Singleplayer */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 pt-1">
+                      <div className="p-2.5 rounded-lg bg-slate-900/80 border border-amber-400/40 flex items-center justify-between gap-2">
+                        <div>
+                          <div className="font-mono text-[11px] font-bold text-amber-300">
+                            🌐 Allgemein &amp; Willkommen
+                          </div>
+                          <div className="font-mono text-[10px] text-slate-400">
+                            Einlass-Modus für Startseite &amp; Portal
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next: AlphaBetaAccessConfig = {
+                              ...alphaBetaConfig,
+                              enabled: !alphaBetaConfig.enabled,
+                            };
+                            setAlphaBetaConfig(next);
+                            saveAlphaBetaConfig(next);
+                          }}
+                          className={`px-2.5 py-1 rounded font-mono text-[11px] font-bold border cursor-pointer shrink-0 ${
+                            !alphaBetaConfig.enabled
+                              ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                              : 'bg-amber-500/20 border-amber-400 text-amber-200'
+                          }`}
+                        >
+                          {!alphaBetaConfig.enabled ? '🟢 Offen' : '🔑 Key-Schutz'}
+                        </button>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg bg-slate-900/80 border border-cyan-400/40 flex items-center justify-between gap-2">
+                        <div>
+                          <div className="font-mono text-[11px] font-bold text-cyan-300">
+                            🌍 Multiplayer &amp; Privat-Räume
+                          </div>
+                          <div className="font-mono text-[10px] text-slate-400">
+                            Keys, Besucher &amp; Raum-Verwaltung öffnen
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAdminTab('access')}
+                          className="px-2.5 py-1 rounded bg-cyan-950 hover:bg-cyan-900 border border-cyan-400/60 text-cyan-200 font-mono text-[11px] font-bold cursor-pointer shrink-0"
+                        >
+                          🔑 Tab 3 öffnen
+                        </button>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg bg-slate-900/80 border border-fuchsia-400/40 flex items-center justify-between gap-2">
+                        <div>
+                          <div className="font-mono text-[11px] font-bold text-fuchsia-300">
+                            🛼 Singleplayer &amp; Bahn-Betrieb
+                          </div>
+                          <div className="font-mono text-[10px] text-slate-400">
+                            KI-Skater: {adminSettings.aiSkaterCount ?? 6} • Tempo:{' '}
+                            {(((adminSettings as unknown as Record<string, unknown>).trackSpeedMultiplier as number | undefined) ?? 1).toFixed(1)}x
+                          </div>
+                        </div>
+                        <span
+                          className={`px-2 py-1 rounded font-mono text-[11px] font-bold border shrink-0 ${
+                            mpRole === 'solo'
+                              ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                              : 'bg-slate-800 border-slate-600 text-slate-300'
+                          }`}
+                        >
+                          {mpRole === 'solo' ? '🟢 Solo aktiv' : '⚪ MP-Modus'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="p-3.5 rounded-xl bg-slate-900/95 border border-cyan-500/40 space-y-3">
                     {/* Editierbare Event- / Gast-DJ-Ankündigung (Echtzeit-Sync für alle Multiplayer-Clients & Willkommens-Modal) */}
                     <div className="p-2.5 rounded-xl bg-slate-950/90 border border-amber-400/60 space-y-1.5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <label className="font-mono text-xs font-bold text-amber-300">
-                          📢 Event- / Gast-DJ-Ankündigung (Willkommens-Modal &amp; Multiplayer-Sync):
+                          [M02] 📢 Event- / Gast-DJ-Ankündigung (Willkommens-Modal &amp; Multiplayer-Sync):
                         </label>
                         <span className="font-mono text-[10px] text-emerald-300">
                           🟢 Live-Sync aktiv
@@ -12173,7 +13004,7 @@ export function App() {
 
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
-                        🎪 Hallen-Modi &amp; Shows (Mehrfach-Auswahl / Multi-Toggle kombinierbar)
+                        [M03] 🎪 Hallen-Modi &amp; Shows (Mehrfach-Auswahl / Multi-Toggle kombinierbar)
                       </h3>
                       {(hallGameMode === 'ballspiel' ||
                         (adminSettings.activeHallModes || []).includes(
@@ -12233,7 +13064,7 @@ export function App() {
                           <button
                             type="button"
                             onClick={clearAllModes}
-                            className={`min-h-[40px] py-2 px-2 rounded-xl font-mono text-[11px] font-bold border cursor-pointer transition ${
+                            className={`py-1 px-2 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                               currentModes.length === 0
                                 ? 'bg-emerald-500 text-slate-950 border-white shadow-[0_0_14px_rgba(16,185,129,0.5)]'
                                 : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-emerald-400/60'
@@ -12265,7 +13096,7 @@ export function App() {
                                 key={g.id}
                                 type="button"
                                 onClick={() => toggleMode(g.id)}
-                                className={`min-h-[40px] py-2 px-2 rounded-xl font-mono text-[11px] font-bold border cursor-pointer transition ${
+                                className={`py-1 px-2 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                                   active
                                     ? 'bg-fuchsia-500 text-white border-white shadow-[0_0_14px_rgba(232,121,249,0.5)]'
                                     : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-fuchsia-400/60'
@@ -12329,7 +13160,7 @@ export function App() {
                             );
                             setSpringerStaffelShowSec(isStaffelOn ? 0 : 120);
                           }}
-                          className={`min-h-[38px] px-3.5 py-1.5 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                             (adminSettings.activeHallModes || []).includes(
                               'springerstaffel'
                             ) || hallGameMode === 'springerstaffel'
@@ -12345,8 +13176,6 @@ export function App() {
                         </button>
                       </div>
                     </div>
-
-                    {/* 2. VIER PRÄZISE KI- & BAHN-SCHIEBEREGLER (KI-Anzahl 0-30 + Außen-, Mittel-, Innenbahn-Tempo) */}
                     <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-400/60 space-y-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="font-mono text-xs font-bold text-cyan-300 uppercase">
@@ -12535,7 +13364,7 @@ export function App() {
                               return next;
                             })
                           }
-                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                             adminSettings.arcadeMachinesEnabled !== false
                               ? 'bg-emerald-400 text-slate-950 border-white shadow-[0_0_12px_rgba(16,185,129,0.45)]'
                               : 'bg-slate-900 text-slate-300 border-slate-700'
@@ -12553,28 +13382,6 @@ export function App() {
                             setAdminSettings((s) => {
                               const next = {
                                 ...s,
-                                nurseEnabled: !(s.nurseEnabled !== false),
-                              };
-                              saveAdminSettings(next);
-                              return next;
-                            })
-                          }
-                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
-                            adminSettings.nurseEnabled !== false
-                              ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_12px_rgba(34,211,238,0.45)]'
-                              : 'bg-slate-900 text-slate-300 border-slate-700'
-                          }`}
-                        >
-                          🩺 Krankenschwester / Sanitäterin:{' '}
-                          {adminSettings.nurseEnabled !== false ? 'AN' : 'AUS'}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setAdminSettings((s) => {
-                              const next = {
-                                ...s,
                                 pointsSystemEnabled: !(
                                   s.pointsSystemEnabled !== false
                                 ),
@@ -12583,7 +13390,7 @@ export function App() {
                               return next;
                             })
                           }
-                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                             adminSettings.pointsSystemEnabled !== false
                               ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_12px_rgba(251,191,36,0.45)]'
                               : 'bg-slate-900 text-slate-300 border-slate-700'
@@ -12611,7 +13418,7 @@ export function App() {
                               skateDirection: 'ccw',
                             }))
                           }
-                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                             (adminSettings.skateDirection || 'ccw') === 'ccw'
                               ? 'bg-emerald-400 text-slate-950 border-white shadow-[0_0_14px_rgba(16,185,129,0.45)]'
                               : 'bg-slate-900 text-slate-300 border-slate-700'
@@ -12630,7 +13437,7 @@ export function App() {
                               skateDirection: 'cw',
                             }))
                           }
-                          className={`min-h-[40px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                             adminSettings.skateDirection === 'cw'
                               ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.45)]'
                               : 'bg-slate-900 text-slate-300 border-slate-700'
@@ -12670,7 +13477,7 @@ export function App() {
                               key={lvl.id}
                               type="button"
                               onClick={() => setDifficulty(lvl.id)}
-                              className={`min-h-[36px] py-1.5 px-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                              className={`py-1 px-2 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                                 active
                                   ? 'bg-cyan-400 text-slate-950 border-white'
                                   : 'bg-slate-900 text-slate-300 border-slate-700'
@@ -12710,7 +13517,7 @@ export function App() {
                                 : s.sundayCliqueAutoSunday,
                             }))
                           }
-                          className={`min-h-[38px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                             isSundayCliqueActive
                               ? 'bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.5)]'
                               : 'bg-slate-900 text-slate-300 border-slate-700'
@@ -12736,7 +13543,7 @@ export function App() {
                               };
                             })
                           }
-                          className={`min-h-[38px] p-2 rounded-xl font-mono text-xs font-bold border cursor-pointer transition ${
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
                             adminSettings.sundayCliqueAutoSunday !== false
                               ? 'bg-emerald-400 text-slate-950 border-white shadow-[0_0_12px_rgba(16,185,129,0.45)]'
                               : 'bg-slate-900 text-slate-300 border-slate-700'
@@ -12756,7 +13563,7 @@ export function App() {
               {/* TAB 2: 🎛️ LICHT, DJ & KINO */}
               <div
                 className={
-                  adminTab === 'light_dj'
+                  adminTab === 'light_dj' || adminTab === 'dj'
                     ? 'grid grid-cols-1 lg:grid-cols-3 gap-3 items-stretch'
                     : 'hidden'
                 }
@@ -12973,7 +13780,8 @@ export function App() {
                       </div>
                     </div>
 
-                    {/* 📻 80er-WEBRADIO / MIX-MANAGER & PLAYLIST-UI */}
+{adminTab === 'dj' && (
+
                     <div className="p-2.5 rounded-lg bg-slate-950/95 border border-cyan-400/50 space-y-1.5">
                       <div className="flex items-center justify-between gap-1">
                         <span className="font-mono text-[11px] font-bold uppercase text-cyan-300">
@@ -13160,6 +13968,7 @@ export function App() {
                         </button>
                       </div>
                     </div>
+                    )}
 
                     {/* 🎬 AUTO-KINO-ZEITPLAN (DIREKT UNTER DER WEBRADIO-BOX, MEHRFACH-WOCHENTAGE Mo-So) */}
                     <div className="p-2 rounded-lg bg-slate-950/95 border border-cyan-400/45 space-y-1.5">
@@ -13317,7 +14126,7 @@ export function App() {
                 </div>
 
                 {/* ============================================================= */}
-                {/* SPALTE 2: 2. HALLENLICHT / NEBEL / DJ-JINGLES, 3. EVENT, 4. WARTUNG */}
+                {/* SPALTE 2: [M04] 2. HALLENLICHT / NEBEL / DJ-JINGLES, 3. EVENT, 4. WARTUNG */}
                 {/* ============================================================= */}
                 <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
                   <div className="space-y-2">
@@ -13488,7 +14297,8 @@ export function App() {
                       </div>
                     </div>
 
-                    {/* 10. ECHTE DJ-AUDIO-SAMPLES (SUPABASE BUCKET dj-samples + FREI BENENNBAR + HANDHELD-CHECKBOX) */}
+{adminTab === 'dj' && (
+
                     <div className="p-2 rounded-lg bg-slate-950/95 border border-amber-400/50 space-y-1.5">
                       <div className="flex items-center justify-between gap-1">
                         <span className="font-mono text-[10px] font-bold uppercase text-amber-300">
@@ -13733,6 +14543,7 @@ export function App() {
                         </div>
                       )}
                     </div>
+                    )}
 
                     {/* 3. HALLEN-SPIEL / EVENT & HALLENDICHTE / TEMPO */}
                     <div className="pt-1 border-t border-slate-800 space-y-1.5">
@@ -13858,10 +14669,11 @@ export function App() {
                 {/* SPALTE 3: 5. TWITCH-STREAM & DJ-PRESETS + 6. GEISTER-SKATER   */}
                 {/* ============================================================= */}
                 <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-700 space-y-2 flex flex-col justify-between">
-                  {/* 5. TWITCH-STREAM, 80ER-NEON-LEUCHTKÄSTEN & DJ-PRESETS */}
+{adminTab === 'dj' && (
+
                   <div className="space-y-1.5">
                     <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
-                      5. 80ER-NEON-LEUCHTKÄSTEN, TWITCH &amp; DJ-PRESETS
+                      [M06] 5. 80ER-NEON-LEUCHTKÄSTEN, TWITCH &amp; DJ-PRESETS
                     </h3>
 
                     {/* ZWEI RUHIGE 80ER-NEON-LEUCHTKÄSTEN ZWISCHEN DEN LAUTSPRECHER-BOXEN */}
@@ -14309,8 +15121,7 @@ export function App() {
                       />
                     </div>
                   </div>
-
-                  {/* 6. GEISTER-SKATER MANAGER (STANDARDMÄSSIG LEER) & HALLEN-CREW NAMEN */}
+                  )}
                   <div className="pt-1.5 border-t border-slate-800 space-y-1.5">
                     <div className="flex items-center justify-between">
                       <h3 className="font-mono font-bold text-[11px] uppercase text-cyan-300">
@@ -14401,7 +15212,7 @@ export function App() {
                     <div className="p-2 rounded-lg bg-slate-950/90 border border-amber-400/40 space-y-1">
                       <div className="flex items-center justify-between">
                         <span className="font-mono text-[10px] font-bold uppercase text-amber-300">
-                          👥 Hallen-Crew Namen (localStorage):
+                          [M08] 👥 Hallen-Crew Namen (localStorage):
                         </span>
                         <button
                           type="button"
@@ -14458,120 +15269,6 @@ export function App() {
                     </div>
                   </div>
 
-                  {/* 🌐 MULTIPLAYER-SPASSRAUM (LIVE-SESSION PER PEERJS) */}
-                  <div className="p-2 rounded-lg bg-slate-950/95 border border-emerald-400/50 space-y-1.5">
-                    <div className="flex items-center justify-between gap-1">
-                      <h3 className="font-mono font-bold text-[11px] uppercase text-emerald-300">
-                        🌐 MULTIPLAYER-SPASSRAUM (LIVE-SESSION)
-                      </h3>
-                      <span className="px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-400/50 font-mono text-[10px] font-bold text-emerald-200">
-                        {mpRole === 'host'
-                          ? `${remotePlayers.length + 1} Skater live in der Halle`
-                          : 'Solo-Modus (KI aktiv)'}
-                      </span>
-                    </div>
-
-                    {mpRole !== 'host' ? (
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1">
-                          {MULTIPLAYER_OUTFIT_COLORS.map((c) => (
-                            <button
-                              key={c.id}
-                              type="button"
-                              title={`Outfit-Farbe: ${c.label}`}
-                              onClick={() => setPlayerShirtColor(c.hex)}
-                              style={{ backgroundColor: c.hex }}
-                              className={`w-4 h-4 rounded-full border cursor-pointer ${
-                                playerShirtColor === c.hex
-                                  ? 'border-2 border-white scale-110'
-                                  : 'border-slate-700 opacity-75'
-                              }`}
-                            />
-                          ))}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleOpenHostRoom('palladium-86-online')}
-                          className="min-h-[34px] flex-1 py-1 px-2.5 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-mono font-bold text-[11px] cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.4)]"
-                        >
-                          🚀 Multiplayer-Raum öffnen
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        <div className="flex items-center gap-1">
-                          <input
-                            type="text"
-                            readOnly
-                            value={inviteRoomUrl}
-                            className="flex-1 px-2 py-0.5 rounded bg-slate-900 border border-emerald-500/40 font-mono text-[10px] text-emerald-200"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (
-                                typeof navigator !== 'undefined' &&
-                                navigator.clipboard
-                              ) {
-                                navigator.clipboard.writeText(inviteRoomUrl);
-                                setInviteCopied(true);
-                                window.setTimeout(
-                                  () => setInviteCopied(false),
-                                  2500
-                                );
-                              }
-                            }}
-                            className="px-2 py-0.5 rounded bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap"
-                          >
-                            {inviteCopied
-                              ? '✅ Link kopiert!'
-                              : '📋 Einladungs-Link kopieren'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleCloseHostRoom}
-                            className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-[10px] cursor-pointer whitespace-nowrap"
-                          >
-                            🛑 Raum schließen
-                          </button>
-                        </div>
-
-                        {/* Live Visitor List + Kick Button */}
-                        <div className="flex flex-wrap items-center gap-1 max-h-12 overflow-y-auto">
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-400/50 font-mono text-[10px] text-emerald-200">
-                            ★ {playerName || 'Host'} (Host)
-                          </span>
-                          {remotePlayers.map((rp) => (
-                            <span
-                              key={rp.peerId}
-                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900 border border-cyan-400/50 font-mono text-[10px] text-cyan-100"
-                            >
-                              <span
-                                className="w-2 h-2 rounded-full inline-block"
-                                style={{
-                                  backgroundColor: rp.shirtColor || '#00f0ff',
-                                }}
-                              />
-                              {rp.name}
-                              <button
-                                type="button"
-                                title="Besucher aus dem Raum werfen (Kick)"
-                                onClick={() => handleKickGuest(rp.peerId)}
-                                className="ml-0.5 px-1 rounded bg-rose-900 hover:bg-rose-700 text-rose-200 text-[9px] font-bold cursor-pointer"
-                              >
-                                Kick
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {mpNotice && (
-                      <div className="text-[9px] font-mono text-cyan-300 truncate">
-                        {mpNotice}
-                      </div>
-                    )}
-                  </div>
                 </div>
               </div>
 
@@ -14594,7 +15291,7 @@ export function App() {
                 >
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="font-mono font-bold text-xs uppercase text-fuchsia-300">
-                      🎨 BAHN-STYLES &amp; EPOCHEN-LOOKS (VORSCHAU &amp; FREISCHALTUNG)
+                      [M12] 🎨 BAHN-STYLES &amp; EPOCHEN-LOOKS (VORSCHAU &amp; FREISCHALTUNG)
                     </h3>
                     <span className="text-[11px] text-slate-400">
                       Look auswählen – zuerst nur für dich testen oder dauerhaft
@@ -14819,7 +15516,7 @@ export function App() {
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-mono font-bold text-xs uppercase text-cyan-300">
-                      📊 HALLEN-STATISTIK (EXKLUSIV IM ADMIN-BEREICH • SUPABASE CLOUD)
+                      [M09] 📊 HALLEN-STATISTIK (EXKLUSIV IM ADMIN-BEREICH • SUPABASE CLOUD)
                     </span>
                     <div className="flex items-center gap-1.5">
                       {!confirmCloudStatsReset ? (
@@ -15457,7 +16154,7 @@ export function App() {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <span className="font-mono text-[11px] font-bold uppercase text-cyan-300">
-                            📱 4. Team-Rollen-Handhelds &amp; QR-Code-Generator (?rolle=dj | ?rolle=licht | ?rolle=presse)
+                            [M11] 📱 4. Team-Rollen-Handhelds &amp; QR-Code-Generator (?rolle=dj | ?rolle=licht | ?rolle=presse)
                           </span>
                           <p className="text-[10px] font-mono text-slate-400">
                             Direkt scanbare QR-Codes für Smartphone &amp; Tablet (DJ: DJ-PALLADIUM, Licht: LICHT-PALLADIUM, Presse: PRESSE-PALLADIUM):
@@ -16759,7 +17456,7 @@ export function App() {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2 flex-wrap">
                         <h3 className="font-mono font-bold text-xs uppercase text-amber-300">
-                          🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER &amp; ROTE DEBUG-HITBOXEN)
+                          [M13] 🛠️ BAUMENÜ (RAUM-MODULE, KI-SKATER &amp; ROTE DEBUG-HITBOXEN)
                         </h3>
                       <span className="text-[10px] font-mono text-slate-400">
                         Maus-Drag-&amp;-Drop direkt auf dem Spielfeld • Pfeiltasten{' '}
@@ -17028,7 +17725,7 @@ export function App() {
                     <div className="p-2 rounded-lg bg-slate-950/90 border border-pink-500/40 space-y-1.5">
                       <div className="flex items-center justify-between text-pink-300 font-bold">
                         <span>
-                          🚧 Hallen-Bereiche einzeln sperrbar (80er-Neon-Banner + Chrom-Aufsteller):
+                          [M14] 🚧 Hallen-Bereiche einzeln sperrbar (80er-Neon-Banner + Chrom-Aufsteller):
                         </span>
                         <span className="text-[9px] text-cyan-300">
                           Sperrt Durchfahrt &amp; [E]
@@ -17353,7 +18050,7 @@ export function App() {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <h3 className="font-bold text-sm uppercase text-amber-300">
-                          👑 RÄNGE, HALLEN-PUNKTE (XP) &amp; GRAUER 80ER-PAPIERFÜHRERSCHEIN
+                          [M15] 👑 RÄNGE, HALLEN-PUNKTE (XP) &amp; GRAUER 80ER-PAPIERFÜHRERSCHEIN
                         </h3>
                         <p className="text-[10.5px] text-slate-400">
                           Passe die 6 Rang-Stufen bis „👑 König der Halle“ an oder vergib Ehren-Punkte, Pixel &amp; Prüfungs-Stempel:
@@ -17377,6 +18074,96 @@ export function App() {
                       </div>
                     )}
 
+                    {/* 🤖 ZENTRALE KI- & KRANKENSCHWESTER-STEUERUNG IN TAB 5 */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/90 border border-slate-700/80 text-[11px] text-slate-300">
+                      <span className="font-bold text-amber-300">🧩 Tab-5-Module (Reihenfolge wird gespeichert)</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const def: Array<"ai_nurse" | "rank_xp"> = ["ai_nurse", "rank_xp"];
+                          setTab5ModuleOrder(def);
+                          try { window.localStorage.setItem("palladium86_tab5_module_order_v1", JSON.stringify(def)); } catch {}
+                        }}
+                        className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 text-[10px] font-bold text-slate-200 cursor-pointer"
+                      >
+                        Standard-Reihenfolge
+                      </button>
+                    </div>
+                    <div className="space-y-3">
+                      {tab5ModuleOrder.map((modId, modIdx) => {
+                        const moveModule = (dir: -1 | 1) => {
+                          const targetIdx = modIdx + dir;
+                          if (targetIdx < 0 || targetIdx >= tab5ModuleOrder.length) return;
+                          const nextOrder = [...tab5ModuleOrder];
+                          const [picked] = nextOrder.splice(modIdx, 1);
+                          nextOrder.splice(targetIdx, 0, picked);
+                          setTab5ModuleOrder(nextOrder);
+                          try { window.localStorage.setItem("palladium86_tab5_module_order_v1", JSON.stringify(nextOrder)); } catch {}
+                        };
+                        const controls = (
+                          <div className="flex items-center justify-end gap-1 mb-1.5">
+                            <button
+                              type="button"
+                              disabled={modIdx === 0}
+                              onClick={() => moveModule(-1)}
+                              title="Modul nach oben schieben"
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-35 border border-slate-600 text-[10px] font-bold text-cyan-200 cursor-pointer disabled:cursor-not-allowed"
+                            >
+                              ↑ Hoch
+                            </button>
+                            <button
+                              type="button"
+                              disabled={modIdx === tab5ModuleOrder.length - 1}
+                              onClick={() => moveModule(1)}
+                              title="Modul nach unten schieben"
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-35 border border-slate-600 text-[10px] font-bold text-cyan-200 cursor-pointer disabled:cursor-not-allowed"
+                            >
+                              ↓ Runter
+                            </button>
+                          </div>
+                        );
+                        if (modId === "ai_nurse") {
+                          return (
+                            <div key="ai_nurse" className="space-y-1">
+                              {controls}
+                    <div className="p-3 rounded-xl bg-slate-950/95 border border-cyan-400/70 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div><h4 className="font-bold text-xs uppercase text-cyan-300">🤖 KI-SKATER, KRANKENSCHWESTER &amp; GEISTER-SKATER (ZENTRAL)</h4><p className="text-[10px] text-slate-400">Alle KI-Regler, Spur-Tempos, Krankenschwester &amp; Geister-Skater gesammelt in Tab 5:</p></div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                            setAdminSettings((s) => {
+                              const next = {
+                                ...s,
+                                nurseEnabled: !(s.nurseEnabled !== false),
+                              };
+                              saveAdminSettings(next);
+                              return next;
+                            })
+                          }
+                          className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border cursor-pointer transition ${
+                            adminSettings.nurseEnabled !== false
+                              ? 'bg-cyan-400 text-slate-950 border-white shadow-[0_0_12px_rgba(34,211,238,0.45)]'
+                              : 'bg-slate-900 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          🩺 Krankenschwester / Sanitäterin:{' '}
+                          {adminSettings.nurseEnabled !== false ? 'AN' : 'AUS'}
+                        </button>
+</div>
+                      </div>
+
+                    {/* 2. VIER PRÄZISE KI- & BAHN-SCHIEBEREGLER (KI-Anzahl 0-30 + Außen-, Mittel-, Innenbahn-Tempo) */}
+
+                  {/* 6. GEISTER-SKATER MANAGER (STANDARDMÄSSIG LEER) & HALLEN-CREW NAMEN */}
+                    </div>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div key="rank_xp" className="space-y-1">
+                            {controls}
                     {/* Aktueller Rang & Papieroptik Übersicht */}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
                       <div className="p-3 rounded-xl bg-slate-950/90 border border-amber-400/50 space-y-1">
@@ -17481,6 +18268,10 @@ export function App() {
                           </button>
                         </div>
                       </div>
+                    </div>
+                          </div>
+                        );
+                      })}
                     </div>
 
                     {/* 6 XP-Schwellenwerte anpassen */}
@@ -17620,7 +18411,7 @@ export function App() {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <h3 className="font-bold text-sm uppercase text-emerald-300">
-                            🟢 LIVE-STATUS-ÜBERSICHT (LAMPEN- &amp; DIAGNOSE-COCKPIT • {APP_VERSION_LABEL})
+                            [M17] 🟢 LIVE-STATUS-ÜBERSICHT (LAMPEN- &amp; DIAGNOSE-COCKPIT • {APP_VERSION_LABEL})
                           </h3>
                           <p className="text-[10.5px] text-slate-400">
                             Alle aktiven Hallen-Modi, KI-Parameter, Schalter und Ankündigungen auf einen Blick – klicke direkt auf eine Status-Lampe zum Umschalten!
@@ -17746,6 +18537,12 @@ export function App() {
                                 label: '🏆 Punktesystem (XP & Popups)',
                                 isOn:
                                   adminSettings.pointsSystemEnabled !== false,
+                              },
+                              {
+                                key: 'alphaStartScreenEnabled' as const,
+                                label: '🧪 Alpha-Test-Startseite (Schlank: Name + PC/Tablet/Handy)',
+                                isOn:
+                                  Boolean(adminSettings.alphaStartScreenEnabled),
                               },
                               {
                                 key: 'cleaningLadyEnabled' as const,
@@ -18593,11 +19390,38 @@ export function App() {
         {/* ===================================================================== */}
         {/* 11B. EIGENE DJ-KANZEL (80ER-MISCHPULT MIT 3x3-SAMPLER-LAUNCHPAD)      */}
         {/* ===================================================================== */}
+
         {showDjBoothModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-3 sm:p-5 backdrop-blur-md">
-            <div className="w-full max-w-6xl max-h-[93vh] overflow-y-auto rounded-2xl bg-gradient-to-b from-[#171128] via-[#0E0B1A] to-[#121629] border-2 border-fuchsia-400 shadow-[0_0_65px_rgba(232,121,249,0.45)] p-4 sm:p-5 text-white font-mono space-y-4">
+          <div
+            className={
+              djAsDraggableModule
+                ? "fixed z-50 pointer-events-none"
+                : "fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-3 sm:p-5 backdrop-blur-md"
+            }
+            style={
+              djAsDraggableModule
+                ? { left: `${djModulePos.x}px`, top: `${djModulePos.y}px` }
+                : undefined
+            }
+          >
+            <div
+              className={
+                djAsDraggableModule
+                  ? "pointer-events-auto w-[min(92vw,72rem)] max-h-[85vh] overflow-y-auto rounded-2xl bg-gradient-to-b from-[#171128] via-[#0E0B1A] to-[#121629] border-2 border-amber-400 shadow-[0_0_55px_rgba(251,191,36,0.35)] p-4 sm:p-5 text-white font-mono space-y-4"
+                  : "w-full max-w-6xl max-h-[93vh] overflow-y-auto rounded-2xl bg-gradient-to-b from-[#171128] via-[#0E0B1A] to-[#121629] border-2 border-fuchsia-400 shadow-[0_0_65px_rgba(232,121,249,0.45)] p-4 sm:p-5 text-white font-mono space-y-4"
+              }
+            >
               {/* Top 80s Console Header + ON AIR Badge */}
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-fuchsia-500/40 pb-3">
+              <div
+                onPointerDown={handleDjHeaderPointerDown}
+                className={`flex flex-wrap items-center justify-between gap-3 border-b-2 border-fuchsia-500/40 pb-3 select-none ${
+                  djAsDraggableModule
+                    ? isDjDragging
+                      ? "cursor-grabbing bg-amber-500/10 rounded-xl px-2 pt-1"
+                      : "cursor-grab hover:bg-amber-500/5 rounded-xl px-2 pt-1"
+                    : ""
+                }`}
+              >
                 <div className="flex items-center gap-3 flex-wrap">
                   <span className="px-3 py-1 rounded-md bg-rose-600 text-white font-black text-xs tracking-widest border border-white shadow-[0_0_16px_rgba(244,63,94,0.85)] animate-pulse">
                     🔴 ON AIR: {(adminSettings.activeDjName || DEFAULT_DJ_NAME).toUpperCase()}
@@ -18611,7 +19435,19 @@ export function App() {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setDjAsDraggableModule((prev) => !prev)}
+                    aria-pressed={djAsDraggableModule}
+                    className={`px-3 py-1.5 rounded-lg border text-xs font-bold cursor-pointer transition ${
+                      djAsDraggableModule
+                        ? "bg-amber-400 text-slate-950 border-white shadow-[0_0_14px_rgba(251,191,36,0.55)]"
+                        : "bg-slate-800 hover:bg-slate-700 border-fuchsia-400/50 text-fuchsia-200"
+                    }`}
+                  >
+                    {djAsDraggableModule ? "🧲 Modul-Modus: AN" : "🧲 Als Modul lösen"}
+                  </button>
                   {isAdminUnlocked && (
                     <button
                       type="button"
@@ -18637,6 +19473,32 @@ export function App() {
               {sampleUploadNotice && (
                 <div className="px-3 py-1.5 rounded-lg bg-emerald-950 border border-emerald-400 text-emerald-200 text-xs font-bold">
                   {sampleUploadNotice}
+                </div>
+              )}
+
+              {djAsDraggableModule && (
+                <div className="px-3 py-1.5 rounded-lg bg-amber-950/80 border border-amber-400/80 text-amber-200 text-xs font-bold flex items-center justify-between gap-2 flex-wrap">
+                  <span>Modul-Modus aktiv: Kopfzeile packen und Kasten frei hinschieben (Position wird gespeichert).</span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const resetPos = { x: 24, y: 72 };
+                        setDjModulePos(resetPos);
+                        try { window.localStorage.setItem("palladium86_dj_module_pos_v1", JSON.stringify(resetPos)); } catch {}
+                      }}
+                      className="underline text-amber-100 hover:text-white cursor-pointer"
+                    >
+                      Pos. Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDjAsDraggableModule(false)}
+                      className="underline text-amber-100 hover:text-white cursor-pointer"
+                    >
+                      Ins Modal
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -20507,22 +21369,18 @@ export function App() {
                     <span>📰 Palladium Kurier lesen</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowPortalScreen(false);
-                      if (isAdminUnlocked && !isTesterAccount) {
+                  {isAdminUnlocked && !isTesterAccount && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowPortalScreen(false);
                         setShowAdminTerminal(true);
-                      } else {
-                        setPinInput('');
-                        setPinError(null);
-                        setShowAdminPinModal(true);
-                      }
-                    }}
-                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-400/60 text-cyan-200 font-mono text-xs font-bold cursor-pointer transition flex items-center gap-1.5"
-                  >
-                    <span>⚙️ Admin-Cockpit</span>
-                  </button>
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-400/60 text-cyan-200 font-mono text-xs font-bold cursor-pointer transition flex items-center gap-1.5"
+                    >
+                      <span>⚙️ Admin-Cockpit</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-3">
@@ -20753,3 +21611,16 @@ function SmartphoneTouchGamepadOverlay({
 }
 
 export default App;
+
+
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).__palladiumSyncHelpers = {
+    loginOrSyncCloudAccountByName,
+    subscribeToCloudPlayerProfile,
+    fetchCloudRoomSettings,
+    upsertCloudRoomSettings,
+    subscribeToCloudRoomSettings,
+    WELCOME_ALPHA_BADGE,
+    DEFAULT_EVENT_ANNOUNCEMENT,
+  };
+}

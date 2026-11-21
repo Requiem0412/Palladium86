@@ -2973,7 +2973,8 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
         window.innerWidth <= 1024 &&
         !propsRef.current.buildModeEnabled
       ) {
-        const followZoom = window.innerWidth < 640 ? 1.56 : 1.32;
+        const isPortraitMobile = window.innerHeight > window.innerWidth && window.innerWidth < 768;
+    const followZoom = isPortraitMobile ? 1.85 : (window.innerWidth < 640 ? 1.56 : 1.32);
         const halfW = WORLD_WIDTH / (2 * followZoom);
         const halfH = WORLD_HEIGHT / (2 * followZoom);
         const camX = Math.max(halfW, Math.min(WORLD_WIDTH - halfW, player.x));
@@ -3742,6 +3743,15 @@ export const RollerArenaEngine: React.FC<RollerArenaEngineProps> = ({
     let smoothedDt = 1 / 60;
 
     const stepFrame = (now: number) => {
+      if (typeof document !== 'undefined' && document.hidden) {
+        lastTime = now;
+        animFrameId = requestAnimationFrame(stepFrame);
+        return;
+      }
+      if (isMobileOrTV && now - lastTime < 31) {
+        animFrameId = requestAnimationFrame(stepFrame);
+        return;
+      }
       const rawDt = Math.max(0.001, Math.min(0.05, (now - lastTime) / 1000));
       smoothedDt = smoothedDt + (rawDt - smoothedDt) * 0.25;
       const dt = smoothedDt;
@@ -14438,12 +14448,15 @@ function renderHallTourZonesAndStaff(
   ctx.fillStyle = '#34d399';
   ctx.font = 'bold 11.5px "Outfit", sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(
+  const isMobileLandscapeBannerHide = typeof window !== 'undefined' && window.innerWidth <= 1024 && window.innerWidth > window.innerHeight;
+    if (!isMobileLandscapeBannerHide) {
+ctx.fillText(
     'PRO-SHOP [E]',
     proShopBounds.x + proShopBounds.width / 2,
     proShopBounds.y + proShopBounds.height - 10
   );
 
+  }
   renderCharacterSprite(ctx, now, {
     x: proShopBounds.x + proShopBounds.width / 2 + Math.sin(now * 0.0018) * 10,
     y: proShopBounds.y + 52,
@@ -14525,12 +14538,14 @@ function renderHallTourZonesAndStaff(
   ctx.fillStyle = '#7dd3fc';
   ctx.font = 'bold 11.5px "Outfit", sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(
+if (!isMobileLandscapeBannerHide) {
+ctx.fillText(
     'ROLLSCHUHVERLEIH',
     rentalBounds.x + rentalBounds.width / 2,
     rentalCounter.y + 18
   );
 
+  }
   const rentalInteractX =
     proShopAndRental.rentalInteractX ??
     rentalBounds.x + rentalBounds.width / 2;
@@ -14547,13 +14562,15 @@ function renderHallTourZonesAndStaff(
   ctx.fillStyle = !hasSkatesEquipped ? '#fde047' : '#7dd3fc';
   ctx.font = 'bold 10px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(
+    if (!isMobileLandscapeBannerHide) {
+ctx.fillText(
     !hasSkatesEquipped && drinkChipAvailable
       ? '🛼 LEIH-SKATES HOLEN [E]'
       : '🛼 LEIH-SKATES HOLEN [E]',
     rentalInteractX,
     rentalCounter.y - 7
   );
+  }
   ctx.restore();
 
   // 2 ANIMATED STAFF MEMBERS IN THE CLEAR AISLE IN FRONT OF THE BACK-WALL SHOE SHELVES:
@@ -18102,6 +18119,15 @@ function renderConcertStageSpotlightOverlay(
   }
 
   ctx.restore();
+}
+
+
+
+
+if (typeof window !== 'undefined') {
+  (window as unknown as Record<string, unknown>).__palladiumThrowBallspiel = () => {
+    window.dispatchEvent(new CustomEvent('palladium:ballspiel-throw'));
+  };
 }
 
 

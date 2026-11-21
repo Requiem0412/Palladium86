@@ -1019,3 +1019,331 @@ export async function uploadDjSampleToCloud(
   });
 }
 
+export function setCloudPlayerId(playerId: string): void {
+  if (typeof window === 'undefined' || !playerId.trim()) return;
+  try {
+    window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, playerId.trim());
+  } catch {
+    // ignore
+  }
+}
+
+export async function loginOrSyncCloudAccountByName(skaterName: string): Promise<{
+  player_id: string;
+  name: string;
+  outfit_color?: string;
+  settings?: Record<string, unknown>;
+  highscore?: number;
+  isExistingCloudAccount: boolean;
+} | null> {
+  if (!supabase) return null;
+  const cleanName = skaterName.trim();
+  if (!cleanName) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from('players')
+      .select('player_id, id, name, outfit_color, settings, highscore')
+      .ilike('name', cleanName)
+      .order('updated_at', { ascending: false })
+      .limit(1);
+
+    if (!error && Array.isArray(data) && data.length > 0) {
+      const row = data[0] as Record<string, unknown>;
+      const resolvedId = String(
+        row.player_id || row.id || getOrCreateCloudPlayerId()
+      );
+      setCloudPlayerId(resolvedId);
+      return {
+        player_id: resolvedId,
+        name: String(row.name || cleanName),
+        outfit_color:
+          typeof row.outfit_color === 'string' ? row.outfit_color : undefined,
+        settings:
+          row.settings && typeof row.settings === 'object'
+            ? (row.settings as Record<string, unknown>)
+            : undefined,
+        highscore:
+          typeof row.highscore === 'number' ? row.highscore : undefined,
+        isExistingCloudAccount: true,
+      };
+    }
+
+    const newPlayerId = getOrCreateCloudPlayerId();
+    return {
+      player_id: newPlayerId,
+      name: cleanName,
+      isExistingCloudAccount: false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function subscribeToCloudPlayerProfile(
+  playerId: string,
+  onUpdate: (profile: {
+    name?: string;
+    outfit_color?: string;
+    settings?: Record<string, unknown>;
+    highscore?: number;
+  }) => void
+): () => void {
+  if (!supabase || !playerId) return () => {};
+  let channel: RealtimeChannel | null = null;
+  try {
+    channel = supabase
+      .channel(`palladium-player-sync-${playerId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'players',
+          filter: `player_id=eq.${playerId}`,
+        },
+        (payload) => {
+          if (payload.new && typeof payload.new === 'object') {
+            onUpdate(
+              payload.new as {
+                name?: string;
+                outfit_color?: string;
+                settings?: Record<string, unknown>;
+                highscore?: number;
+              }
+            );
+          }
+        }
+      )
+      .subscribe();
+  } catch {
+    // ignore
+  }
+  return () => {
+    if (channel && supabase) {
+      try {
+        supabase.removeChannel(channel);
+      } catch {
+        // ignore
+      }
+    }
+  };
+}
+
+export function roomCodeToSettingsRowId(roomCode?: string | null): number {
+  const clean = (roomCode || '').trim().toUpperCase();
+  if (!clean || clean === 'PALLADIUM-86-ONLINE' || clean === 'PUBLIC') {
+    return 1;
+  }
+  let hash = 2166136261;
+  for (let i = 0; i < clean.length; i++) {
+    hash ^= clean.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return 1000 + (Math.abs(hash) % 899999);
+}
+
+export async function upsertCloudRoomSettings<TControls>(
+  roomCode: string | null | undefined,
+  controls: TControls,
+  announcement?: string | null
+): Promise<void> {
+  if (!supabase) return;
+  const rowId = roomCodeToSettingsRowId(roomCode);
+  try {
+    const row: Record<string, unknown> = {
+      id: rowId,
+      controls,
+      updated_at: new Date().toISOString(),
+    };
+    if (announcement !== undefined) {
+      row.announcement = announcement;
+    }
+    await supabase.from('hall_settings').upsert(row, { onConflict: 'id' });
+  } catch {
+    // ignore
+  }
+}
+
+export async function fetchCloudRoomSettings<
+  TControls = Record<string, unknown>
+>(roomCode?: string | null): Promise<CloudHallSettingsRow<TControls> | null> {
+  if (!supabase) return null;
+  const rowId = roomCodeToSettingsRowId(roomCode);
+  try {
+    const { data, error } = await supabase
+      .from('hall_settings')
+      .select('id, controls, announcement, updated_at')
+      .eq('id', rowId)
+      .maybeSingle();
+    if (!error && data) {
+      return data as CloudHallSettingsRow<TControls>;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export function subscribeToCloudRoomSettings<
+  TControls = Record<string, unknown>
+>(
+  roomCode: string | null | undefined,
+  onUpdate: (row: CloudHallSettingsRow<TControls>) => void
+): () => void {
+  if (!supabase) return () => {};
+  const rowId = roomCodeToSettingsRowId(roomCode);
+  let channel: RealtimeChannel | null = null;
+  try {
+    channel = supabase
+      .channel(`palladium-room-settings-${rowId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'hall_settings',
+          filter: `id=eq.${rowId}`,
+        },
+        (payload) => {
+          if (payload.new && typeof payload.new === 'object') {
+            onUpdate(payload.new as CloudHallSettingsRow<TControls>);
+          }
+        }
+      )
+      .subscribe();
+  } catch {
+    // ignore
+  }
+  return () => {
+    if (channel && supabase) {
+      try {
+        supabase.removeChannel(channel);
+      } catch {
+        // ignore
+      }
+    }
+  };
+}
+
+export type VeteranRinkCounts = { palladium: number; rollerland: number; other: number };
+export async function fetchVeteranRinkVotes(): Promise<VeteranRinkCounts> {
+  const fallback: VeteranRinkCounts = { palladium: 0, rollerland: 0, other: 0 };
+  if (!supabase) return fallback;
+  try {
+    const { data } = await supabase.from("hall_settings").select("controls").eq("id", 1).maybeSingle();
+    const v = (data?.controls as Record<string, any> | undefined)?.veteranRinkVotes;
+    if (v && typeof v === "object") {
+      return { palladium: Number(v.palladium) || 0, rollerland: Number(v.rollerland) || 0, other: Number(v.other) || 0 };
+    }
+  } catch {}
+  return fallback;
+}
+export async function recordVeteranRinkVote(choice: "palladium" | "rollerland" | "other"): Promise<VeteranRinkCounts> {
+  const current = await fetchVeteranRinkVotes();
+  const next: VeteranRinkCounts = { ...current, [choice]: (current[choice] || 0) + 1 };
+  if (!supabase) return next;
+  try {
+    const { data } = await supabase.from("hall_settings").select("controls").eq("id", 1).maybeSingle();
+    const prevControls = (data?.controls && typeof data.controls === "object") ? data.controls : {};
+    await supabase.from("hall_settings").upsert({ id: 1, controls: { ...prevControls, veteranRinkVotes: next }, updated_at: new Date().toISOString() }, { onConflict: "id" });
+  } catch {}
+  return next;
+}
+
+export type VisitorGenderKey = "male" | "female" | "diverse";
+export type VisitorGenderCounts = { male: number; female: number; diverse: number };
+export type FlyerDemographicsSummary = {
+  genders: VisitorGenderCounts;
+  birthYears: Record<string, number>;
+};
+
+export async function fetchFlyerDemographics(): Promise<FlyerDemographicsSummary> {
+  const fallback: FlyerDemographicsSummary = {
+    genders: { male: 0, female: 0, diverse: 0 },
+    birthYears: {},
+  };
+  if (!supabase) return fallback;
+  try {
+    const { data } = await supabase.from("hall_settings").select("controls").eq("id", 1).maybeSingle();
+    const controls = data?.controls as Record<string, any> | undefined;
+    const g = controls?.visitorGenders;
+    const by = controls?.visitorBirthYears;
+    return {
+      genders: {
+        male: Number(g?.male) || 0,
+        female: Number(g?.female) || 0,
+        diverse: Number(g?.diverse) || 0,
+      },
+      birthYears: by && typeof by === "object" ? by : {},
+    };
+  } catch {}
+  return fallback;
+}
+
+export async function recordVisitorGender(choice: VisitorGenderKey): Promise<VisitorGenderCounts> {
+  const current = await fetchFlyerDemographics();
+  const next: VisitorGenderCounts = {
+    ...current.genders,
+    [choice]: (current.genders[choice] || 0) + 1,
+  };
+  if (!supabase) return next;
+  try {
+    const { data } = await supabase.from("hall_settings").select("controls").eq("id", 1).maybeSingle();
+    const prevControls = data?.controls && typeof data?.controls === "object" ? data.controls : {};
+    await supabase.from("hall_settings").upsert(
+      { id: 1, controls: { ...prevControls, visitorGenders: next }, updated_at: new Date().toISOString() },
+      { onConflict: "id" }
+    );
+  } catch {}
+  return next;
+}
+
+export async function recordVisitorBirthYear(twoDigitYear: string): Promise<Record<string, number>> {
+  const clean = twoDigitYear.replace(/[^0-9]/g, "").slice(0, 2);
+  const current = await fetchFlyerDemographics();
+  if (clean.length !== 2) return current.birthYears;
+  const next: Record<string, number> = {
+    ...current.birthYears,
+    [clean]: (Number(current.birthYears[clean]) || 0) + 1,
+  };
+  if (!supabase) return next;
+  try {
+    const { data } = await supabase.from("hall_settings").select("controls").eq("id", 1).maybeSingle();
+    const prevControls = data?.controls && typeof data?.controls === "object" ? data.controls : {};
+    await supabase.from("hall_settings").upsert(
+      { id: 1, controls: { ...prevControls, visitorBirthYears: next }, updated_at: new Date().toISOString() },
+      { onConflict: "id" }
+    );
+  } catch {}
+  return next;
+}
+
+export async function fetchVisitorReferrers(): Promise<Record<string, number>> {
+  if (!supabase) return {};
+  try {
+    const { data } = await supabase.from("hall_settings").select("controls").eq("id", 1).maybeSingle();
+    const refs = (data?.controls as Record<string, any> | undefined)?.visitorReferrers;
+    return refs && typeof refs === "object" ? refs : {};
+  } catch {}
+  return {};
+}
+
+export async function recordVisitorReferrer(sourceLabel: string): Promise<Record<string, number>> {
+  const clean = (sourceLabel || "Direkt / Messenger").trim().slice(0, 64) || "Direkt / Messenger";
+  const current = await fetchVisitorReferrers();
+  const next: Record<string, number> = {
+    ...current,
+    [clean]: (Number(current[clean]) || 0) + 1,
+  };
+  if (!supabase) return next;
+  try {
+    const { data } = await supabase.from("hall_settings").select("controls").eq("id", 1).maybeSingle();
+    const prevControls = data?.controls && typeof data.controls === "object" ? data.controls : {};
+    await supabase.from("hall_settings").upsert(
+      { id: 1, controls: { ...prevControls, visitorReferrers: next }, updated_at: new Date().toISOString() },
+      { onConflict: "id" }
+    );
+  } catch {}
+  return next;
+}

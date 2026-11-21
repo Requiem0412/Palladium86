@@ -893,6 +893,12 @@ export const PocketPdaDrawer: React.FC<PocketPdaDrawerProps> = ({
             </div>
           )}
         </div>
+        {/* Zentrale Versionsanzeige */}
+        <div className="px-3 py-2 bg-[#050810] border-t border-slate-800 flex items-center justify-end">
+          <span className="font-mono text-[10px] text-slate-400 tracking-wider">
+            PALLADIUM 86 • {APP_VERSION_LABEL}
+          </span>
+        </div>
       </div>
     </div>
   );
